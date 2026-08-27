@@ -39,6 +39,9 @@ describe("Codex value and workspace boundaries", () => {
         CODEX_HOME: codexHome,
         PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
       })).toBe(realpathSync.native(workspace));
+      expect(validateCodexWorkingDirectory(join(workspaceRoot, "future-run"), {
+        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+      })).toBe(join(realpathSync.native(workspaceRoot), "future-run"));
 
       expect(() => validateCodexWorkingDirectory(parse(fixture).root, {}))
         .toThrow("filesystem root");

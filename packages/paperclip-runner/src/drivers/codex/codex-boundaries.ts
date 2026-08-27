@@ -1,5 +1,13 @@
 import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, parse, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 import {
   CODEX_BLOCK_TOOL_NAME,
@@ -25,18 +33,14 @@ export function validateCodexWorkingDirectory(
     throw new Error("Codex working directory is required");
   }
   const requested = resolve(workingDirectory);
-  let resolved: string;
+  const resolved = canonicalPathWithMissingTail(requested);
   try {
-    resolved = realpathSync.native(requested);
+    if (!statSync(resolved).isDirectory()) {
+      throw new Error("Codex working directory must be a directory");
+    }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new Error("Codex working directory does not exist");
-    }
-    throw error;
-  }
-  if (!statSync(resolved).isDirectory()) {
-    throw new Error("Codex working directory must be a directory");
+    if (code !== "ENOENT") throw error;
   }
   if (resolved === parse(resolved).root) {
     throw new Error("Codex working directory cannot be a filesystem root");
@@ -74,12 +78,22 @@ export function validateCodexWorkingDirectory(
 function canonicalConfiguredPath(value: string | undefined): string | null {
   const configured = value?.trim();
   if (!configured) return null;
-  const resolved = resolve(configured);
-  try {
-    return realpathSync.native(resolved);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolved;
-    throw error;
+  return canonicalPathWithMissingTail(resolve(configured));
+}
+
+function canonicalPathWithMissingTail(path: string): string {
+  let cursor = path;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync.native(cursor), ...missing);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) return resolve(path);
+      missing.unshift(basename(cursor));
+      cursor = parent;
+    }
   }
 }
 
