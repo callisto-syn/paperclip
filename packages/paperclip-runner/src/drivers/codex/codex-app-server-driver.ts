@@ -1023,8 +1023,7 @@ class CodexHarnessSession implements HarnessSession {
     }
     this.#terminal =
       this.#conversationMode === "task"
-      && this.#terminalTurns.size > 0
-      && this.#result !== null;
+      && this.#terminalTurns.size > 0;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );

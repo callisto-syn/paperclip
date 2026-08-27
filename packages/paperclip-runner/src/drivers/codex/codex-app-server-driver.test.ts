@@ -3269,6 +3269,48 @@ describe("Codex app-server Codex driver", () => {
     ).toBe(false);
   });
 
+  it("keeps a result-less task terminal after recovery", async () => {
+    const first = new FakeCodexTransport();
+    const second = new FakeCodexTransport();
+    second.readResponse = {
+      thread: {
+        id: "thread-1",
+        sessionId: "provider-session-1",
+        cwd: "/workspace",
+        turns: [{ id: "turn-1", status: "completed", items: [] }],
+      },
+    };
+    const driver = makeDriver([first, second]);
+    const original = await driver.openSession({
+      runId: "run-result-less-terminal",
+      normalizedSessionId: "normalized-result-less-terminal",
+      workingDirectory: "/workspace",
+    });
+    await original.startTurn({ message: { role: "user", text: "Complete." } });
+    first.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "completed", items: [] },
+    });
+    await collectUntilTerminal(original.events());
+    const snapshot = await original.snapshot();
+    expect(snapshot).toMatchObject({
+      activeTurnId: null,
+      semanticResult: null,
+      terminalTurns: [{ turnId: "turn-1" }],
+    });
+    await original.close({ reason: "transport lost after terminal" });
+
+    const recovery = await driver.recoverSession?.(snapshot);
+    const recovered = recovery?.session;
+    expect(recovered).toBeDefined();
+    await recovered!.reconcile?.();
+    await expect(recovered!.startTurn({
+      message: { role: "user", text: "Do not execute twice." },
+    })).rejects.toThrow("session cannot start another turn");
+    expect(second.calls.some((call) => call.method === "turn/start")).toBe(false);
+    await recovered!.close({ reason: "test complete" });
+  });
+
   it("fails recovery explicitly when the persisted active turn is missing or replaced", async () => {
     for (const testCase of [
       {
