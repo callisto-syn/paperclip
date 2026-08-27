@@ -267,7 +267,7 @@ class DeterministicHarnessSession implements HarnessSession {
       runId: this.#input.runId,
       normalizedSessionId: this.#input.normalizedSessionId,
       activeTurnId: this.#active ? this.#turnId : null,
-      lastSourceSequence: this.#events.length,
+      lastSourceSequence: this.#nextSourceSeq - 1,
       semanticResult: this.#semanticResult === null || this.#turnId === null
         ? null
         : {

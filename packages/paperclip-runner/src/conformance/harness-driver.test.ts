@@ -49,7 +49,15 @@ describe("harness-driver conformance V1", () => {
     const snapshot = await session.snapshot();
     expect(snapshot).toMatchObject({ activeTurnId: turnId, lastSourceSequence: 2 });
 
-    const recovery = await driver.recoverSession(snapshot);
+    const firstRecovery = await driver.recoverSession(snapshot);
+    expect(firstRecovery.recovered).toBe(true);
+    expect(firstRecovery.session).toBeDefined();
+    const repeatedSnapshot = await firstRecovery.session!.snapshot();
+    expect(repeatedSnapshot).toMatchObject({
+      activeTurnId: turnId,
+      lastSourceSequence: 2,
+    });
+    const recovery = await driver.recoverSession(repeatedSnapshot);
     expect(recovery.recovered).toBe(true);
     expect(recovery.session).toBeDefined();
     const recovered = recovery.session!;
@@ -65,6 +73,7 @@ describe("harness-driver conformance V1", () => {
       [4, "run.terminal"],
     ]);
     await recovered.close({ reason: "recovered_complete" });
+    await firstRecovery.session!.close({ reason: "first_recovery_complete" });
     await session.close({ reason: "original_complete", force: true });
   });
 });
