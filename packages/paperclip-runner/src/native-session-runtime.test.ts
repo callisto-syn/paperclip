@@ -282,6 +282,9 @@ describe("executeNativeSession recovery", () => {
   it("stops and closes a timed-out consumer even when the caller requested a warm session", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
+    let releaseTeardown = () => {};
+    const teardownReleased = new Promise<void>((resolve) => { releaseTeardown = resolve; });
+    const iteratorTeardown = vi.fn();
     const appendEvent = vi.fn(async () => ({
       cursor: 1,
       highestContiguousSourceSeq: 1,
@@ -295,8 +298,13 @@ describe("executeNativeSession recovery", () => {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
       async *events() {
-        await streamReleased;
-        yield runnerEvent(1, "turn.completed");
+        try {
+          await streamReleased;
+          yield runnerEvent(1, "turn.completed");
+        } finally {
+          iteratorTeardown();
+          await teardownReleased;
+        }
       },
       async startTurn() { return { turnId: "turn-recovery" }; },
       cancel,
@@ -334,7 +342,8 @@ describe("executeNativeSession recovery", () => {
       async completeRun() {},
     };
 
-    await expect(executeNativeSession({
+    let executionSettled = false;
+    const execution = executeNativeSession({
       input,
       backend,
       controlPlane: port,
@@ -342,8 +351,11 @@ describe("executeNativeSession recovery", () => {
       controlPlaneInstanceId: "control-recovery",
       timeoutMs: 1,
       keepSessionOpen: true,
-    })).rejects.toThrow("native session timed out");
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    }).finally(() => { executionSettled = true; });
+    await vi.waitFor(() => expect(iteratorTeardown).toHaveBeenCalledOnce());
+    expect(executionSettled).toBe(false);
+    releaseTeardown();
+    await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(appendEvent).not.toHaveBeenCalled();

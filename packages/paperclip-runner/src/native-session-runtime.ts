@@ -175,7 +175,11 @@ async function consumeTurn(
     throw error;
   } finally {
     stopConsumer = true;
-    void eventIterator.return?.().catch(() => undefined);
+    // Do not let failure escape while the provider iterator still owns a live
+    // subscription. Cancellation above is responsible for releasing a blocked
+    // `next()`; awaiting `return()` then synchronizes the iterator's `finally`
+    // teardown before the session can be closed or reused.
+    await eventIterator.return?.().catch(() => undefined);
     if (timer !== undefined) clearTimeout(timer);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
