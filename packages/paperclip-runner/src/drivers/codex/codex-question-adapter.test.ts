@@ -85,6 +85,13 @@ describe("Codex structured question adapter", () => {
       }],
     })).toThrow("Codex question exceeds 128 options");
 
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{
+        id: "q".repeat(161),
+        question: "Choose one",
+      }],
+    })).toThrow("Codex question identifier exceeds 160 characters");
+
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
         type: "object",

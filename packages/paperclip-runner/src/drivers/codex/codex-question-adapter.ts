@@ -93,7 +93,10 @@ export function runtimeRequestPrompt(
 
 function stableQuestionId(value: unknown, index: number): string {
   const candidate = text(value).trim();
-  return candidate.length > 0 ? candidate.slice(0, 160) : `question-${index + 1}`;
+  if (candidate.length > 160) {
+    throw new Error("Codex question identifier exceeds 160 characters");
+  }
+  return candidate.length > 0 ? candidate : `question-${index + 1}`;
 }
 
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
