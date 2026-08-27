@@ -248,6 +248,37 @@ export class CapabilitySemanticToolRuntime {
           entityRefs: [],
         };
       }
+      case "company_skills.sync":
+        return {
+          value: { synced: true },
+          commandResult: null,
+          entityRefs: [],
+        };
+      case "routines.manage":
+        return {
+          value: { managed: true },
+          commandResult: null,
+          entityRefs: [],
+        };
+      case "cases.upsert":
+        return {
+          value: {
+            key: requireString(input.key),
+            body: requireString(input.body),
+            upserted: true,
+          },
+          commandResult: null,
+          entityRefs: [],
+        };
+      case "company.admin":
+        return {
+          value: {
+            action: requireString(input.action),
+            applied: true,
+          },
+          commandResult: null,
+          entityRefs: [],
+        };
       case "test.generic_api":
         return {
           value: {

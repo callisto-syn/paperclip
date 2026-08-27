@@ -322,6 +322,30 @@ describe("Capability exposure and authorization", () => {
       comments: [],
     });
   });
+
+  it.each([
+    ["sync_company_skills", "company_skills:write", {}, { synced: true }, "engineer"],
+    ["manage_routine", "routines:write", {}, { managed: true }, "engineer"],
+    ["upsert_case", "cases:write", { key: "case-1", body: "Case body" }, {
+      key: "case-1",
+      body: "Case body",
+      upserted: true,
+    }, "engineer"],
+    ["administer_company", "company:admin", { action: "refresh" }, {
+      action: "refresh",
+      applied: true,
+    }, "admin"],
+  ] as const)(
+    "executes the advertised %s scenario extension",
+    async (operationId, grant, input, value, role) => {
+      const { runtime } = await runtimeFor({ scenarioGrants: [grant], role });
+      await expect(runtime.invoke({
+        operationId,
+        input,
+        idempotencyKey: `extension-${operationId}`,
+      })).resolves.toMatchObject({ ok: true, operationId, value });
+    },
+  );
 });
 
 describe("Capability security policy", () => {
