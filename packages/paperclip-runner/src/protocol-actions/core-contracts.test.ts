@@ -31,8 +31,17 @@ describe("core Paperclip protocol action contracts", () => {
 
       if (action.scenario !== null) {
         const scenarioProperties = action.scenario.descriptor.inputSchema.properties ?? {};
+        const callEntries = Object.entries(action.examples.call.input);
+        const outOfBandKeys = callEntries
+          .map(([key]) => key)
+          .filter((key) => !(key in scenarioProperties));
+        // Scenario mutation idempotency is carried by the invocation envelope,
+        // not the operation input. No other example field may be omitted.
+        expect(outOfBandKeys).toEqual(
+          "idempotencyKey" in action.examples.call.input ? ["idempotencyKey"] : [],
+        );
         const scenarioInput = Object.fromEntries(
-          Object.entries(action.examples.call.input).filter(([key]) => key in scenarioProperties),
+          callEntries.filter(([key]) => key !== "idempotencyKey"),
         );
         const scenarioOutput = {
           schema: "paperclip.capability.tool-result.v1",
