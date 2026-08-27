@@ -430,9 +430,9 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     }
     this.#authorizeCommand(run, envelope.command);
 
+    const stateBeforeCommand = clone(this.#state);
     const fault = this.#consumeFault("apply_command", envelope.command.kind);
     this.#throwBeforeFault(fault, run.id, envelope.command.kind);
-    const stateBeforeCommand = clone(this.#state);
     let result: CapabilityCommandResult;
     try {
       const commandId = this.#id("command");
@@ -1222,13 +1222,17 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       const approval = this.#state.approvals.find(
         (candidate) => candidate.id === command.approvalId && candidate.companyId === run.companyId,
       );
-      if (approval === undefined || !approval.taskIds.includes(run.taskId)) {
+      if (
+        approval === undefined ||
+        approval.taskIds.length !== 1 ||
+        approval.taskIds[0] !== run.taskId
+      ) {
         this.#deny(run.id, command.kind, "active_task_scope_required", [
           `task:${run.taskId}`,
         ]);
         throw new CapabilityMockControlPlaneError(
           "approval_scope_violation",
-          "the approval is not linked to the active fixture task",
+          "the approval is not exclusively linked to the active fixture task",
         );
       }
       if (approval?.requestedByActorId === actor.id) {
@@ -1266,10 +1270,10 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     if (approval === undefined) {
       throw new CapabilityMockControlPlaneError("approval_missing", "fixture approval not found");
     }
-    if (!approval.taskIds.includes(task.id)) {
+    if (approval.taskIds.length !== 1 || approval.taskIds[0] !== task.id) {
       throw new CapabilityMockControlPlaneError(
         "approval_scope_violation",
-        "the approval is not linked to the active fixture task",
+        "the approval is not exclusively linked to the active fixture task",
       );
     }
     return approval;

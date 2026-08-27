@@ -228,7 +228,16 @@ describe("CapabilityMockControlPlaneAdapter", () => {
   });
 
   it("rolls back every state change when command execution fails", async () => {
-    const adapter = seeded();
+    const adapter = seeded({
+      faults: [{
+        id: "lost-create-ack",
+        operation: "apply_command",
+        commandKind: "create_task",
+        effect: "lost_ack",
+        remaining: 1,
+        code: "fixture_create_ack_lost",
+      }],
+    });
     await adapter.start();
     await adapter.openFixtureRun({
       ...OPEN,
@@ -243,11 +252,18 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     })).rejects.toMatchObject({ code: "semantic_command_invalid" });
 
     expect(adapter.serialize()).toBe(before);
-    await expect(adapter.applyCommand({
+    const corrected = {
       runId: "run-1",
       idempotencyKey: "invalid-child",
       command: { kind: "create_task", title: "Valid child" },
-    })).resolves.toMatchObject({ disposition: "applied" });
+    } as const;
+    await expect(adapter.applyCommand(corrected)).rejects.toMatchObject({
+      code: "fixture_create_ack_lost",
+      retryable: true,
+    });
+    await expect(adapter.applyCommand(corrected)).resolves.toMatchObject({
+      disposition: "duplicate",
+    });
     expect(adapter.snapshot().tasks.map((task) => task.title)).toContain("Valid child");
   });
 
@@ -595,7 +611,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         {
           id: "approval-other-task",
           companyId: "company-1",
-          taskIds: ["task-2"],
+          taskIds: ["task-1", "task-2"],
           type: "request_board_approval",
           status: "pending",
           requestedByActorId: "actor-2",
