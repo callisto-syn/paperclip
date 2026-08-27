@@ -150,6 +150,14 @@ class DeterministicHarnessSession implements HarnessSession {
     this.#semanticResult = snapshot?.semanticResult?.result ?? null;
     this.#active = snapshot?.activeTurnId !== null && snapshot?.activeTurnId !== undefined;
     this.#nextSourceSeq = (snapshot?.lastSourceSequence ?? 0) + 1;
+    if (this.#active) {
+      // This provider-free driver has no external process that can resume a
+      // recovered turn. Schedule the deterministic terminal continuation
+      // instead, while leaving one event-loop turn for the runtime to capture
+      // and persist the recovered active checkpoint first.
+      const resumeTimer = setTimeout(() => this.#completeRecoveredTurn(), 0);
+      resumeTimer.unref?.();
+    }
   }
 
   ids() {
@@ -308,6 +316,17 @@ class DeterministicHarnessSession implements HarnessSession {
   #notifyEventWaiters(): void {
     for (const resolve of this.#eventWaiters) resolve();
     this.#eventWaiters.clear();
+  }
+
+  #completeRecoveredTurn(): void {
+    if (this.#closed || !this.#active || this.#turnId === null) return;
+    this.#semanticResult = completedResult();
+    this.#appendEvents(
+      this.#event("run.result.proposed", this.#semanticResult),
+      this.#event("turn.completed", {}),
+      this.#event("run.terminal", completedTerminal(), { turn: false }),
+    );
+    this.#active = false;
   }
 
   #event(
