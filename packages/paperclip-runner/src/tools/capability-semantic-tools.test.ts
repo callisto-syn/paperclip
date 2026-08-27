@@ -356,8 +356,11 @@ describe("Capability exposure and authorization", () => {
     } as const;
 
     const first = await runtime.invoke(invocation);
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      adapter.serialize(),
+    );
     const recreated = new CapabilitySemanticToolRuntime({
-      adapter,
+      adapter: restoredAdapter,
       runId: OPEN.identity.runId,
       scenarioGrants: ["cases:write"],
     });

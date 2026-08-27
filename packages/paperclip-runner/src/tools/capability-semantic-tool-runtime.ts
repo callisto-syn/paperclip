@@ -2,6 +2,7 @@ import type {
   CapabilityCommandEnvelope,
   CapabilityJsonValue,
   CapabilityMockControlPlanePort,
+  CapabilitySemanticToolRuntimeSnapshot,
   CapabilitySemanticCommand,
 } from "../mock-core/capability-control-plane-types.js";
 import { capabilitySemanticTool } from "./capability-semantic-tool-catalog.js";
@@ -39,6 +40,7 @@ interface ExtensionExecution {
 interface ExtensionIdempotencyRecord {
   input: string;
   execution: Promise<{ resultId: string; value: ExtensionExecution }>;
+  completed?: { resultId: string; value: ExtensionExecution };
 }
 
 interface CapabilitySemanticRuntimeState {
@@ -75,11 +77,9 @@ export class CapabilitySemanticToolRuntime {
     const existingState = adapterState.get(options.runId);
     if (existingState !== undefined) this.#state = existingState;
     else {
-      this.#state = {
-        extensionIdempotency: new Map(),
-        operationResults: new Map(),
-        resultSequence: 0,
-      };
+      this.#state = this.#restoreState(
+        options.adapter.loadSemanticToolRuntime(options.runId),
+      );
       adapterState.set(options.runId, this.#state);
     }
   }
@@ -198,16 +198,22 @@ export class CapabilitySemanticToolRuntime {
             input: canonicalInput!,
             execution: executionPromise,
           };
+          const newRecord = idempotencyRecord;
           this.#state.extensionIdempotency.set(
             extensionIdempotencyKey,
-            idempotencyRecord,
+            newRecord,
           );
+          executionPromise.then((completed) => {
+            newRecord.completed = structuredClone(completed);
+            this.#persistState();
+          }).catch(() => undefined);
           executionPromise.catch(() => {
             if (
               this.#state.extensionIdempotency.get(extensionIdempotencyKey)
-              === idempotencyRecord
+              === newRecord
             ) {
               this.#state.extensionIdempotency.delete(extensionIdempotencyKey);
+              this.#persistState();
             }
           });
         }
@@ -238,6 +244,7 @@ export class CapabilitySemanticToolRuntime {
         authorization: finalAuthorization,
       };
       this.#state.operationResults.set(resultId, structuredClone(observableValue));
+      this.#persistState();
       const observableResult = deepFreeze(success);
       if (!includeModelResult) return { observableResult };
       const modelResult: CapabilityModelToolSuccess = deepFreeze({
@@ -262,6 +269,60 @@ export class CapabilitySemanticToolRuntime {
 
   #nextResultId(): string {
     return `tool-result-${++this.#state.resultSequence}`;
+  }
+
+  #restoreState(
+    snapshot: CapabilitySemanticToolRuntimeSnapshot | null,
+  ): CapabilitySemanticRuntimeState {
+    if (snapshot === null) {
+      return {
+        extensionIdempotency: new Map(),
+        operationResults: new Map(),
+        resultSequence: 0,
+      };
+    }
+    const extensionIdempotency = new Map<string, ExtensionIdempotencyRecord>();
+    for (const extension of snapshot.extensions) {
+      const completed = {
+        resultId: extension.resultId,
+        value: structuredClone(extension.execution),
+      };
+      extensionIdempotency.set(extension.key, {
+        input: extension.input,
+        execution: Promise.resolve(structuredClone(completed)),
+        completed,
+      });
+    }
+    return {
+      extensionIdempotency,
+      operationResults: new Map(
+        Object.entries(snapshot.operationResults).map(([key, value]) => [
+          key,
+          structuredClone(value),
+        ]),
+      ),
+      resultSequence: snapshot.resultSequence,
+    };
+  }
+
+  #persistState(): void {
+    this.#adapter.saveSemanticToolRuntime(this.#runId, {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: this.#state.resultSequence,
+      operationResults: Object.fromEntries(
+        [...this.#state.operationResults].map(([key, value]) => [
+          key,
+          structuredClone(value),
+        ]),
+      ),
+      extensions: [...this.#state.extensionIdempotency]
+        .flatMap(([key, record]) => record.completed === undefined ? [] : [{
+          key,
+          input: record.input,
+          resultId: record.completed.resultId,
+          execution: structuredClone(record.completed.value),
+        }]),
+    });
   }
 
   async #execute(

@@ -254,6 +254,22 @@ export interface ScenarioChatdempotencyRecord {
   result: CapabilityCommandResult;
 }
 
+export interface CapabilitySemanticToolRuntimeSnapshot {
+  schema: "paperclip.capability.semantic-tool-runtime.v1";
+  resultSequence: number;
+  operationResults: Record<string, CapabilityJsonValue>;
+  extensions: Array<{
+    key: string;
+    input: string;
+    resultId: string;
+    execution: {
+      value: CapabilityJsonValue;
+      commandResult: CapabilityCommandResult | null;
+      entityRefs: string[];
+    };
+  }>;
+}
+
 export interface CapabilityFixtureState {
   schema: "paperclip.capability.mock-state.v1";
   revision: number;
@@ -280,6 +296,8 @@ export interface CapabilityFixtureState {
   audit: CapabilityAuditRecord[];
   decisions: CapabilityDecisionRecord[];
   idempotency: ScenarioChatdempotencyRecord[];
+  /** Durable package-local tool receipts keyed by logical run id. */
+  semanticToolRuntimes?: Record<string, CapabilitySemanticToolRuntimeSnapshot>;
   faults: CapabilityFaultRule[];
 }
 
@@ -450,6 +468,11 @@ export interface CapabilityMockControlPlanePort extends ControlPlanePort {
   applyCommand(envelope: CapabilityCommandEnvelope): Promise<CapabilityCommandResult>;
   tryApplyCommand(envelope: CapabilityCommandEnvelope): Promise<CapabilityCommandOutcome>;
   snapshot(): Readonly<CapabilityFixtureState>;
+  loadSemanticToolRuntime(runId: string): CapabilitySemanticToolRuntimeSnapshot | null;
+  saveSemanticToolRuntime(
+    runId: string,
+    snapshot: CapabilitySemanticToolRuntimeSnapshot,
+  ): void;
   decisionRecords(): readonly CapabilityDecisionRecord[];
   serialize(): string;
 }
@@ -553,6 +576,7 @@ export function createCapabilityFixtureState(seed: CapabilityFixtureSeed = {}): 
     audit: [],
     decisions: [],
     idempotency: [],
+    semanticToolRuntimes: {},
     faults: structuredClone(seed.faults ?? []),
   };
 }

@@ -33,6 +33,7 @@ import {
   type CapabilityOpenFixtureRunInput,
   type CapabilityRunContext,
   type CapabilitySemanticCommand,
+  type CapabilitySemanticToolRuntimeSnapshot,
   type CapabilityWakeContext,
 } from "./capability-control-plane-types.js";
 
@@ -63,6 +64,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       : createCapabilityFixtureState(seed);
     // Serialized v1 fixtures from before company-scope sentinels remain valid.
     this.#state.outOfScopeTaskIds ??= [];
+    this.#state.semanticToolRuntimes ??= {};
     this.#validateState();
   }
 
@@ -581,6 +583,28 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
 
   snapshot(): Readonly<CapabilityFixtureState> {
     return deepFreeze(clone(this.#state));
+  }
+
+  loadSemanticToolRuntime(
+    runId: string,
+  ): CapabilitySemanticToolRuntimeSnapshot | null {
+    this.#run(runId);
+    const snapshot = this.#state.semanticToolRuntimes?.[runId];
+    return snapshot === undefined ? null : clone(snapshot);
+  }
+
+  saveSemanticToolRuntime(
+    runId: string,
+    snapshot: CapabilitySemanticToolRuntimeSnapshot,
+  ): void {
+    this.#run(runId);
+    if (!isSemanticToolRuntimeSnapshot(snapshot)) {
+      throw new CapabilityMockControlPlaneError(
+        "fixture_state_invalid",
+        "semantic tool runtime snapshot is invalid",
+      );
+    }
+    this.#state.semanticToolRuntimes![runId] = clone(snapshot);
   }
 
   decisionRecords(): readonly CapabilityDecisionRecord[] {
@@ -1692,7 +1716,64 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         );
       }
     }
+    for (const [runId, snapshot] of Object.entries(this.#state.semanticToolRuntimes ?? {})) {
+      if (
+        !this.#state.runs.some((run) => run.id === runId) ||
+        !isSemanticToolRuntimeSnapshot(snapshot)
+      ) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          `semantic tool runtime for ${runId} is invalid`,
+        );
+      }
+    }
   }
+}
+
+function isSemanticToolRuntimeSnapshot(
+  value: unknown,
+): value is CapabilitySemanticToolRuntimeSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const snapshot = value as Record<string, unknown>;
+  if (
+    snapshot.schema !== "paperclip.capability.semantic-tool-runtime.v1" ||
+    !Number.isSafeInteger(snapshot.resultSequence) ||
+    Number(snapshot.resultSequence) < 0 ||
+    typeof snapshot.operationResults !== "object" ||
+    snapshot.operationResults === null ||
+    Array.isArray(snapshot.operationResults) ||
+    !Array.isArray(snapshot.extensions)
+  ) {
+    return false;
+  }
+  const keys = new Set<string>();
+  return snapshot.extensions.every((candidate) => {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+      return false;
+    }
+    const extension = candidate as Record<string, unknown>;
+    if (
+      typeof extension.key !== "string" ||
+      extension.key.length === 0 ||
+      keys.has(extension.key) ||
+      typeof extension.input !== "string" ||
+      typeof extension.resultId !== "string" ||
+      extension.resultId.length === 0 ||
+      typeof extension.execution !== "object" ||
+      extension.execution === null ||
+      Array.isArray(extension.execution)
+    ) {
+      return false;
+    }
+    const execution = extension.execution as Record<string, unknown>;
+    if (!Array.isArray(execution.entityRefs) || execution.entityRefs.some((ref) => typeof ref !== "string")) {
+      return false;
+    }
+    keys.add(extension.key);
+    return true;
+  });
 }
 
 function isFixtureState(value: unknown): value is CapabilityFixtureState {
