@@ -227,6 +227,30 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ).rejects.toMatchObject({ code: "idempotency_conflict" });
   });
 
+  it("rolls back every state change when command execution fails", async () => {
+    const adapter = seeded();
+    await adapter.start();
+    await adapter.openFixtureRun({
+      ...OPEN,
+      capabilities: ["delegation:tasks:create"],
+    });
+    const before = adapter.serialize();
+
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "invalid-child",
+      command: { kind: "create_task", title: "" },
+    })).rejects.toMatchObject({ code: "semantic_command_invalid" });
+
+    expect(adapter.serialize()).toBe(before);
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "invalid-child",
+      command: { kind: "create_task", title: "Valid child" },
+    })).resolves.toMatchObject({ disposition: "applied" });
+    expect(adapter.snapshot().tasks.map((task) => task.title)).toContain("Valid child");
+  });
+
   it("serializes, restores, and replays gapped events without a live service", async () => {
     const adapter = seeded();
     await adapter.start();
@@ -509,6 +533,100 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     expect(adapter.snapshot().comments.map((comment) => comment.body)).toEqual([
       "Ready for review.",
     ]);
+  });
+
+  it("rejects approval decisions outside the active task", async () => {
+    const adapter = seeded({
+      actors: [
+        {
+          id: "actor-1",
+          companyId: "company-1",
+          name: "Mock Approver",
+          role: "approver",
+          status: "active",
+          budgetId: "budget-actor-1",
+          capabilityGrants: [],
+        },
+        {
+          id: "actor-2",
+          companyId: "company-1",
+          name: "Other Requester",
+          role: "engineer",
+          status: "active",
+          budgetId: "budget-actor-2",
+          capabilityGrants: [],
+        },
+      ],
+      tasks: [
+        {
+          id: "task-1",
+          companyId: "company-1",
+          identifier: "MCK-1",
+          title: "Active task",
+          description: null,
+          status: "todo",
+          priority: "high",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "actor-1",
+          checkoutRunId: null,
+          executionRunId: null,
+          startedAt: null,
+          completedAt: null,
+        },
+        {
+          id: "task-2",
+          companyId: "company-1",
+          identifier: "MCK-2",
+          title: "Other task",
+          description: null,
+          status: "in_review",
+          priority: "medium",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "actor-2",
+          checkoutRunId: null,
+          executionRunId: null,
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
+      approvals: [
+        {
+          id: "approval-other-task",
+          companyId: "company-1",
+          taskIds: ["task-2"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+      ],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun({
+      ...OPEN,
+      capabilities: ["governance:approvals:decide"],
+    });
+
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "cross-task-approval",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-other-task",
+        decision: "approved",
+        note: "Must remain scoped.",
+      },
+    })).rejects.toMatchObject({ code: "approval_scope_violation" });
+    expect(adapter.snapshot()).toMatchObject({
+      approvals: [{ id: "approval-other-task", status: "pending" }],
+      wakes: [],
+    });
   });
 
   it("rejects stale interaction targets and invalid interaction outcomes", async () => {

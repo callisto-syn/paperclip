@@ -22,6 +22,7 @@ import {
   type CapabilityDecisionRecord,
   type CapabilityFaultRule,
   type CapabilityFixtureActor,
+  type CapabilityFixtureApproval,
   type CapabilityFixtureDocument,
   type CapabilityFixtureRun,
   type CapabilityFixtureSeed,
@@ -431,27 +432,36 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
 
     const fault = this.#consumeFault("apply_command", envelope.command.kind);
     this.#throwBeforeFault(fault, run.id, envelope.command.kind);
-    const commandId = this.#id("command");
-    const { entityRefs, scheduledWakeIds } = this.#executeCommand(run, envelope.command);
-    this.#recordMutation(run.id, run.actorId, "semantic_command.applied", "command", commandId, {
-      kind: envelope.command.kind,
-      idempotencyKey: envelope.idempotencyKey,
-      entityRefs,
-    }, envelope.command.kind, "allowed", "semantic_command_applied", entityRefs);
-    const result: CapabilityCommandResult = {
-      commandId,
-      commandKind: envelope.command.kind,
-      disposition: "applied",
-      stateRevision: this.#state.revision,
-      entityRefs,
-      scheduledWakeIds,
-    };
-    this.#state.idempotency.push({
-      scope,
-      key: envelope.idempotencyKey,
-      inputCanonical,
-      result: clone(result),
-    });
+    const stateBeforeCommand = clone(this.#state);
+    let result: CapabilityCommandResult;
+    try {
+      const commandId = this.#id("command");
+      const { entityRefs, scheduledWakeIds } = this.#executeCommand(run, envelope.command);
+      this.#recordMutation(run.id, run.actorId, "semantic_command.applied", "command", commandId, {
+        kind: envelope.command.kind,
+        idempotencyKey: envelope.idempotencyKey,
+        entityRefs,
+      }, envelope.command.kind, "allowed", "semantic_command_applied", entityRefs);
+      result = {
+        commandId,
+        commandKind: envelope.command.kind,
+        disposition: "applied",
+        stateRevision: this.#state.revision,
+        entityRefs,
+        scheduledWakeIds,
+      };
+      this.#state.idempotency.push({
+        scope,
+        key: envelope.idempotencyKey,
+        inputCanonical,
+        result: clone(result),
+      });
+    } catch (error) {
+      this.#state = stateBeforeCommand;
+      throw error;
+    }
+    // A post-commit lost-ack fault deliberately retains the transaction and its
+    // idempotency record. Only validation and execution failures roll back.
     this.#throwAfterFault(fault, run.id, envelope.command.kind);
     return deepFreeze(clone(result));
   }
@@ -773,12 +783,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         break;
       }
       case "decide_approval": {
-        const approval = this.#state.approvals.find(
-          (candidate) => candidate.id === command.approvalId && candidate.companyId === task.companyId,
-        );
-        if (approval === undefined) {
-          throw new CapabilityMockControlPlaneError("approval_missing", "fixture approval not found");
-        }
+        const approval = this.#approvalForTask(task, command.approvalId);
         if (approval.status !== "pending") {
           throw new CapabilityMockControlPlaneError(
             "approval_already_decided",
@@ -805,12 +810,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         break;
       }
       case "comment_on_approval": {
-        const approval = this.#state.approvals.find(
-          (candidate) => candidate.id === command.approvalId && candidate.companyId === task.companyId,
-        );
-        if (approval === undefined) {
-          throw new CapabilityMockControlPlaneError("approval_missing", "fixture approval not found");
-        }
+        const approval = this.#approvalForTask(task, command.approvalId);
         const comment = {
           id: this.#id("approval-comment"),
           authorActorId: run.actorId,
@@ -1222,6 +1222,15 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       const approval = this.#state.approvals.find(
         (candidate) => candidate.id === command.approvalId && candidate.companyId === run.companyId,
       );
+      if (approval === undefined || !approval.taskIds.includes(run.taskId)) {
+        this.#deny(run.id, command.kind, "active_task_scope_required", [
+          `task:${run.taskId}`,
+        ]);
+        throw new CapabilityMockControlPlaneError(
+          "approval_scope_violation",
+          "the approval is not linked to the active fixture task",
+        );
+      }
       if (approval?.requestedByActorId === actor.id) {
         this.#deny(run.id, command.kind, "self_approval_forbidden", [
           `approval:${approval.id}`,
@@ -1245,6 +1254,25 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       );
     }
     return task;
+  }
+
+  #approvalForTask(
+    task: CapabilityFixtureTask,
+    approvalId: string,
+  ): CapabilityFixtureApproval {
+    const approval = this.#state.approvals.find(
+      (candidate) => candidate.id === approvalId && candidate.companyId === task.companyId,
+    );
+    if (approval === undefined) {
+      throw new CapabilityMockControlPlaneError("approval_missing", "fixture approval not found");
+    }
+    if (!approval.taskIds.includes(task.id)) {
+      throw new CapabilityMockControlPlaneError(
+        "approval_scope_violation",
+        "the approval is not linked to the active fixture task",
+      );
+    }
+    return approval;
   }
 
   #transitionTask(
