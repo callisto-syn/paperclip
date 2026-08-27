@@ -300,7 +300,7 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
       });
       continue;
     }
-    for (const field of ["operationId", "idempotencyKey"] as const) {
+    for (const field of ["operationId", "idempotencyKey", "correlation"] as const) {
       if (
         canonicalJson(call.input.envelope[field]) !==
         canonicalJson(call.result.envelope[field])
@@ -313,7 +313,7 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
       }
     }
     if (call.reconciled !== undefined) {
-      for (const field of ["operationId", "idempotencyKey"] as const) {
+      for (const field of ["operationId", "idempotencyKey", "correlation"] as const) {
         if (
           canonicalJson(call.input.envelope[field]) !==
           canonicalJson(call.reconciled.envelope[field])

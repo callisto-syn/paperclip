@@ -120,6 +120,21 @@ describe("PRP v1 JSON Schema contract", () => {
         }),
       ],
     });
+
+    semanticTool.operationId = (
+      ((events[0]!.payload as Record<string, unknown>).semantic_tool as Record<string, unknown>)
+        .operationId
+    );
+    reconciled.turnId = "different-turn";
+    (semanticTool.correlation as Record<string, unknown>).turnId = "different-turn";
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "/events/1/payload/semantic_tool/correlation",
+        }),
+      ],
+    });
   });
 
   it("fails closed on unsupported nested required schema versions", async () => {
