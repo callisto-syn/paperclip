@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -129,19 +130,22 @@ export async function discoverPaperclipWorkspaceFileReferences(
     let canonicalPath: string;
     try { canonicalPath = await realpath(resolve(workspace, reference.path)); } catch { continue; }
     if (workspaceRelativePath(canonicalRoot, canonicalPath) === null) continue;
-    let info;
-    try { info = await stat(canonicalPath); } catch { continue; }
-    if (!info.isFile()) continue;
-    if (info.size > MAX_READ_BYTES) {
-      verified.push({ ...reference, previewTruncated: true });
-      continue;
-    }
     let bytes: Buffer;
     try {
-      const handle = await open(canonicalPath, "r");
+      const handle = await open(
+        canonicalPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
       try {
         const openedInfo = await handle.stat();
         if (!openedInfo.isFile()) continue;
+        const verifiedPath = await realpath(canonicalPath);
+        if (workspaceRelativePath(canonicalRoot, verifiedPath) === null) continue;
+        const currentInfo = await stat(verifiedPath);
+        if (
+          currentInfo.dev !== openedInfo.dev ||
+          currentInfo.ino !== openedInfo.ino
+        ) continue;
         if (openedInfo.size > MAX_READ_BYTES) {
           verified.push({ ...reference, previewTruncated: true });
           continue;
