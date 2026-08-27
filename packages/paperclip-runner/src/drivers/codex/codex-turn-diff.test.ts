@@ -65,4 +65,22 @@ describe("Codex turn diff parser", () => {
       "+new",
     ].join("\n"))).toEqual([]);
   });
+
+  it("keeps file headers distinct from hunk content with marker prefixes", () => {
+    expect(parseCodexTurnDiff([
+      "diff --git a/src/markers.ts b/src/markers.ts",
+      "--- a/src/markers.ts",
+      "+++ b/src/markers.ts",
+      "@@ -1 +1 @@",
+      "--- old content",
+      "+++ new content",
+    ].join("\n"))).toEqual([
+      expect.objectContaining({
+        path: "src/markers.ts",
+        operation: "modify",
+        additions: 1,
+        deletions: 1,
+      }),
+    ]);
+  });
 });
