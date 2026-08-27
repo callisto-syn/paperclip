@@ -346,6 +346,30 @@ describe("Capability exposure and authorization", () => {
       })).resolves.toMatchObject({ ok: true, operationId, value });
     },
   );
+
+  it("replays required-idempotency extensions without executing a second result", async () => {
+    const { runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-1", body: "Case body" },
+      idempotencyKey: "upsert-case-1",
+    } as const;
+
+    const first = await runtime.invoke(invocation);
+    const replay = await runtime.invoke(invocation);
+    expect(first).toMatchObject({ ok: true, value: { upserted: true } });
+    expect(replay).toMatchObject({ ok: true, value: { upserted: true } });
+    if (!first.ok || !replay.ok) throw new Error("expected extension success");
+    expect(replay.operationResultId).toBe(first.operationResultId);
+
+    await expect(runtime.invoke({
+      ...invocation,
+      input: { key: "case-1", body: "Different body" },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "input_invalid", reason: "idempotency_key_conflict" },
+    });
+  });
 });
 
 describe("Capability security policy", () => {

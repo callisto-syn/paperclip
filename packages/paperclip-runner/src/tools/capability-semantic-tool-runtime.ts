@@ -38,6 +38,15 @@ export class CapabilitySemanticToolRuntime {
   readonly #resolveSecretValue: CapabilitySemanticToolRuntimeOptions["resolveSecretValue"];
   readonly #authorization = new CapabilityToolAuthorizationEngine();
   readonly #operationResults = new Map<string, CapabilityJsonValue>();
+  readonly #extensionIdempotency = new Map<string, {
+    input: string;
+    resultId: string;
+    execution: {
+      value: CapabilityJsonValue;
+      commandResult: CapabilityToolSuccess["commandResult"];
+      entityRefs: string[];
+    };
+  }>();
   #resultSequence = 0;
 
   constructor(options: CapabilitySemanticToolRuntimeOptions) {
@@ -131,14 +140,43 @@ export class CapabilitySemanticToolRuntime {
 
     const beforeRevision = this.#adapter.snapshot().revision;
     try {
-      const execution = await this.#execute(descriptor, invocation);
+      const extensionIdempotencyKey = descriptor.mockCommandMapping.kind === "mock_extension" &&
+        descriptor.idempotency === "required"
+        ? `${invocation.operationId}:${invocation.idempotencyKey!.trim()}`
+        : null;
+      const canonicalInput = extensionIdempotencyKey === null
+        ? null
+        : canonicalJson(invocation.input);
+      const cachedExtension = extensionIdempotencyKey === null
+        ? undefined
+        : this.#extensionIdempotency.get(extensionIdempotencyKey);
+      if (cachedExtension !== undefined && cachedExtension.input !== canonicalInput) {
+        const denied = this.#authorization.denyInvocation(
+          invocation.operationId,
+          context,
+          "idempotency_key_conflict",
+        );
+        return { observableResult: this.#denial(invocation.operationId, denied, "input_invalid") };
+      }
+      const execution = cachedExtension === undefined
+        ? await this.#execute(descriptor, invocation)
+        : structuredClone(cachedExtension.execution);
       const finalAuthorization = this.#authorization.attachStateChange(
         authorization.sequence,
         beforeRevision,
         this.#adapter.snapshot().revision,
         execution.entityRefs,
       );
-      const resultId = execution.commandResult?.commandId ?? `tool-result-${++this.#resultSequence}`;
+      const resultId = cachedExtension?.resultId ??
+        execution.commandResult?.commandId ??
+        `tool-result-${++this.#resultSequence}`;
+      if (extensionIdempotencyKey !== null && cachedExtension === undefined) {
+        this.#extensionIdempotency.set(extensionIdempotencyKey, {
+          input: canonicalInput!,
+          resultId,
+          execution: structuredClone(execution),
+        });
+      }
       const observableValue = redactForBoundary(descriptor, execution.value, "output");
       const observableCommandResult = execution.commandResult === null
         ? null
@@ -580,6 +618,16 @@ function asObject(value: CapabilityJsonValue): Record<string, CapabilityJsonValu
 
 function toJsonValue(value: unknown): CapabilityJsonValue {
   return structuredClone(value) as CapabilityJsonValue;
+}
+
+function canonicalJson(value: CapabilityJsonValue): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function deepFreeze<T>(value: T): T {
