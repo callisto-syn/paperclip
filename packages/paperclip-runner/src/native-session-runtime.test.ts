@@ -279,6 +279,118 @@ describe("executeNativeSession recovery", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
   });
 
+  it("stops and closes a timed-out consumer even when the caller requested a warm session", async () => {
+    let releaseStream = () => {};
+    const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const appendEvent = vi.fn(async () => ({
+      cursor: 1,
+      highestContiguousSourceSeq: 1,
+      disposition: "committed" as const,
+    }));
+    const cancel = vi.fn(async () => { releaseStream(); });
+    const close = vi.fn(async () => { releaseStream(); });
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      async *events() {
+        await streamReleased;
+        yield runnerEvent(1, "turn.completed");
+      },
+      async startTurn() { return { turnId: "turn-recovery" }; },
+      cancel,
+      async result() { return null; },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity,
+          providerSessionId: "provider-recovery",
+          cursor: null,
+          activeTurnId: null,
+          pendingRuntimeRequests: [],
+          lineage: [],
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { return session; },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      appendEvent,
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      timeoutMs: 1,
+      keepSessionOpen: true,
+    })).rejects.toThrow("native session timed out");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(appendEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
+    const openRun = vi.fn(async () => undefined);
+    const checkpointSession = vi.fn(async () => undefined);
+    const openSession = vi.fn();
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      openSession,
+    };
+    const port: ControlPlanePort = {
+      openRun,
+      async loadSessionCheckpoint() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity: { ...identity, companyId: "other-company" },
+        };
+      },
+      checkpointSession,
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+    })).rejects.toThrow("native_session_checkpoint_binding_mismatch");
+    expect(openRun).not.toHaveBeenCalled();
+    expect(checkpointSession).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
   it("continues a provider-reported active turn without starting a duplicate turn", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",

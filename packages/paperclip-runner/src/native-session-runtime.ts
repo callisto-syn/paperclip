@@ -78,6 +78,8 @@ async function consumeTurn(
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const eventIterator = session.events()[Symbol.asyncIterator]();
+  let stopConsumer = false;
   let rejectHandoff: ((error: unknown) => void) | null = null;
   const handoffFailure = new Promise<never>((_resolve, reject) => {
     rejectHandoff = reject;
@@ -87,13 +89,15 @@ async function consumeTurn(
     if (inputTimer !== undefined) clearTimeout(inputTimer);
     inputTimers.delete(requestId);
   };
-  try {
-    return await Promise.race([
-      (async () => {
+  const consumer = (async () => {
         let eventCount = 0;
         let highestContiguousSourceSeq = 0;
         let governedResult: PrpStructuredRunResult | null = null;
-        for await (const event of session.events()) {
+        while (true) {
+          const next = await eventIterator.next();
+          if (stopConsumer) throw new Error("native event consumer stopped");
+          if (next.done) throw new Error("native event stream closed before a turn terminal fact");
+          const event = next.value;
           const receipt = await controlPlane.appendEvent(event);
           eventCount += receipt.disposition === "committed" ? 1 : 0;
           highestContiguousSourceSeq = Math.max(highestContiguousSourceSeq, receipt.highestContiguousSourceSeq);
@@ -152,14 +156,26 @@ async function consumeTurn(
             return { event, eventCount, highestContiguousSourceSeq, governedResult };
           }
         }
-        throw new Error("native event stream closed before a turn terminal fact");
-      })(),
+      })();
+  // A timeout can win the race while an iterator is still waiting for data.
+  // Observe any later consumer rejection so it cannot become process-fatal.
+  void consumer.catch(() => undefined);
+  try {
+    return await Promise.race([
+      consumer,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`native session timed out after ${timeoutMs}ms`)), timeoutMs);
       }),
       handoffFailure,
     ]);
+  } catch (error) {
+    stopConsumer = true;
+    await session.interrupt?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
+    await session.cancel?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
+    throw error;
   } finally {
+    stopConsumer = true;
+    void eventIterator.return?.().catch(() => undefined);
     if (timer !== undefined) clearTimeout(timer);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
@@ -220,6 +236,19 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
   let persistedSession = options.existingSession
     ? null
     : options.persistedSession ?? await options.controlPlane.loadSessionCheckpoint?.() ?? null;
+  if (
+    persistedSession
+    && (
+      persistedSession.identity.runId !== input.binding.runId
+      || persistedSession.identity.companyId !== input.binding.companyId
+      || persistedSession.identity.issueId !== input.binding.issueId
+      || persistedSession.identity.agentId !== input.binding.agentId
+      || (
+        input.session.normalizedSessionId !== null
+        && persistedSession.identity.sessionId !== input.session.normalizedSessionId
+      )
+    )
+  ) throw new Error("native_session_checkpoint_binding_mismatch");
   const normalizedSessionId = persistedSession?.identity.sessionId
     ?? input.session.normalizedSessionId
     ?? randomUUID();
@@ -252,16 +281,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     issueId: input.binding.issueId,
     agentId: input.binding.agentId,
   };
-  if (
-    persistedSession
-    && (
-      persistedSession.identity.runId !== identity.runId
-      || persistedSession.identity.companyId !== identity.companyId
-      || persistedSession.identity.issueId !== identity.issueId
-      || persistedSession.identity.agentId !== identity.agentId
-      || persistedSession.identity.sessionId !== identity.sessionId
-    )
-  ) throw new Error("native_session_checkpoint_binding_mismatch");
   let recovered = false;
   let session: NativeSession;
   let continuityBreak: {
@@ -313,6 +332,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     });
   }
   options.onSession?.(session);
+  let executionSucceeded = false;
   try {
     const checkpoint = async () => {
       const snapshot = await session.snapshot();
@@ -507,7 +527,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       terminal,
     });
     const usage = await session.usage?.() ?? null;
-    return {
+    const executionResult = {
       result: completed.result,
       terminal,
       turnId: completed.turnId,
@@ -519,8 +539,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       highestContiguousSourceSeq: consumed.highestContiguousSourceSeq,
       usage,
     };
+    executionSucceeded = true;
+    return executionResult;
   } finally {
-    if (!options.keepSessionOpen) {
+    if (!options.keepSessionOpen || !executionSucceeded) {
       options.onSession?.(null);
       await session.close({ reason: "native session execution complete" });
     }
