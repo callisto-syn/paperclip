@@ -226,15 +226,20 @@ describe("executeNativeSession recovery", () => {
   });
 
   it("contains a consumer rejection when starting the turn fails first", async () => {
-    let closeStream = () => {};
-    const streamClosed = new Promise<void>((resolve) => { closeStream = resolve; });
+    let markAppendStarted = () => {};
+    const appendStarted = new Promise<void>((resolve) => { markAppendStarted = resolve; });
+    let releaseAppend = () => {};
+    const appendReleased = new Promise<void>((resolve) => { releaseAppend = resolve; });
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
-      async *events() { await streamClosed; },
-      async startTurn() { throw new Error("start turn failed"); },
+      async *events() { yield runnerEvent(1, "turn.started"); },
+      async startTurn() {
+        await appendStarted;
+        throw new Error("start turn failed");
+      },
       async result() { return null; },
       async snapshot() {
         return {
@@ -248,7 +253,7 @@ describe("executeNativeSession recovery", () => {
           lineage: [],
         };
       },
-      async close() { closeStream(); },
+      async close() {},
     };
     const backend: NativeSessionBackend = {
       async descriptor() {
@@ -264,19 +269,32 @@ describe("executeNativeSession recovery", () => {
     const port: ControlPlanePort = {
       async openRun() {},
       async checkpointSession() {},
-      async appendEvent() { throw new Error("unexpected event"); },
+      async appendEvent() {
+        markAppendStarted();
+        await appendReleased;
+        return {
+          cursor: 1,
+          highestContiguousSourceSeq: 1,
+          disposition: "committed" as const,
+        };
+      },
       async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
       async completeRun() {},
     };
 
-    await expect(executeNativeSession({
+    let executionSettled = false;
+    const execution = executeNativeSession({
       input,
       backend,
       controlPlane: port,
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
-    })).rejects.toThrow("start turn failed");
+    }).finally(() => { executionSettled = true; });
+    await appendStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(executionSettled).toBe(false);
+    releaseAppend();
+    await expect(execution).rejects.toThrow("start turn failed");
   });
 
   it("stops and closes a timed-out consumer even when the caller requested a warm session", async () => {

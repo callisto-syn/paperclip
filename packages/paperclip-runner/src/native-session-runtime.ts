@@ -402,27 +402,37 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       const recoveredActiveTurnId = recovered
         ? recoveredSnapshot.activeTurnId ?? null
         : persistedSession?.activeTurnId ?? null;
-      if (!recovered || !recoveredActiveTurnId) {
-        const modelEnvelope = buildNativeModelEnvelope(input);
-        const dispositionOnlyRecovery = Boolean(
-          recovered &&
-          !recoveredSnapshot.semanticResult &&
-          (persistedSession?.terminalTurns?.length ?? 0) > 0 &&
-          !recoveredActiveTurnId
-        );
-        if (dispositionOnlyRecovery) {
-          modelEnvelope.task.prompt = [
-            "Paperclip semantic-result recovery for a prior completed provider turn.",
-            "The prior turn already performed the work and its user-facing final answer is recorded.",
-            "Do not repeat implementation, tests, research, or the final answer.",
-            "Use the existing session context to invoke exactly one paperclip_finish or paperclip_block with the accurate current disposition, then stop without additional user-facing prose.",
-          ].join("\n");
+      try {
+        if (!recovered || !recoveredActiveTurnId) {
+          const modelEnvelope = buildNativeModelEnvelope(input);
+          const dispositionOnlyRecovery = Boolean(
+            recovered &&
+            !recoveredSnapshot.semanticResult &&
+            (persistedSession?.terminalTurns?.length ?? 0) > 0 &&
+            !recoveredActiveTurnId
+          );
+          if (dispositionOnlyRecovery) {
+            modelEnvelope.task.prompt = [
+              "Paperclip semantic-result recovery for a prior completed provider turn.",
+              "The prior turn already performed the work and its user-facing final answer is recorded.",
+              "Do not repeat implementation, tests, research, or the final answer.",
+              "Use the existing session context to invoke exactly one paperclip_finish or paperclip_block with the accurate current disposition, then stop without additional user-facing prose.",
+            ].join("\n");
+          }
+          await session.startTurn({
+            message: { role: "user", text: JSON.stringify(modelEnvelope) },
+            requestedCollaborationMode: "executionMode" in input ? input.executionMode : "default",
+          });
+          await checkpoint();
         }
-        await session.startTurn({
-          message: { role: "user", text: JSON.stringify(modelEnvelope) },
-          requestedCollaborationMode: "executionMode" in input ? input.executionMode : "default",
-        });
-        await checkpoint();
+      } catch (error) {
+        // Consumption starts before provider launch so eager events cannot be
+        // lost. If launch or its checkpoint fails, close the required session
+        // boundary and wait for every already-started durable append before
+        // reporting the failure.
+        await session.close({ reason: "Native session turn start failed." }).catch(() => undefined);
+        await consuming.catch(() => undefined);
+        throw error;
       }
       const terminalEvent = await consuming;
       consumed = terminalEvent;
