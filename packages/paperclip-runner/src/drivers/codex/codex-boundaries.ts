@@ -1,4 +1,5 @@
-import { parse, relative, resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 import {
   CODEX_BLOCK_TOOL_NAME,
@@ -23,31 +24,44 @@ export function validateCodexWorkingDirectory(
   if (workingDirectory.trim().length === 0) {
     throw new Error("Codex working directory is required");
   }
-  const resolved = resolve(workingDirectory);
+  const requested = resolve(workingDirectory);
+  let resolved: string;
+  try {
+    resolved = realpathSync.native(requested);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error("Codex working directory does not exist");
+    }
+    throw error;
+  }
+  if (!statSync(resolved).isDirectory()) {
+    throw new Error("Codex working directory must be a directory");
+  }
   if (resolved === parse(resolved).root) {
     throw new Error("Codex working directory cannot be a filesystem root");
   }
-  const hostHome = environment.HOME?.trim();
-  if (hostHome && pathContains(resolved, resolve(hostHome))) {
+  const hostHome = canonicalConfiguredPath(environment.HOME);
+  if (hostHome && pathContains(resolved, hostHome)) {
     throw new Error("Codex working directory cannot contain the host HOME");
   }
-  const codexHome = environment.CODEX_HOME?.trim();
+  const codexHome = canonicalConfiguredPath(environment.CODEX_HOME);
   if (codexHome) {
-    const resolvedCodexHome = resolve(codexHome);
     if (
-      pathContains(resolved, resolvedCodexHome) ||
-      pathContains(resolvedCodexHome, resolved)
+      pathContains(resolved, codexHome) ||
+      pathContains(codexHome, resolved)
     ) {
       throw new Error("Codex working directory cannot overlap host CODEX_HOME");
     }
   }
   const configuredRoot = environment.PAPERCLIP_WORKSPACE_CWD;
   if (configuredRoot !== undefined && configuredRoot.trim().length > 0) {
-    const root = resolve(configuredRoot);
+    const root = canonicalConfiguredPath(configuredRoot)!;
     const pathFromRoot = relative(root, resolved);
     if (
       pathFromRoot === ".." ||
-      pathFromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+      pathFromRoot.startsWith(`..${sep}`) ||
+      isAbsolute(pathFromRoot)
     ) {
       throw new Error(
         "Codex working directory is outside the assigned workspace",
@@ -57,15 +71,25 @@ export function validateCodexWorkingDirectory(
   return resolved;
 }
 
+function canonicalConfiguredPath(value: string | undefined): string | null {
+  const configured = value?.trim();
+  if (!configured) return null;
+  const resolved = resolve(configured);
+  try {
+    return realpathSync.native(resolved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolved;
+    throw error;
+  }
+}
+
 function pathContains(parent: string, candidate: string): boolean {
   const fromParent = relative(parent, candidate);
   return (
     fromParent === "" ||
     (fromParent !== ".." &&
-      !fromParent.startsWith(
-        `..${process.platform === "win32" ? "\\" : "/"}`,
-      ) &&
-      !parse(fromParent).root)
+      !fromParent.startsWith(`..${sep}`) &&
+      !isAbsolute(fromParent))
   );
 }
 
@@ -129,7 +153,10 @@ export function codexToolAcceptsDisposition(
   if (tool === CODEX_BLOCK_TOOL_NAME) {
     return disposition === "blocked";
   }
-  return disposition === "done" || disposition === "needs_review";
+  if (tool === CODEX_COMPLETION_TOOL_NAME) {
+    return disposition === "done" || disposition === "needs_review";
+  }
+  return false;
 }
 
 export function redactCodexValue(value: unknown, depth = 0): unknown {
