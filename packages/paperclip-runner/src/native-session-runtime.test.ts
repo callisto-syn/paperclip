@@ -280,18 +280,24 @@ describe("executeNativeSession recovery", () => {
   });
 
   it("stops and closes a timed-out consumer even when the caller requested a warm session", async () => {
-    let releaseStream = () => {};
-    const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
+    let markAppendStarted = () => {};
+    const appendStarted = new Promise<void>((resolve) => { markAppendStarted = resolve; });
+    let releaseAppend = () => {};
+    const appendReleased = new Promise<void>((resolve) => { releaseAppend = resolve; });
     let releaseTeardown = () => {};
     const teardownReleased = new Promise<void>((resolve) => { releaseTeardown = resolve; });
     const iteratorTeardown = vi.fn();
-    const appendEvent = vi.fn(async () => ({
-      cursor: 1,
-      highestContiguousSourceSeq: 1,
-      disposition: "committed" as const,
-    }));
-    const cancel = vi.fn(async () => { releaseStream(); });
-    const close = vi.fn(async () => { releaseStream(); });
+    const appendEvent = vi.fn(async () => {
+      markAppendStarted();
+      await appendReleased;
+      return {
+        cursor: 1,
+        highestContiguousSourceSeq: 1,
+        disposition: "committed" as const,
+      };
+    });
+    const cancel = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -299,7 +305,6 @@ describe("executeNativeSession recovery", () => {
       },
       async *events() {
         try {
-          await streamReleased;
           yield runnerEvent(1, "turn.completed");
         } finally {
           iteratorTeardown();
@@ -352,13 +357,17 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 1,
       keepSessionOpen: true,
     }).finally(() => { executionSettled = true; });
+    await appendStarted;
     await vi.waitFor(() => expect(iteratorTeardown).toHaveBeenCalledOnce());
     expect(executionSettled).toBe(false);
     releaseTeardown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(executionSettled).toBe(false);
+    releaseAppend();
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
-    expect(appendEvent).not.toHaveBeenCalled();
+    expect(appendEvent).toHaveBeenCalledOnce();
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {

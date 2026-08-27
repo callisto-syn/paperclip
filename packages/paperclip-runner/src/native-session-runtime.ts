@@ -180,6 +180,10 @@ async function consumeTurn(
     // `next()`; awaiting `return()` then synchronizes the iterator's `finally`
     // teardown before the session can be closed or reused.
     await eventIterator.return?.().catch(() => undefined);
+    // The consumer may already be past `next()` and awaiting a durable append.
+    // Synchronize that work as well so no control-plane commit can finish after
+    // this failed execution has settled and its session has been closed.
+    await consumer.catch(() => undefined);
     if (timer !== undefined) clearTimeout(timer);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
