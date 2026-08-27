@@ -66,6 +66,36 @@ describe("Codex structured question adapter", () => {
     })).toThrow("must be unique");
   });
 
+  it("fails closed instead of truncating oversized native forms", () => {
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: Array.from({ length: 65 }, (_, index) => ({
+        id: `question-${index}`,
+        question: `Question ${index}`,
+      })),
+    })).toThrow("Codex question form exceeds 64 questions");
+
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{
+        id: "oversized-options",
+        question: "Choose one",
+        options: Array.from({ length: 129 }, (_, index) => ({
+          id: `option-${index}`,
+          label: `Option ${index}`,
+        })),
+      }],
+    })).toThrow("Codex question exceeds 128 options");
+
+    expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
+      requestedSchema: {
+        type: "object",
+        properties: Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
+          `property-${index}`,
+          { type: "string" },
+        ])),
+      },
+    })).toThrow("Codex question form exceeds 64 questions");
+  });
+
   it("maps canonical answers back to Codex user-input and elicitation shapes", () => {
     const input = normalizeCodexQuestionSet("tool/requestUserInput", {
       questions: [{

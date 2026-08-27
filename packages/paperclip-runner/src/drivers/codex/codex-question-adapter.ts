@@ -98,7 +98,8 @@ function stableQuestionId(value: unknown, index: number): string {
 
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.slice(0, 128).map((rawOption, index) => {
+  if (value.length > 128) throw new Error("Codex question exceeds 128 options");
+  return value.map((rawOption, index) => {
     const option = record(rawOption);
     const label = text(option.label, text(option.value, text(rawOption))).slice(0, 1_000);
     return {
@@ -117,7 +118,8 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
     : Array.isArray(schema.oneOf)
       ? schema.oneOf.map((entry) => record(entry).const)
       : [];
-  return values.slice(0, 128).map((value, index) => {
+  if (values.length > 128) throw new Error("Codex question exceeds 128 options");
+  return values.map((value, index) => {
     const oneOf = Array.isArray(schema.oneOf) ? record(schema.oneOf[index]) : {};
     return {
       id: `option-${index + 1}`,
@@ -133,7 +135,8 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
 export function normalizeCodexQuestionSet(method: string, params: Record<string, unknown>): PaperclipQuestionSet | null {
   if (method === "item/tool/requestUserInput" || method === "tool/requestUserInput") {
     if (!Array.isArray(params.questions) || params.questions.length === 0) return null;
-    const questions = params.questions.slice(0, 64).map((rawQuestion, index): PaperclipQuestion => {
+    if (params.questions.length > 64) throw new Error("Codex question form exceeds 64 questions");
+    const questions = params.questions.map((rawQuestion, index): PaperclipQuestion => {
       const question = record(rawQuestion);
       const options = codexOptions(question.options);
       return {
@@ -171,7 +174,9 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
   const requestedSchema = record(params.requestedSchema ?? params.schema);
   const properties = record(requestedSchema.properties);
   const required = new Set(Array.isArray(requestedSchema.required) ? requestedSchema.required.filter((entry): entry is string => typeof entry === "string") : []);
-  const questions = Object.entries(properties).slice(0, 64).map(([id, rawProperty]): PaperclipQuestion => {
+  const propertyEntries = Object.entries(properties);
+  if (propertyEntries.length > 64) throw new Error("Codex question form exceeds 64 questions");
+  const questions = propertyEntries.map(([id, rawProperty]): PaperclipQuestion => {
     const property = record(rawProperty);
     const propertyType = text(property.type);
     const itemSchema = record(property.items);
@@ -355,4 +360,3 @@ export function runtimeRequestResponse(
   }
   return { action: resolution.action, content: null, _meta: null };
 }
-
