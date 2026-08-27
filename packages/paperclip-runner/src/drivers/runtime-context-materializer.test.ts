@@ -209,6 +209,48 @@ describe("runtime context materialization", () => {
     )).resolves.toBe("# Assigned\n");
   });
 
+  it("keeps the complete previous assignment when replacement staging fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-runtime-atomic-"));
+    roots.push(root);
+    const assigned = join(root, "assigned-source");
+    const replacement = join(root, "replacement-source");
+    const instructions = join(root, "instructions-source");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([mkdir(assigned), mkdir(replacement), mkdir(instructions)]);
+    await writeFile(join(assigned, "SKILL.md"), "# Assigned\n");
+    await writeFile(join(replacement, "SKILL.md"), "# Replacement\n");
+    await writeFile(join(instructions, "AGENTS.md"), "Instructions\n");
+
+    await prepareIsolatedCodexHome({
+      context: context(assigned, instructions),
+      codexHome,
+    });
+    const replacementContext = context(replacement, instructions, "group/child");
+    const collidingSkill = {
+      ...replacementContext.skills[0]!,
+      key: "company/group",
+      runtimeName: "group",
+    };
+    const value = {
+      ...replacementContext,
+      skills: [...replacementContext.skills, collidingSkill],
+    };
+    const collidingContext = {
+      ...value,
+      aggregateDigest: canonicalNativeRuntimeContextDigest(value),
+    };
+
+    await expect(prepareIsolatedCodexHome({
+      context: collidingContext,
+      codexHome,
+    })).rejects.toThrow();
+    await expect(readFile(
+      join(codexHome, "skills", "assigned", "SKILL.md"),
+      "utf8",
+    )).resolves.toBe("# Assigned\n");
+    await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+  });
+
   it("rejects skill names that can escape or alias the skills home", async () => {
     const root = await mkdtemp(join(tmpdir(), "paperclip-runtime-name-"));
     roots.push(root);

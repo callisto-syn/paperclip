@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
@@ -6,10 +7,11 @@ import {
   mkdir,
   open,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { NativeRuntimeContextSnapshot } from "../contracts/runtime-context.js";
 import type { NativeMcpLaunchBinding } from "./native-mcp.js";
@@ -101,14 +103,15 @@ export async function materializeNativeRuntimeSkills(
     }
   }
 
-  await makeWritableForRemoval(skillsHome);
-  await rm(skillsHome, { recursive: true, force: true });
-  await mkdir(skillsHome, { recursive: true, mode: 0o700 });
-  if (!context) return;
-
-  for (const skill of context.skills) {
-    const target = safeMaterializationTarget(skillsHome, skill.runtimeName);
-    try {
+  const parent = dirname(skillsHome);
+  const nonce = randomUUID();
+  const stagingHome = join(parent, `.paperclip-skills-staging-${nonce}`);
+  const previousHome = join(parent, `.paperclip-skills-previous-${nonce}`);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  await mkdir(stagingHome, { mode: 0o700 });
+  try {
+    for (const skill of context?.skills ?? []) {
+      const target = safeMaterializationTarget(stagingHome, skill.runtimeName);
       await cp(skill.bundle.rootPath, target, {
         recursive: true,
         force: false,
@@ -118,10 +121,29 @@ export async function materializeNativeRuntimeSkills(
       });
       await assertSafeTree(target);
       await makeReadOnly(target);
+    }
+
+    let movedPrevious = false;
+    try {
+      await rename(skillsHome, previousHome);
+      movedPrevious = true;
     } catch (error) {
-      await rm(target, { recursive: true, force: true }).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    try {
+      await rename(stagingHome, skillsHome);
+    } catch (error) {
+      if (movedPrevious) await rename(previousHome, skillsHome);
       throw error;
     }
+    if (movedPrevious) {
+      await makeWritableForRemoval(previousHome);
+      await rm(previousHome, { recursive: true, force: true });
+    }
+  } catch (error) {
+    await makeWritableForRemoval(stagingHome).catch(() => undefined);
+    await rm(stagingHome, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
 }
 
