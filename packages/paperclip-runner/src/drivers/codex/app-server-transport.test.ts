@@ -125,4 +125,21 @@ describe("Codex app-server transport limits", () => {
     );
     await transport?.close();
   });
+
+  it("routes an asynchronous child-stdin failure through deterministic closure", async () => {
+    const diagnostics: string[] = [];
+    const transport = nodeTransport(
+      `require("node:fs").closeSync(0); process.stdout.write(JSON.stringify({ method: "ready", params: {} }) + "\\n"); setInterval(() => {}, 1000)`,
+      { onDiagnostic: (message) => diagnostics.push(message) },
+    );
+    const notifications = transport.notifications()[Symbol.asyncIterator]();
+    await expect(notifications.next()).resolves.toMatchObject({
+      done: false,
+      value: { method: "ready" },
+    });
+
+    await expect(transport.request("after-stdin-close", {})).rejects.toThrow();
+    expect(diagnostics.some((message) => /EPIPE|closed|write/u.test(message))).toBe(true);
+    await transport.close();
+  });
 });

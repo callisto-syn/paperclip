@@ -449,6 +449,7 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
       this.#stderrDecoder.write(chunk),
     );
     this.#process.stderr.on("end", () => this.#stderrDecoder.end());
+    this.#process.stdin.on("error", (error) => this.#fatal(error));
     this.#process.on("error", (error) => this.#fatal(error));
     this.#process.on("exit", (code, signal) => {
       this.#exited = true;
