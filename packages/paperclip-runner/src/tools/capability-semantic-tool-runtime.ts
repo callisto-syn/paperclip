@@ -30,6 +30,21 @@ export interface CapabilitySemanticToolRuntimeOptions {
   resolveSecretValue?: (name: string) => Promise<string | null> | string | null;
 }
 
+interface ExtensionIdempotencyRecord {
+  input: string;
+  resultId: string;
+  execution: {
+    value: CapabilityJsonValue;
+    commandResult: CapabilityToolSuccess["commandResult"];
+    entityRefs: string[];
+  };
+}
+
+const EXTENSION_IDEMPOTENCY_BY_ADAPTER = new WeakMap<
+  CapabilityMockControlPlanePort,
+  Map<string, ExtensionIdempotencyRecord>
+>();
+
 export class CapabilitySemanticToolRuntime {
   readonly #adapter: CapabilityMockControlPlanePort;
   readonly #runId: string;
@@ -38,15 +53,7 @@ export class CapabilitySemanticToolRuntime {
   readonly #resolveSecretValue: CapabilitySemanticToolRuntimeOptions["resolveSecretValue"];
   readonly #authorization = new CapabilityToolAuthorizationEngine();
   readonly #operationResults = new Map<string, CapabilityJsonValue>();
-  readonly #extensionIdempotency = new Map<string, {
-    input: string;
-    resultId: string;
-    execution: {
-      value: CapabilityJsonValue;
-      commandResult: CapabilityToolSuccess["commandResult"];
-      entityRefs: string[];
-    };
-  }>();
+  readonly #extensionIdempotency: Map<string, ExtensionIdempotencyRecord>;
   #resultSequence = 0;
 
   constructor(options: CapabilitySemanticToolRuntimeOptions) {
@@ -55,6 +62,13 @@ export class CapabilitySemanticToolRuntime {
     this.#scenarioGrants = [...new Set(options.scenarioGrants ?? [])].sort();
     this.#policy = options.policy === undefined ? undefined : structuredClone(options.policy);
     this.#resolveSecretValue = options.resolveSecretValue;
+    const existingIdempotency = EXTENSION_IDEMPOTENCY_BY_ADAPTER.get(options.adapter);
+    if (existingIdempotency !== undefined) {
+      this.#extensionIdempotency = existingIdempotency;
+    } else {
+      this.#extensionIdempotency = new Map();
+      EXTENSION_IDEMPOTENCY_BY_ADAPTER.set(options.adapter, this.#extensionIdempotency);
+    }
   }
 
   visibleTools(): CapabilityVisibleToolSet {
@@ -142,7 +156,7 @@ export class CapabilitySemanticToolRuntime {
     try {
       const extensionIdempotencyKey = descriptor.mockCommandMapping.kind === "mock_extension" &&
         descriptor.idempotency === "required"
-        ? `${invocation.operationId}:${invocation.idempotencyKey!.trim()}`
+        ? `${this.#runId}:${invocation.operationId}:${invocation.idempotencyKey!.trim()}`
         : null;
       const canonicalInput = extensionIdempotencyKey === null
         ? null

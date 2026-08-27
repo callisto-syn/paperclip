@@ -348,7 +348,7 @@ describe("Capability exposure and authorization", () => {
   );
 
   it("replays required-idempotency extensions without executing a second result", async () => {
-    const { runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const { adapter, runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
     const invocation = {
       operationId: "upsert_case",
       input: { key: "case-1", body: "Case body" },
@@ -356,13 +356,18 @@ describe("Capability exposure and authorization", () => {
     } as const;
 
     const first = await runtime.invoke(invocation);
-    const replay = await runtime.invoke(invocation);
+    const recreated = new CapabilitySemanticToolRuntime({
+      adapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["cases:write"],
+    });
+    const replay = await recreated.invoke(invocation);
     expect(first).toMatchObject({ ok: true, value: { upserted: true } });
     expect(replay).toMatchObject({ ok: true, value: { upserted: true } });
     if (!first.ok || !replay.ok) throw new Error("expected extension success");
     expect(replay.operationResultId).toBe(first.operationResultId);
 
-    await expect(runtime.invoke({
+    await expect(recreated.invoke({
       ...invocation,
       input: { key: "case-1", body: "Different body" },
     })).resolves.toMatchObject({
