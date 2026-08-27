@@ -337,6 +337,7 @@ export interface ProcessCodexTransportOptions {
   maxPendingRequests?: number;
   maxQueuedNotifications?: number;
   maxQueuedNotificationBytes?: number;
+  maxBufferedOutputBytes?: number;
   maxInflightServerRequests?: number;
   /** Starts a dedicated process group so runnerd and its Codex child are reaped together. */
   processGroup?: boolean;
@@ -348,6 +349,7 @@ const DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PENDING_REQUESTS = 64;
 const DEFAULT_MAX_QUEUED_NOTIFICATIONS = 256;
 const DEFAULT_MAX_QUEUED_NOTIFICATION_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_INFLIGHT_SERVER_REQUESTS = 32;
 const MAX_DIAGNOSTIC_LINE_BYTES = 16 * 1024;
 
@@ -376,6 +378,7 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
   readonly #maxLineBytes: number;
   readonly #maxPendingRequests: number;
   readonly #maxInflightServerRequests: number;
+  readonly #maxBufferedOutputBytes: number;
   readonly #stdoutDecoder: BoundedLineDecoder;
   readonly #stderrDecoder: BoundedLineDecoder;
 
@@ -392,6 +395,10 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
     this.#maxInflightServerRequests = positiveLimit(
       options.maxInflightServerRequests,
       DEFAULT_MAX_INFLIGHT_SERVER_REQUESTS,
+    );
+    this.#maxBufferedOutputBytes = positiveLimit(
+      options.maxBufferedOutputBytes,
+      DEFAULT_MAX_BUFFERED_OUTPUT_BYTES,
     );
     this.#processGroup =
       options.processGroup === true && process.platform !== "win32";
@@ -551,13 +558,40 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
 
   #write(message: unknown): void {
     if (this.#closed) throw new Error("codex app-server transport is closed");
-    const serialized = JSON.stringify(message);
-    if (Buffer.byteLength(serialized) > this.#maxLineBytes) {
-      throw new Error(
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(message);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#fatal(failure);
+      throw failure;
+    }
+    const line = `${serialized}\n`;
+    const lineBytes = Buffer.byteLength(line);
+    if (lineBytes - 1 > this.#maxLineBytes) {
+      const error = new Error(
         `outbound codex JSON-RPC line exceeded ${this.#maxLineBytes} bytes`,
       );
+      this.#fatal(error);
+      throw error;
     }
-    this.#process.stdin.write(`${serialized}\n`);
+    if (
+      this.#process.stdin.writableLength + lineBytes >
+      this.#maxBufferedOutputBytes
+    ) {
+      const error = new Error(
+        `outbound codex JSON-RPC buffer exceeded ${this.#maxBufferedOutputBytes} bytes`,
+      );
+      this.#fatal(error);
+      throw error;
+    }
+    try {
+      this.#process.stdin.write(line);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#fatal(failure);
+      throw failure;
+    }
   }
 
   #onLine(line: string, bytes: number): void {
@@ -655,7 +689,7 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
 
   #handleServerRequest(request: CodexRpcServerRequest): void {
     if (this.#inflightServerRequests >= this.#maxInflightServerRequests) {
-      this.#write({
+      this.#writeServerResponse({
         id: request.id,
         error: {
           code: -32_001,
@@ -668,23 +702,30 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
     void this.#serverRequestHandler(request)
       .then(
         (result) => {
-          if (!this.#closed) this.#write({ id: request.id, result });
+          this.#writeServerResponse({ id: request.id, result });
         },
         (error: unknown) => {
-          if (!this.#closed) {
-            this.#write({
-              id: request.id,
-              error: {
-                code: -32_000,
-                message: redactCodexDiagnostic(String(error)),
-              },
-            });
-          }
+          this.#writeServerResponse({
+            id: request.id,
+            error: {
+              code: -32_000,
+              message: redactCodexDiagnostic(String(error)),
+            },
+          });
         },
       )
       .finally(() => {
         this.#inflightServerRequests -= 1;
       });
+  }
+
+  #writeServerResponse(message: unknown): void {
+    if (this.#closed) return;
+    try {
+      this.#write(message);
+    } catch (error) {
+      this.#fatal(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   #fatal(error: Error): void {

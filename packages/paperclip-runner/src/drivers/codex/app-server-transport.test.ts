@@ -86,4 +86,43 @@ describe("Codex app-server transport limits", () => {
     );
     await transport.close();
   });
+
+  it("fails closed when outbound buffering exceeds its bound", async () => {
+    const diagnostics: string[] = [];
+    const transport = nodeTransport("process.stdin.pause(); setInterval(() => {}, 1000)", {
+      maxLineBytes: 1_024,
+      maxBufferedOutputBytes: 64,
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+
+    expect(() => transport.notify("large", { value: "x".repeat(100) })).toThrow(
+      "outbound codex JSON-RPC buffer exceeded 64 bytes",
+    );
+    expect(diagnostics).toContain(
+      "outbound codex JSON-RPC buffer exceeded 64 bytes",
+    );
+    await expect(transport.request("after-close", {})).rejects.toThrow(
+      "codex app-server transport is closed",
+    );
+    await transport.close();
+  });
+
+  it("routes an oversized server response through deterministic closure", async () => {
+    let transport: ProcessCodexAppServerTransport | undefined;
+    const diagnostic = new Promise<string>((resolve) => {
+      transport = nodeTransport(
+        `setTimeout(() => process.stdout.write(JSON.stringify({ id: "server-1", method: "tool/call", params: {} }) + "\\n"), 20); setInterval(() => {}, 1000)`,
+        {
+          maxLineBytes: 128,
+          onDiagnostic: (message) => resolve(message),
+        },
+      );
+      transport.setServerRequestHandler(async () => ({ value: "x".repeat(256) }));
+    });
+
+    await expect(diagnostic).resolves.toBe(
+      "outbound codex JSON-RPC line exceeded 128 bytes",
+    );
+    await transport?.close();
+  });
 });
