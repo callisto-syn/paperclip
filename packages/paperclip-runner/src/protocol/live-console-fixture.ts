@@ -40,6 +40,7 @@ export interface LiveConsoleConformanceFixture {
 const MAX_LIVE_CONSOLE_FIXTURE_BYTES = 1024 * 1024;
 const MAX_RUNTIME_REQUEST_CASES = 64;
 const MAX_REDACTION_MARKERS = 64;
+const MAX_CONTROL_CASES = 64;
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -93,12 +94,36 @@ export async function loadLiveConsoleConformanceFixture(
     }
     requestIds.add(request.id);
   }
-  const actions = new Set(fixture.goals.map((candidate) => record(candidate)?.action));
+  const goalMethods = {
+    get: "thread/goal/get",
+    set: "thread/goal/set",
+    pause: "thread/goal/set",
+    resume: "thread/goal/set",
+    clear: "thread/goal/clear",
+  } as const;
+  const actions = new Set<string>();
+  for (const candidate of fixture.goals) {
+    const goal = record(candidate);
+    if (goal === null) {
+      throw new Error("Live console fixture contains an invalid goal operation");
+    }
+    const action = goal?.action;
+    if (
+      typeof action !== "string" ||
+      !(action in goalMethods) ||
+      goal.method !== goalMethods[action as keyof typeof goalMethods] ||
+      record(goal.params) === null
+    ) {
+      throw new Error("Live console fixture contains an invalid goal operation");
+    }
+    actions.add(action);
+  }
   if (!["get", "set", "pause", "resume", "clear"].every((action) => actions.has(action))) {
     throw new Error("Live console fixture goal operation set is incomplete");
   }
   const lineage = record(fixture.lineage);
   const child = record(lineage?.childThread);
+  const controls = record(fixture.controls);
   const reconnect = record(fixture.reconnect);
   if (
     !nonEmpty(lineage?.rootThreadId) ||
@@ -112,6 +137,19 @@ export async function loadLiveConsoleConformanceFixture(
     (reconnect.lastSourceSequence as number) < 0
   ) {
     throw new Error("Live console fixture identity or lineage is incomplete");
+  }
+  if (
+    controls === null ||
+    Object.keys(controls).length === 0 ||
+    Object.keys(controls).length > MAX_CONTROL_CASES ||
+    Object.values(controls).some((candidate) => {
+      const control = record(candidate);
+      return control === null ||
+        !nonEmpty(control.expected) ||
+        (control.turnId !== undefined && !nonEmpty(control.turnId));
+    })
+  ) {
+    throw new Error("Live console fixture controls are invalid");
   }
   if (
     !Array.isArray(fixture.redactionMarkers) ||
