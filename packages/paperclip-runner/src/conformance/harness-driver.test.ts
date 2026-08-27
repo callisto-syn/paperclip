@@ -82,4 +82,33 @@ describe("harness-driver conformance V1", () => {
     await firstRecovery.session!.close({ reason: "first_recovery_complete" });
     await session.close({ reason: "original_complete", force: true });
   });
+
+  it("interrupts a recovered turn deterministically before event consumption", async () => {
+    const driver = new DeterministicHarnessDriver();
+    const session = await driver.openSession({
+      runId: "run_recovery_interrupt",
+      normalizedSessionId: "session_recovery_interrupt",
+      workingDirectory: "/deterministic/conformance",
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "[conformance:interrupt]" },
+    });
+    const recovery = await driver.recoverSession(await session.snapshot());
+    const recovered = recovery.session!;
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(recovered.interrupt?.({
+      turnId,
+      reason: "cancel_before_consumption",
+    })).resolves.toBeUndefined();
+    const events = [];
+    for await (const event of recovered.events()) events.push(event);
+    expect(events.map((event) => [event.sourceSeq, event.eventType])).toEqual([
+      [3, "turn.interrupted"],
+      [4, "run.terminal"],
+    ]);
+
+    await recovered.close({ reason: "recovered_complete" });
+    await session.close({ reason: "original_complete", force: true });
+  });
 });
