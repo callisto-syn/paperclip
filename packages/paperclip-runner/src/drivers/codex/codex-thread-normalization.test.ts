@@ -31,6 +31,14 @@ describe("Codex thread normalization", () => {
       objective: "",
       status: "active",
     })).toBeNull();
+    for (const invalidNumber of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+      expect(parseCodexThreadGoal({
+        threadId: "thread-1",
+        objective: "Invalid counters must fail closed",
+        status: "active",
+        tokensUsed: invalidNumber,
+      })).toBeNull();
+    }
 
     expect(codexThreadLineage({
       id: "child",
@@ -58,9 +66,40 @@ describe("Codex thread normalization", () => {
   });
 
   it("admits only bound notifications and safe workspace paths", () => {
-    expect(isBoundCodexNotification("turn/started")).toBe(true);
-    expect(isBoundCodexNotification("item/completed")).toBe(true);
-    expect(isBoundCodexNotification("unknown/provider/event")).toBe(false);
+    const binding = { runId: "run-1", threadIds: ["thread-1"] };
+    expect(isBoundCodexNotification({
+      method: "turn/started",
+      params: { threadId: "thread-1" },
+    }, binding)).toBe(true);
+    expect(isBoundCodexNotification({
+      method: "item/completed",
+      params: { runId: "run-1" },
+    }, binding)).toBe(true);
+    expect(isBoundCodexNotification({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: { subagent: { thread_spawn: { parent_thread_id: "thread-1" } } },
+        },
+      },
+    }, binding)).toBe(true);
+    expect(isBoundCodexNotification({
+      method: "turn/started",
+      params: { threadId: "other-thread" },
+    }, binding)).toBe(false);
+    expect(isBoundCodexNotification({
+      method: "item/completed",
+      params: { runId: "other-run", threadId: "thread-1" },
+    }, binding)).toBe(false);
+    expect(isBoundCodexNotification({
+      method: "unknown/provider/event",
+      params: { runId: "run-1" },
+    }, binding)).toBe(false);
+    expect(isBoundCodexNotification({
+      method: "warning",
+      params: {},
+    }, binding)).toBe(false);
 
     expect(codexWorkspaceRelativePath("src\\index.ts")).toBe("src/index.ts");
     expect(codexWorkspaceRelativePath("../secret")).toBeNull();

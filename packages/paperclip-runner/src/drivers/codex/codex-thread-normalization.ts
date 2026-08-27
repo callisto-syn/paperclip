@@ -13,6 +13,12 @@ function text(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
 export function parseCodexThreadGoal(value: unknown): HarnessThreadGoal | null {
   const goal = record(value);
   const threadId = text(goal.threadId);
@@ -32,16 +38,37 @@ export function parseCodexThreadGoal(value: unknown): HarnessThreadGoal | null {
   ) {
     return null;
   }
+  const tokenBudget = goal.tokenBudget === null || goal.tokenBudget === undefined
+    ? null
+    : nonNegativeInteger(goal.tokenBudget);
+  const tokensUsed = goal.tokensUsed === undefined
+    ? 0
+    : nonNegativeInteger(goal.tokensUsed);
+  const timeUsedSeconds = goal.timeUsedSeconds === undefined
+    ? 0
+    : nonNegativeInteger(goal.timeUsedSeconds);
+  const createdAt = goal.createdAt === undefined
+    ? 0
+    : nonNegativeInteger(goal.createdAt);
+  const updatedAt = goal.updatedAt === undefined
+    ? 0
+    : nonNegativeInteger(goal.updatedAt);
+  if (
+    (goal.tokenBudget !== null && goal.tokenBudget !== undefined && tokenBudget === null) ||
+    tokensUsed === null ||
+    timeUsedSeconds === null ||
+    createdAt === null ||
+    updatedAt === null
+  ) return null;
   return {
     threadId,
     objective,
     status: status as HarnessThreadGoal["status"],
-    tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
-    tokensUsed: typeof goal.tokensUsed === "number" ? goal.tokensUsed : 0,
-    timeUsedSeconds:
-      typeof goal.timeUsedSeconds === "number" ? goal.timeUsedSeconds : 0,
-    createdAt: typeof goal.createdAt === "number" ? goal.createdAt : 0,
-    updatedAt: typeof goal.updatedAt === "number" ? goal.updatedAt : 0,
+    tokenBudget,
+    tokensUsed,
+    timeUsedSeconds,
+    createdAt,
+    updatedAt,
   };
 }
 
@@ -67,12 +94,7 @@ export function codexThreadLineage(value: unknown): HarnessThreadLineageEntry {
     threadId: text(thread.id),
     providerSessionId: text(thread.sessionId) || null,
     parentThreadId,
-    depth:
-      typeof spawn.depth === "number"
-        ? spawn.depth
-        : parentThreadId === null
-          ? 0
-          : 1,
+    depth: nonNegativeInteger(spawn.depth) ?? (parentThreadId === null ? 0 : 1),
     nickname:
       text(
         thread.agentNickname,
@@ -84,7 +106,17 @@ export function codexThreadLineage(value: unknown): HarnessThreadLineageEntry {
   };
 }
 
-export function isBoundCodexNotification(method: string): boolean {
+export interface CodexNotificationBinding {
+  runId: string;
+  threadIds: readonly string[];
+}
+
+export interface BindableCodexNotification {
+  method: string;
+  params: Record<string, unknown>;
+}
+
+function supportedCodexNotificationMethod(method: string): boolean {
   return (
     method === "turn/started" ||
     method === "turn/completed" ||
@@ -113,6 +145,36 @@ export function isBoundCodexNotification(method: string): boolean {
     method === "turn/diff/updated" ||
     method === "turn/plan/updated"
   );
+}
+
+/**
+ * Admits only known notifications that explicitly name the active run or one
+ * of its known threads. A newly spawned child may bind through its parent.
+ */
+export function isBoundCodexNotification(
+  notification: BindableCodexNotification,
+  binding: CodexNotificationBinding,
+): boolean {
+  if (!supportedCodexNotificationMethod(notification.method)) return false;
+  const params = record(notification.params);
+  const claimedRunId = text(params.runId, text(params.paperclipRunId));
+  if (claimedRunId.length > 0 && claimedRunId !== binding.runId) return false;
+
+  const allowedThreads = new Set(binding.threadIds);
+  const directThreadId = text(params.threadId, text(record(params.turn).threadId));
+  if (directThreadId.length > 0) return allowedThreads.has(directThreadId);
+
+  const thread = record(params.thread);
+  const threadId = text(thread.id);
+  if (threadId.length > 0 && allowedThreads.has(threadId)) return true;
+  const source = record(thread.source);
+  const subAgent = record(source.subAgent ?? source.subagent);
+  const spawn = record(subAgent.thread_spawn ?? subAgent.threadSpawn);
+  const parentThreadId = text(spawn.parent_thread_id ?? spawn.parentThreadId);
+  if (parentThreadId.length > 0) return allowedThreads.has(parentThreadId);
+  if (threadId.length > 0) return false;
+
+  return claimedRunId === binding.runId;
 }
 
 export function codexWorkspaceRelativePath(value: unknown): string | null {
