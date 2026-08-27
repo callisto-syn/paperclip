@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { NativeExecutionInput } from "../contracts/native-execution.js";
+import { createNativeSessionBackend } from "../index.js";
 import { createCodexNativeSessionBackend } from "./codex-native-backend.js";
-import { createNativeSessionBackend } from "./native-backend-factory.js";
 
 function execution(
   provider: NativeExecutionInput["provider"] = {
