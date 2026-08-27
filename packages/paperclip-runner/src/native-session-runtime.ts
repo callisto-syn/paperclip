@@ -172,6 +172,10 @@ async function consumeTurn(
     stopConsumer = true;
     await session.interrupt?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
     await session.cancel?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
+    // `close` is the required termination boundary. Unlike optional interrupt
+    // and cancel support, it must release a pending event read before it
+    // resolves, which makes the teardown waits below bounded by the backend.
+    await session.close({ reason: "Native session event consumption failed." }).catch(() => undefined);
     throw error;
   } finally {
     stopConsumer = true;

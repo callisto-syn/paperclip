@@ -87,6 +87,11 @@ export interface NativeSession {
   } | null>;
   usage?(): Promise<Record<string, unknown> | null>;
   snapshot(): Promise<PersistedNativeSession>;
+  /**
+   * Idempotently stop provider work and release every pending `events().next()`
+   * before this promise resolves. The runtime uses this required boundary when
+   * optional interrupt or cancel support cannot release a blocked event read.
+   */
   close(input: { reason: string }): Promise<void>;
 }
 

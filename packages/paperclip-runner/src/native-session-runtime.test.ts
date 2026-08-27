@@ -366,8 +366,68 @@ describe("executeNativeSession recovery", () => {
     releaseAppend();
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalled();
     expect(appendEvent).toHaveBeenCalledOnce();
+  });
+
+  it("uses required session closure to release a blocked event read", async () => {
+    let releaseStream = () => {};
+    const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
+    const close = vi.fn(async () => { releaseStream(); });
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: false, structuredResult: true };
+      },
+      async *events() {
+        await streamReleased;
+        yield runnerEvent(1, "turn.completed");
+      },
+      async startTurn() { return { turnId: "turn-recovery" }; },
+      async result() { return null; },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity,
+          providerSessionId: "provider-recovery",
+          cursor: null,
+          activeTurnId: null,
+          pendingRuntimeRequests: [],
+          lineage: [],
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: false, structuredResult: true },
+        };
+      },
+      async openSession() { return session; },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      timeoutMs: 1,
+      keepSessionOpen: true,
+    })).rejects.toThrow("native session timed out");
+    expect(close).toHaveBeenCalled();
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
