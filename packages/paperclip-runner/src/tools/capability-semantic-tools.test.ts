@@ -368,9 +368,57 @@ describe("Capability exposure and authorization", () => {
     expect(replay.operationResultId).toBe(first.operationResultId);
 
     await expect(recreated.invoke({
+      operationId: "inspect_operation_result",
+      input: { operationResultId: first.operationResultId },
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { key: "case-1", body: "Case body", upserted: true },
+    });
+
+    const next = await recreated.invoke({
+      ...invocation,
+      idempotencyKey: "upsert-case-2",
+    });
+    expect(next).toMatchObject({ ok: true });
+    if (!next.ok) throw new Error("expected extension success");
+    expect(next.operationResultId).not.toBe(first.operationResultId);
+
+    await expect(recreated.invoke({
       ...invocation,
       input: { key: "case-1", body: "Different body" },
     })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "input_invalid", reason: "idempotency_key_conflict" },
+    });
+  });
+
+  it("serializes concurrent retries for required-idempotency extensions", async () => {
+    const { runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-concurrent", body: "Case body" },
+      idempotencyKey: "upsert-case-concurrent",
+    } as const;
+
+    const [first, replay] = await Promise.all([
+      runtime.invoke(invocation),
+      runtime.invoke(invocation),
+    ]);
+    expect(first).toMatchObject({ ok: true });
+    expect(replay).toMatchObject({ ok: true });
+    if (!first.ok || !replay.ok) throw new Error("expected extension success");
+    expect(replay.operationResultId).toBe(first.operationResultId);
+
+    const [accepted, conflicting] = await Promise.all([
+      runtime.invoke({ ...invocation, idempotencyKey: "shared-key" }),
+      runtime.invoke({
+        ...invocation,
+        input: { key: "case-concurrent", body: "Different body" },
+        idempotencyKey: "shared-key",
+      }),
+    ]);
+    expect(accepted).toMatchObject({ ok: true });
+    expect(conflicting).toMatchObject({
       ok: false,
       error: { code: "input_invalid", reason: "idempotency_key_conflict" },
     });

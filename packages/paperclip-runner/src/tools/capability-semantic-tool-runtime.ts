@@ -30,19 +30,26 @@ export interface CapabilitySemanticToolRuntimeOptions {
   resolveSecretValue?: (name: string) => Promise<string | null> | string | null;
 }
 
-interface ExtensionIdempotencyRecord {
-  input: string;
-  resultId: string;
-  execution: {
-    value: CapabilityJsonValue;
-    commandResult: CapabilityToolSuccess["commandResult"];
-    entityRefs: string[];
-  };
+interface ExtensionExecution {
+  value: CapabilityJsonValue;
+  commandResult: CapabilityToolSuccess["commandResult"];
+  entityRefs: string[];
 }
 
-const EXTENSION_IDEMPOTENCY_BY_ADAPTER = new WeakMap<
+interface ExtensionIdempotencyRecord {
+  input: string;
+  execution: Promise<{ resultId: string; value: ExtensionExecution }>;
+}
+
+interface CapabilitySemanticRuntimeState {
+  extensionIdempotency: Map<string, ExtensionIdempotencyRecord>;
+  operationResults: Map<string, CapabilityJsonValue>;
+  resultSequence: number;
+}
+
+const RUNTIME_STATE_BY_ADAPTER = new WeakMap<
   CapabilityMockControlPlanePort,
-  Map<string, ExtensionIdempotencyRecord>
+  Map<string, CapabilitySemanticRuntimeState>
 >();
 
 export class CapabilitySemanticToolRuntime {
@@ -52,9 +59,7 @@ export class CapabilitySemanticToolRuntime {
   readonly #policy: CapabilityScenarioToolPolicy | undefined;
   readonly #resolveSecretValue: CapabilitySemanticToolRuntimeOptions["resolveSecretValue"];
   readonly #authorization = new CapabilityToolAuthorizationEngine();
-  readonly #operationResults = new Map<string, CapabilityJsonValue>();
-  readonly #extensionIdempotency: Map<string, ExtensionIdempotencyRecord>;
-  #resultSequence = 0;
+  readonly #state: CapabilitySemanticRuntimeState;
 
   constructor(options: CapabilitySemanticToolRuntimeOptions) {
     this.#adapter = options.adapter;
@@ -62,12 +67,20 @@ export class CapabilitySemanticToolRuntime {
     this.#scenarioGrants = [...new Set(options.scenarioGrants ?? [])].sort();
     this.#policy = options.policy === undefined ? undefined : structuredClone(options.policy);
     this.#resolveSecretValue = options.resolveSecretValue;
-    const existingIdempotency = EXTENSION_IDEMPOTENCY_BY_ADAPTER.get(options.adapter);
-    if (existingIdempotency !== undefined) {
-      this.#extensionIdempotency = existingIdempotency;
-    } else {
-      this.#extensionIdempotency = new Map();
-      EXTENSION_IDEMPOTENCY_BY_ADAPTER.set(options.adapter, this.#extensionIdempotency);
+    let adapterState = RUNTIME_STATE_BY_ADAPTER.get(options.adapter);
+    if (adapterState === undefined) {
+      adapterState = new Map();
+      RUNTIME_STATE_BY_ADAPTER.set(options.adapter, adapterState);
+    }
+    const existingState = adapterState.get(options.runId);
+    if (existingState !== undefined) this.#state = existingState;
+    else {
+      this.#state = {
+        extensionIdempotency: new Map(),
+        operationResults: new Map(),
+        resultSequence: 0,
+      };
+      adapterState.set(options.runId, this.#state);
     }
   }
 
@@ -163,7 +176,7 @@ export class CapabilitySemanticToolRuntime {
         : canonicalJson(invocation.input);
       const cachedExtension = extensionIdempotencyKey === null
         ? undefined
-        : this.#extensionIdempotency.get(extensionIdempotencyKey);
+        : this.#state.extensionIdempotency.get(extensionIdempotencyKey);
       if (cachedExtension !== undefined && cachedExtension.input !== canonicalInput) {
         const denied = this.#authorization.denyInvocation(
           invocation.operationId,
@@ -172,25 +185,45 @@ export class CapabilitySemanticToolRuntime {
         );
         return { observableResult: this.#denial(invocation.operationId, denied, "input_invalid") };
       }
-      const execution = cachedExtension === undefined
-        ? await this.#execute(descriptor, invocation)
-        : structuredClone(cachedExtension.execution);
+      let execution: ExtensionExecution;
+      let resultId: string;
+      if (extensionIdempotencyKey !== null) {
+        let idempotencyRecord = cachedExtension;
+        if (idempotencyRecord === undefined) {
+          const executionPromise = this.#execute(descriptor, invocation).then((value) => ({
+            resultId: value.commandResult?.commandId ?? this.#nextResultId(),
+            value,
+          }));
+          idempotencyRecord = {
+            input: canonicalInput!,
+            execution: executionPromise,
+          };
+          this.#state.extensionIdempotency.set(
+            extensionIdempotencyKey,
+            idempotencyRecord,
+          );
+          executionPromise.catch(() => {
+            if (
+              this.#state.extensionIdempotency.get(extensionIdempotencyKey)
+              === idempotencyRecord
+            ) {
+              this.#state.extensionIdempotency.delete(extensionIdempotencyKey);
+            }
+          });
+        }
+        const completed = await idempotencyRecord.execution;
+        execution = structuredClone(completed.value);
+        resultId = completed.resultId;
+      } else {
+        execution = await this.#execute(descriptor, invocation);
+        resultId = execution.commandResult?.commandId ?? this.#nextResultId();
+      }
       const finalAuthorization = this.#authorization.attachStateChange(
         authorization.sequence,
         beforeRevision,
         this.#adapter.snapshot().revision,
         execution.entityRefs,
       );
-      const resultId = cachedExtension?.resultId ??
-        execution.commandResult?.commandId ??
-        `tool-result-${++this.#resultSequence}`;
-      if (extensionIdempotencyKey !== null && cachedExtension === undefined) {
-        this.#extensionIdempotency.set(extensionIdempotencyKey, {
-          input: canonicalInput!,
-          resultId,
-          execution: structuredClone(execution),
-        });
-      }
       const observableValue = redactForBoundary(descriptor, execution.value, "output");
       const observableCommandResult = execution.commandResult === null
         ? null
@@ -204,7 +237,7 @@ export class CapabilitySemanticToolRuntime {
         commandResult: observableCommandResult,
         authorization: finalAuthorization,
       };
-      this.#operationResults.set(resultId, structuredClone(observableValue));
+      this.#state.operationResults.set(resultId, structuredClone(observableValue));
       const observableResult = deepFreeze(success);
       if (!includeModelResult) return { observableResult };
       const modelResult: CapabilityModelToolSuccess = deepFreeze({
@@ -227,6 +260,10 @@ export class CapabilitySemanticToolRuntime {
     }
   }
 
+  #nextResultId(): string {
+    return `tool-result-${++this.#state.resultSequence}`;
+  }
+
   async #execute(
     descriptor: CapabilitySemanticToolDescriptor,
     invocation: CapabilityToolInvocation,
@@ -243,7 +280,7 @@ export class CapabilitySemanticToolRuntime {
         };
       case "operation_result": {
         const id = requireString(input.operationResultId);
-        const result = this.#operationResults.get(id);
+        const result = this.#state.operationResults.get(id);
         if (result === undefined) throw new Error("operation result is not available");
         return { value: structuredClone(result), commandResult: null, entityRefs: [] };
       }
