@@ -23,12 +23,12 @@ export const genericApiRequestAction = {
     "prpEvidence": "test-only; excluded from product PRP evidence",
     "prpBindingStatus": "audit_pending",
     "legacyAliases": [],
-    "note": "Test-only escape hatch; explicitly cannot count as product capability coverage (PAP-17016 deliverable D). Single unified claim test:generic_api_request."
+    "note": "Test-only escape hatch; explicitly cannot count as product capability coverage. Single unified claim test:generic_api_request."
   },
   "documentation": {
     "title": "Generic API request",
     "description": "Test-only escape hatch. Disabled unless the scenario and explicit claim both enable it.",
-    "note": "Test-only escape hatch; explicitly cannot count as product capability coverage (PAP-17016 deliverable D). Single unified claim test:generic_api_request."
+    "note": "Test-only escape hatch; explicitly cannot count as product capability coverage. Single unified claim test:generic_api_request."
   },
   "examples": {
     "call": {
