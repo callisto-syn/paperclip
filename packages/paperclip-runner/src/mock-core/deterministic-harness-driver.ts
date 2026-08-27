@@ -147,6 +147,8 @@ class DeterministicHarnessSession implements HarnessSession {
     this.#config = structuredClone(config);
     this.#turnId = snapshot?.activeTurnId ?? snapshot?.semanticResult?.turnId ?? null;
     this.#semanticResult = snapshot?.semanticResult?.result ?? null;
+    this.#active = snapshot?.activeTurnId !== null && snapshot?.activeTurnId !== undefined;
+    this.#nextSourceSeq = (snapshot?.lastSourceSequence ?? 0) + 1;
   }
 
   ids() {
