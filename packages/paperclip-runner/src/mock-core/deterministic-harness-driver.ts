@@ -137,6 +137,7 @@ class DeterministicHarnessSession implements HarnessSession {
   #closed = false;
   #active = false;
   #nextSourceSeq = 1;
+  readonly #eventWaiters = new Set<() => void>();
 
   constructor(
     input: OpenHarnessSessionInput,
@@ -160,7 +161,16 @@ class DeterministicHarnessSession implements HarnessSession {
   }
 
   async *events(): AsyncIterable<PrpEvent> {
-    for (const event of this.#events) yield structuredClone(event);
+    let index = 0;
+    while (true) {
+      while (index < this.#events.length) {
+        const event = this.#events[index++]!;
+        yield structuredClone(event);
+        if (event.eventType === "run.terminal") return;
+      }
+      if (this.#closed) return;
+      await new Promise<void>((resolve) => this.#eventWaiters.add(resolve));
+    }
   }
 
   async startTurn(input: { message: { role: "user"; text: string } }): Promise<{ turnId: string }> {
@@ -168,7 +178,7 @@ class DeterministicHarnessSession implements HarnessSession {
     if (this.#turnId !== null) throw new Error("deterministic session accepts one turn");
     this.#turnId = `turn_${this.#input.runId}`;
     this.#active = true;
-    this.#events.push(
+    this.#appendEvents(
       this.#event("session.started", {}, { turn: false }),
       this.#event("turn.started", { message: input.message.text }),
     );
@@ -203,13 +213,13 @@ class DeterministicHarnessSession implements HarnessSession {
       authorizationBoundary: "active_task",
       auditReceiptId: `audit_${this.#input.runId}`,
     });
-    this.#events.push(
+    this.#appendEvents(
       this.#event("mcp_app.tool_input", { semantic_tool: inputEnvelope }, { itemId }),
       this.#event("mcp_app.tool_result", { semantic_tool: resultEnvelope }, { itemId }),
     );
     this.#semanticResult = completedResult();
     const terminal = completedTerminal();
-    this.#events.push(
+    this.#appendEvents(
       this.#event("run.result.proposed", this.#semanticResult),
       this.#event("turn.completed", {}),
       this.#event("run.terminal", terminal, { turn: false }),
@@ -224,7 +234,7 @@ class DeterministicHarnessSession implements HarnessSession {
     if (input.turnId !== undefined && input.turnId !== this.#turnId) {
       throw new Error(`turn ${input.turnId} is not active`);
     }
-    this.#events.push(
+    this.#appendEvents(
       this.#event("turn.interrupted", { reason: input.reason ?? "interrupted" }),
       this.#event("run.terminal", cancelledTerminal(), { turn: false }),
     );
@@ -287,6 +297,17 @@ class DeterministicHarnessSession implements HarnessSession {
       await this.interrupt({ reason: input.reason });
     }
     this.#closed = true;
+    this.#notifyEventWaiters();
+  }
+
+  #appendEvents(...events: PrpEvent[]): void {
+    this.#events.push(...events);
+    this.#notifyEventWaiters();
+  }
+
+  #notifyEventWaiters(): void {
+    for (const resolve of this.#eventWaiters) resolve();
+    this.#eventWaiters.clear();
   }
 
   #event(

@@ -61,13 +61,18 @@ describe("harness-driver conformance V1", () => {
     expect(recovery.recovered).toBe(true);
     expect(recovery.session).toBeDefined();
     const recovered = recovery.session!;
+    const recoveredEventsPromise = (async () => {
+      const events = [];
+      for await (const event of recovered.events()) events.push(event);
+      return events;
+    })();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await expect(recovered.interrupt?.({
       turnId,
       reason: "recovered_interrupt",
     })).resolves.toBeUndefined();
 
-    const events = [];
-    for await (const event of recovered.events()) events.push(event);
+    const events = await recoveredEventsPromise;
     expect(events.map((event) => [event.sourceSeq, event.eventType])).toEqual([
       [3, "turn.interrupted"],
       [4, "run.terminal"],
