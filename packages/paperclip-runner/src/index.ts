@@ -19,6 +19,7 @@ export {
 export type { DurableRecoveryIdentity } from "./control-plane/prp-transport-types.js";
 export * from "./protocol/replay-contract.js";
 export * from "./protocol/result-normalization.js";
+export * from "./protocol/semantic-tool-receipts.js";
 export * from "./provider-events.js";
 export * from "./reducer/session-reducer.js";
 export * from "./semantic-tools/index.js";
