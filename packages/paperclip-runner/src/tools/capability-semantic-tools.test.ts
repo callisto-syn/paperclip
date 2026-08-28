@@ -570,10 +570,12 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
-  it("never reclaims an expired execution whose durable completion cannot be stored", async () => {
+  it("reclaims an expired executing marker after its owner terminates", async () => {
     vi.useFakeTimers({ now: 0 });
     try {
+      let now = 0;
       let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      let rejectCompletion = true;
       const durableStore: CapabilitySemanticToolRuntimeStore = {
         load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
         save: (_runId, snapshot) => {
@@ -581,23 +583,18 @@ describe("Capability exposure and authorization", () => {
         },
         compareAndSwap: (_runId, expected, snapshot) => {
           if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
-          const pending = snapshot.extensions.find(
-            (extension) => extension.status === "pending",
-          );
-          if (pending?.phase === "reserved" ||
-            (pending?.phase === "executing" &&
-              durableSnapshot?.extensions[0]?.status === "pending" &&
-              durableSnapshot.extensions[0].phase === "reserved")) {
-            durableSnapshot = structuredClone(snapshot);
-            return true;
+          if (rejectCompletion &&
+            snapshot.extensions.some((extension) => extension.status === "completed")) {
+            return false;
           }
-          return false;
+          durableSnapshot = structuredClone(snapshot);
+          return true;
         },
       };
       const first = await runtimeFor({
         scenarioGrants: ["cases:write"],
         semanticToolRuntimeStore: durableStore,
-        now: Date.now,
+        now: () => now,
       });
       const invocation = {
         operationId: "upsert_case",
@@ -617,7 +614,11 @@ describe("Capability exposure and authorization", () => {
         expect.objectContaining({ status: "pending", phase: "executing" }),
       ]);
 
-      await vi.advanceTimersByTimeAsync(60_000);
+      // Model termination of the first process: its heartbeat no longer owns
+      // the lease, and the durable store is available to the replacement.
+      vi.clearAllTimers();
+      rejectCompletion = false;
+      now = 60_000;
       const followerAdapter = CapabilityMockControlPlaneAdapter.restore(
         first.adapter.serialize(),
         { semanticToolRuntimeStore: durableStore },
@@ -626,11 +627,12 @@ describe("Capability exposure and authorization", () => {
         adapter: followerAdapter,
         runId: OPEN.identity.runId,
         scenarioGrants: ["cases:write"],
-        now: Date.now,
+        now: () => now,
       });
       await expect(follower.invoke(invocation)).resolves.toMatchObject({
-        ok: false,
-        error: { reason: "idempotency_recovery_in_flight" },
+        ok: true,
+        operationResultId: "tool-result-1",
+        value: { key: "case-ambiguous-effect", upserted: true },
       });
     } finally {
       vi.useRealTimers();
@@ -1011,6 +1013,7 @@ describe("Capability exposure and authorization", () => {
         status: "pending",
         ownerId: "terminated-executor",
         leaseExpiresAtMs: 1_000,
+        phase: "executing",
       }],
     };
     const durableStore: CapabilitySemanticToolRuntimeStore = {

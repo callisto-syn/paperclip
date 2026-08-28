@@ -266,7 +266,7 @@ export interface CapabilitySemanticToolRuntimeSnapshot {
         /** Optional only for legacy pending snapshots, which are immediately reclaimable. */
         ownerId?: string;
         leaseExpiresAtMs?: number;
-        /** `executing` is never reclaimed automatically because its effect is ambiguous. */
+        /** Both phases become reclaimable when the owner lease expires. */
         phase?: "reserved" | "executing";
       }
     | {

@@ -259,10 +259,7 @@ export class CapabilitySemanticToolRuntime {
             };
           }
           if (durableExtension.status === "pending") {
-            if (
-              durableExtension.phase === "executing" ||
-              (durableExtension.leaseExpiresAtMs ?? 0) > this.#now()
-            ) {
+            if ((durableExtension.leaseExpiresAtMs ?? 0) > this.#now()) {
               const denied = this.#authorization.denyInvocation(
                 invocation.operationId,
                 context,
@@ -457,7 +454,6 @@ export class CapabilitySemanticToolRuntime {
         existing !== undefined &&
         (existing.status !== "pending" ||
           existing.input !== record.input ||
-          existing.phase === "executing" ||
           (existing.leaseExpiresAtMs ?? 0) > this.#now())
       ) {
         return false;
