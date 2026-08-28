@@ -172,5 +172,6 @@ fn fails_closed_before_returning_an_unauthorized_tool_call() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("unauthorized tool issues.delete"), "{error}");
+    assert!(session.state().pending_tool("call-1").is_none());
     assert!(session.shutdown("already closed").is_ok());
 }

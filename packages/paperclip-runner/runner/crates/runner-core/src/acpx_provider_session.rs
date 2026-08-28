@@ -292,7 +292,8 @@ impl AcpxProviderSession {
         let Some(event) = event else {
             return Ok(None);
         };
-        let events = match self.state.accept_event(&event) {
+        let mut next_state = self.state.clone();
+        let events = match next_state.accept_event(&event) {
             Ok(events) => events,
             Err(error) => return Err(self.fail_closed(error)),
         };
@@ -322,6 +323,7 @@ impl AcpxProviderSession {
                 _ => {}
             }
         }
+        self.state = next_state;
         self.tool_bridge = next_bridge;
         Ok(Some(events))
     }
