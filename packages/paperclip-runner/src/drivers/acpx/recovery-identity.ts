@@ -52,17 +52,30 @@ export async function createAcpxRecoveryBinding(input: {
     input.runtimeDirectory,
     input.normalizedSessionId,
   );
+  const profileDigest = digest(
+    canonicalJson({
+      driverKind: input.profile.driverKind,
+      protocolVersion: input.profile.protocolVersion,
+      acpxVersion: input.profile.acpxVersion,
+      agent: input.profile.agent,
+      agentProfileVersion: input.profile.agentProfileVersion,
+      agentServerPackage: input.profile.agentServerPackage,
+      agentServerVersion: input.profile.agentServerVersion,
+      agentRuntimePackage: input.profile.agentRuntimePackage,
+      agentRuntimeVersion: input.profile.agentRuntimeVersion,
+      commandDigest: input.profile.commandDigest,
+      qualificationModel: input.profile.qualificationModel,
+      reportedModelId: input.profile.reportedModelId,
+      permissionPolicy: input.profile.permissionPolicy,
+    }),
+  );
   const profileSessionKey = digest(
     canonicalJson({
       normalizedSessionId: input.normalizedSessionId,
       workspacePath,
       workspaceDigest,
-      agent: input.profile.agent,
       requestedModel: input.requestedModel,
-      reportedModelId: input.profile.reportedModelId,
-      commandDigest: input.profile.commandDigest,
-      driverKind: input.profile.driverKind,
-      protocolVersion: input.profile.protocolVersion,
+      profileDigest,
       permissionMode: input.permissionMode,
     }),
   ).replace("sha256:", "paperclip-");
@@ -71,7 +84,7 @@ export async function createAcpxRecoveryBinding(input: {
     workspacePath,
     workspaceDigest,
     runtimeRoot,
-    profileDigest: input.profile.commandDigest,
+    profileDigest,
     requestedModel: input.requestedModel,
     effectiveModel: input.requestedModel,
     permissionMode: input.permissionMode,

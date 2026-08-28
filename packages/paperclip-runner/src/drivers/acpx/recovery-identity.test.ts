@@ -56,9 +56,35 @@ describe("ACPX recovery identity", () => {
       ...fixture.input,
       permissionMode: "deny-all",
     });
+    const otherRuntimePackage = await createAcpxRecoveryBinding({
+      ...fixture.input,
+      profile: {
+        ...fixture.input.profile,
+        agentRuntimePackage: "@paperclip/test-runtime",
+      },
+    });
+    const otherRuntimeVersion = await createAcpxRecoveryBinding({
+      ...fixture.input,
+      profile: {
+        ...fixture.input.profile,
+        agentRuntimeVersion: "99.0.0",
+      },
+    });
 
     expect(otherSession.runtimeRoot).not.toBe(fixture.binding.runtimeRoot);
     expect(otherPolicy.profileSessionKey).not.toBe(
+      fixture.binding.profileSessionKey,
+    );
+    expect(otherRuntimePackage.profileDigest).not.toBe(
+      fixture.binding.profileDigest,
+    );
+    expect(otherRuntimePackage.profileSessionKey).not.toBe(
+      fixture.binding.profileSessionKey,
+    );
+    expect(otherRuntimeVersion.profileDigest).not.toBe(
+      fixture.binding.profileDigest,
+    );
+    expect(otherRuntimeVersion.profileSessionKey).not.toBe(
       fixture.binding.profileSessionKey,
     );
   });
