@@ -1,4 +1,6 @@
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use paperclip_runner_core::acpx_provider_session::{
@@ -143,6 +145,38 @@ fn rejects_permission_requests_that_bypass_the_pinned_codex_policy() {
         .to_string();
     assert!(error.contains("pinned runner policy"), "{error}");
     assert!(session.shutdown("already closed").is_ok());
+}
+
+#[test]
+fn fake_sidecar_rejects_the_unsupported_permission_resolution_command() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fake-acpx-sidecar"))
+        .args(["--mode", "turns-permission"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "protocolVersion":"paperclip.runner.acpx-sidecar.v1",
+                "id":1,
+                "command":"permission.resolve",
+                "params":{"requestId":"permission-1","resolution":"approved"}
+            })
+        )
+        .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["ok"], false);
+    assert_eq!(
+        response["error"]["code"],
+        "permission_resolution_unsupported"
+    );
 }
 
 #[test]

@@ -451,6 +451,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn bootstrap_success(id: u64, command: &str, request: &Value, mode: &str) -> Value {
+    if command == "permission.resolve" {
+        return json!({
+            "protocolVersion": GENERATED_ACPX_SIDECAR_PROTOCOL_VERSION,
+            "id": id,
+            "ok": false,
+            "error": {
+                "code": "permission_resolution_unsupported",
+                "message": "Codex permissions are fixed by runner policy and cannot be resolved through ACPX.",
+                "retryable": false,
+            },
+        });
+    }
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let result = match command {
         "initialize" => json!({
