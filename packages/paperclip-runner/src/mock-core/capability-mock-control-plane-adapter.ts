@@ -793,12 +793,17 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         approval.status = command.decision;
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();
-        const wakeActorId =
-          approval.requestedByActorId ?? task.assigneeActorId;
-        if (wakeActorId !== null) {
+        for (const linkedTaskId of approval.taskIds) {
+          const linkedTask = this.#task(linkedTaskId);
+          this.#assertCompany(task.companyId, linkedTask.companyId);
+          const wakeActorId =
+            linkedTask.id === task.id
+              ? approval.requestedByActorId ?? linkedTask.assigneeActorId
+              : linkedTask.assigneeActorId;
+          if (wakeActorId === null) continue;
           const wakeId = this.#scheduleWake(
             wakeActorId,
-            task.id,
+            linkedTask.id,
             "approval_resolved",
             { approvalId: approval.id, decision: command.decision },
             0,

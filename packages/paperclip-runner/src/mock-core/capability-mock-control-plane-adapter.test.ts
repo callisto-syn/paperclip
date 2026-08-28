@@ -720,6 +720,12 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       }),
       expect.objectContaining({
         actorId: "actor-2",
+        taskId: "task-2",
+        reason: "approval_resolved",
+        payload: { approvalId: "approval-other-task", decision: "approved" },
+      }),
+      expect.objectContaining({
+        actorId: "actor-2",
         taskId: "task-1",
         reason: "approval_resolved",
         payload: { approvalId: "approval-active-task", decision: "approved" },
