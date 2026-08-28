@@ -186,7 +186,7 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("bounds transcript retention and fails a lagging event stream closed", async () => {
+  it("bounds lagging streams while preserving omission and terminal events", async () => {
     const fixture = driverFixture(
       {},
       {
@@ -217,11 +217,23 @@ describe("Codex ACPX harness driver", () => {
 
     await session.close({ reason: "bounds verified" });
     const iterator = session.events()[Symbol.asyncIterator]();
-    for (let index = 0; index < 512; index += 1) {
-      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    const retained: PrpEvent[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      retained.push(next.value);
     }
-    await expect(iterator.next()).rejects.toThrow(
-      "event buffer limit exceeded",
+    expect(retained).toHaveLength(512);
+    expect(retained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: "harness.diagnostic",
+          payload: expect.objectContaining({
+            code: "event_stream_retention_limit",
+          }),
+        }),
+        expect.objectContaining({ eventType: "turn.completed" }),
+      ]),
     );
   });
 });

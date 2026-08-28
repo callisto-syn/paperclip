@@ -218,6 +218,7 @@ class CodexAcpxSession implements HarnessSession {
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
   #transcriptOmitted = false;
+  #eventStreamOmitted = false;
 
   constructor(input: {
     host: CodexAcpxHost;
@@ -613,6 +614,18 @@ class CodexAcpxSession implements HarnessSession {
     refs: { turnId?: string; itemId?: string } = {},
   ): void {
     if (this.#eventStreamClosed) return;
+    if (this.#eventStreamOmitted && isTerminalEvent(eventType)) {
+      this.#eventStreamOmitted = false;
+      this.#emit(
+        "harness.diagnostic",
+        {
+          code: "event_stream_retention_limit",
+          message:
+            "Earlier provider events were omitted because the consumer exceeded the bounded event buffer.",
+        },
+        refs,
+      );
+    }
     const sourceSeq = ++this.#sourceSequence;
     const event: PrpEvent = {
       schema: "paperclip.prp.event.v1",
@@ -631,7 +644,7 @@ class CodexAcpxSession implements HarnessSession {
       payload: structuredClone(payload),
     };
     this.#retainTranscriptEvent(event);
-    this.#events.push(event);
+    if (this.#events.push(event)) this.#eventStreamOmitted = true;
   }
 
   #retainTranscriptEvent(event: PrpEvent): void {
@@ -716,23 +729,36 @@ function safeMessage(error: unknown): string {
     .slice(0, 4_000);
 }
 
+function isTerminalEvent(eventType: PrpEvent["eventType"]): boolean {
+  return (
+    eventType === "turn.completed" ||
+    eventType === "turn.failed" ||
+    eventType === "turn.interrupted"
+  );
+}
+
 class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #items: T[] = [];
   readonly #waiters: Array<(result: IteratorResult<T>) => void> = [];
   readonly #maxItems: number;
   #closed = false;
-  #failure: Error | null = null;
 
   constructor(maxItems: number) {
     this.#maxItems = maxItems;
   }
 
-  push(item: T): void {
-    if (this.#closed || this.#failure) return;
+  /** Returns true when the oldest buffered item had to be omitted. */
+  push(item: T): boolean {
+    if (this.#closed) return false;
     const waiter = this.#waiters.shift();
-    if (waiter) waiter({ done: false, value: item });
-    else if (this.#items.length < this.#maxItems) this.#items.push(item);
-    else this.#failure = new Error("Codex ACPX event buffer limit exceeded");
+    if (waiter) {
+      waiter({ done: false, value: item });
+      return false;
+    }
+    const omitted = this.#items.length >= this.#maxItems;
+    if (omitted) this.#items.shift();
+    this.#items.push(item);
+    return omitted;
   }
 
   close(): void {
@@ -751,10 +777,8 @@ class AsyncQueue<T> implements AsyncIterable<T> {
           return Promise.resolve({ done: false, value: item });
         }
         if (this.#closed) {
-          if (this.#failure) return Promise.reject(this.#failure);
           return Promise.resolve({ done: true, value: undefined });
         }
-        if (this.#failure) return Promise.reject(this.#failure);
         return new Promise((resolve) => this.#waiters.push(resolve));
       },
     };
