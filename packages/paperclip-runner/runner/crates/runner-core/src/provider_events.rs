@@ -682,22 +682,13 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     if path.is_empty()
         || windows_normalized_path.starts_with('/')
         || is_absolute_windows_drive_path(&windows_normalized_path)
-        || (cfg!(windows) && has_drive_relative_prefix(path))
+        || has_drive_relative_prefix(&windows_normalized_path)
         || windows_normalized_path
             .split('/')
             .any(|segment| segment == "..")
         || path.contains("://")
     {
         Value::Null
-    } else if has_drive_relative_prefix(&path) {
-        // A single-letter colon prefix is a drive-relative path on Windows but
-        // an ordinary filename on POSIX. Preserve the latter with an explicit
-        // relative marker so the canonical target can never be reinterpreted
-        // as a host drive path downstream.
-        Value::String(format!(
-            "./{}",
-            path.chars().take(3_998).collect::<String>()
-        ))
     } else {
         Value::String(path.chars().take(4_000).collect())
     }
@@ -720,7 +711,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn distinguishes_windows_drive_paths_from_posix_colon_names() {
+    fn rejects_windows_drive_paths_on_every_host_platform() {
         assert_eq!(
             safe_acpx_location(Some(&json!({"path": "C:\\Users\\alice\\file.txt"}))),
             Value::Null,
@@ -729,34 +720,18 @@ mod tests {
             safe_acpx_location(Some(&json!({"path": "\\\\server\\share\\file.txt"}))),
             Value::Null,
         );
-        #[cfg(not(windows))]
-        {
+        for drive_relative in [
+            "a:b/file.txt",
+            "C:Users\\alice\\file.txt",
+            "c:Users/alice/file.txt",
+            "A:b/file.txt",
+            "a:b\\c",
+        ] {
             assert_eq!(
-                safe_acpx_location(Some(&json!({"path": "a:b/file.txt"}))),
-                Value::String("./a:b/file.txt".to_owned()),
-            );
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
-                Value::String("./C:Users\\alice\\file.txt".to_owned()),
-            );
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": "c:Users/alice/file.txt"}))),
-                Value::String("./c:Users/alice/file.txt".to_owned()),
-            );
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": "A:b/file.txt"}))),
-                Value::String("./A:b/file.txt".to_owned()),
-            );
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": "a:b\\c"}))),
-                Value::String("./a:b\\c".to_owned()),
+                safe_acpx_location(Some(&json!({"path": drive_relative}))),
+                Value::Null,
             );
         }
-        #[cfg(windows)]
-        assert_eq!(
-            safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
-            Value::Null,
-        );
     }
 
     #[test]

@@ -165,27 +165,27 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     );
     assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
 
-    let windows_drive_relative = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-3",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"C:Users\\alice\\repo\\src\\main.rs"}]
-        }),
-    );
-    #[cfg(windows)]
-    assert_eq!(
-        windows_drive_relative[0].payload["target"],
-        serde_json::Value::Null
-    );
-    #[cfg(not(windows))]
-    assert_eq!(
-        windows_drive_relative[0].payload["target"],
-        "./C:Users\\alice\\repo\\src\\main.rs"
-    );
+    for unsafe_path in [
+        r"C:Users\alice\repo\src\main.rs",
+        "c:Users/alice/repo/src/main.rs",
+    ] {
+        let windows_drive_relative = normalize(
+            AcpxRuntimeEventKind::ToolCall,
+            json!({
+                "type":"tool_call",
+                "tag":"tool_call_update",
+                "toolCallId":"tool-3",
+                "kind":"read",
+                "status":"completed",
+                "locations":[{"path":unsafe_path}]
+            }),
+        );
+        assert_eq!(
+            windows_drive_relative[0].payload["target"],
+            serde_json::Value::Null,
+            "drive-relative provider path should be rejected: {unsafe_path}",
+        );
+    }
 }
 
 #[test]
