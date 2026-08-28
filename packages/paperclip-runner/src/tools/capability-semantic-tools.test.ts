@@ -439,7 +439,7 @@ describe("Capability exposure and authorization", () => {
 
   it("retries the completion merge after a concurrent lease heartbeat", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
-    let injectedHeartbeat = false;
+    let injectedHeartbeats = 0;
     let completionAttempts = 0;
     const durableStore: CapabilitySemanticToolRuntimeStore = {
       load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
@@ -450,8 +450,8 @@ describe("Capability exposure and authorization", () => {
         if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
         const completing = snapshot.extensions.some((extension) => extension.status === "completed");
         if (completing) completionAttempts += 1;
-        if (completing && !injectedHeartbeat && durableSnapshot !== null) {
-          injectedHeartbeat = true;
+        if (completing && injectedHeartbeats < 12 && durableSnapshot !== null) {
+          injectedHeartbeats += 1;
           const heartbeat = structuredClone(durableSnapshot) as CapabilitySemanticToolRuntimeSnapshot;
           heartbeat.extensions = heartbeat.extensions.map((extension) =>
             extension.status === "pending"
@@ -476,8 +476,8 @@ describe("Capability exposure and authorization", () => {
       idempotencyKey: "upsert-case-raced",
     })).resolves.toMatchObject({ ok: true, value: { upserted: true } });
 
-    expect(injectedHeartbeat).toBe(true);
-    expect(completionAttempts).toBe(2);
+    expect(injectedHeartbeats).toBe(12);
+    expect(completionAttempts).toBe(13);
     expect(durableSnapshot?.extensions).toEqual([
       expect.objectContaining({ status: "completed", resultId: "tool-result-1" }),
     ]);
@@ -486,6 +486,48 @@ describe("Capability exposure and authorization", () => {
       body: "Case body",
       upserted: true,
     });
+  });
+
+  it("retries extension acquisition after an unrelated snapshot update", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    let injectedContention = false;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        const acquiring = snapshot.extensions.some((extension) => extension.status === "pending");
+        if (acquiring && !injectedContention) {
+          injectedContention = true;
+          durableSnapshot = {
+            schema: "paperclip.capability.semantic-tool-runtime.v1",
+            resultSequence: 1,
+            operationResults: {},
+            extensions: [],
+          };
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const { runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
+    });
+
+    await expect(runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-acquire-raced", body: "Case body" },
+      idempotencyKey: "upsert-case-acquire-raced",
+    })).resolves.toMatchObject({ ok: true, value: { upserted: true } });
+    expect(injectedContention).toBe(true);
+    expect(durableSnapshot?.resultSequence).toBe(2);
+    expect(durableSnapshot?.extensions).toEqual([
+      expect.objectContaining({ status: "completed" }),
+    ]);
   });
 
   it("fails closed while a restored extension is in flight and reconciles its durable receipt", async () => {

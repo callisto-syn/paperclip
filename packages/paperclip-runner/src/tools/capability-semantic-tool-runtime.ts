@@ -45,6 +45,7 @@ interface ExtensionIdempotencyRecord {
   execution: Promise<{ resultId: string; value: ExtensionExecution }> | null;
   ownerId: string | null;
   leaseExpiresAtMs: number;
+  leaseHeartbeat: ReturnType<typeof setInterval> | null;
   completed?: { resultId: string; value: ExtensionExecution };
 }
 
@@ -208,6 +209,7 @@ export class CapabilitySemanticToolRuntime {
             execution: null,
             ownerId: null,
             leaseExpiresAtMs: 0,
+            leaseHeartbeat: null,
           };
           this.#state.extensionIdempotency.set(
             extensionIdempotencyKey,
@@ -354,14 +356,16 @@ export class CapabilitySemanticToolRuntime {
           resultId,
           value: structuredClone(execution),
         };
-        if (!this.#completeExtensionExecution(
+        if (!await this.#completeExtensionExecution(
           extensionIdempotencyKey,
           extensionRecord,
           completed,
           observableValue,
         )) {
+          this.#stopExtensionExecutionLease(extensionRecord);
           throw new Error("durable extension execution lease was superseded");
         }
+        this.#stopExtensionExecutionLease(extensionRecord);
         extensionRecord.completed = completed;
         extensionRecord.execution = Promise.resolve(
           structuredClone(extensionRecord.completed),
@@ -403,45 +407,55 @@ export class CapabilitySemanticToolRuntime {
     descriptor: CapabilitySemanticToolDescriptor,
     invocation: CapabilityToolInvocation,
   ): boolean {
-    const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
-    const existing = durable?.extensions.find((candidate) => candidate.key === key);
-    if (
-      existing !== undefined &&
-      (existing.status !== "pending" ||
-        existing.input !== record.input ||
-        (existing.leaseExpiresAtMs ?? 0) > this.#now())
-    ) {
-      return false;
-    }
     const ownerId = randomUUID();
-    const leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
-    const replacement: CapabilitySemanticToolRuntimeSnapshot = durable === null
-      ? {
-          schema: "paperclip.capability.semantic-tool-runtime.v1",
-          resultSequence: this.#state.resultSequence,
-          operationResults: Object.fromEntries(this.#state.operationResults),
-          extensions: [],
-        }
-      : structuredClone(durable);
-    const pending = {
-      key,
-      input: record.input,
-      status: "pending" as const,
-      ownerId,
-      leaseExpiresAtMs,
-    };
-    const existingIndex = replacement.extensions.findIndex(
-      (candidate) => candidate.key === key,
-    );
-    if (existingIndex === -1) replacement.extensions.push(pending);
-    else replacement.extensions[existingIndex] = pending;
-    if (!this.#adapter.compareAndSwapSemanticToolRuntime(
-      this.#runId,
-      durable,
-      replacement,
-    )) {
-      return false;
+    let leaseExpiresAtMs = 0;
+    let acquired = false;
+    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const existing = durable?.extensions.find((candidate) => candidate.key === key);
+      if (
+        existing !== undefined &&
+        (existing.status !== "pending" ||
+          existing.input !== record.input ||
+          (existing.leaseExpiresAtMs ?? 0) > this.#now())
+      ) {
+        return false;
+      }
+      leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
+      const replacement: CapabilitySemanticToolRuntimeSnapshot = durable === null
+        ? {
+            schema: "paperclip.capability.semantic-tool-runtime.v1",
+            resultSequence: this.#state.resultSequence,
+            operationResults: Object.fromEntries(this.#state.operationResults),
+            extensions: [],
+          }
+        : structuredClone(durable);
+      const pending = {
+        key,
+        input: record.input,
+        status: "pending" as const,
+        ownerId,
+        leaseExpiresAtMs,
+      };
+      const existingIndex = replacement.extensions.findIndex(
+        (candidate) => candidate.key === key,
+      );
+      if (existingIndex === -1) replacement.extensions.push(pending);
+      else replacement.extensions[existingIndex] = pending;
+      if (this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) {
+        this.#state.resultSequence = Math.max(
+          this.#state.resultSequence,
+          replacement.resultSequence,
+        );
+        acquired = true;
+        break;
+      }
     }
+    if (!acquired) return false;
     record.ownerId = ownerId;
     record.leaseExpiresAtMs = leaseExpiresAtMs;
     const execution = this.#execute(descriptor, invocation).then((value) => ({
@@ -449,15 +463,12 @@ export class CapabilitySemanticToolRuntime {
       value,
     }));
     record.execution = execution;
-    const leaseHeartbeat = setInterval(() => {
+    record.leaseHeartbeat = setInterval(() => {
       this.#renewExtensionExecutionLease(key, record);
     }, EXTENSION_EXECUTION_HEARTBEAT_MS);
-    leaseHeartbeat.unref();
-    void execution.then(
-      () => clearInterval(leaseHeartbeat),
-      () => clearInterval(leaseHeartbeat),
-    );
+    record.leaseHeartbeat.unref();
     void execution.catch(() => {
+      this.#stopExtensionExecutionLease(record);
       const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
       const currentExtension = current?.extensions.find(
         (candidate) => candidate.key === key,
@@ -507,21 +518,31 @@ export class CapabilitySemanticToolRuntime {
     return false;
   }
 
-  #completeExtensionExecution(
+  async #completeExtensionExecution(
     key: string,
     record: ExtensionIdempotencyRecord,
     completed: { resultId: string; value: ExtensionExecution },
     observableValue: CapabilityJsonValue,
-  ): boolean {
-    if (record.ownerId === null) return false;
+  ): Promise<boolean> {
     // Execution already happened. Retry only the durable completion merge so
     // a lease heartbeat or unrelated snapshot update cannot discard its
     // receipt or cause the operation to execute again.
-    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+    let attempt = 0;
+    while (true) {
       const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
       const extension = durable?.extensions.find((candidate) => candidate.key === key);
-      if (durable === null || extension?.status !== "pending" ||
-        extension.ownerId !== record.ownerId) return false;
+      if (durable === null || extension === undefined) return false;
+      if (extension.status === "completed") {
+        return extension.input === record.input &&
+          extension.resultId === completed.resultId &&
+          JSON.stringify(extension.execution) === JSON.stringify(completed.value) &&
+          canonicalJson(durable.operationResults[completed.resultId]) ===
+            canonicalJson(observableValue);
+      }
+      if (extension.status !== "pending" || record.ownerId === null ||
+        extension.ownerId !== record.ownerId) {
+        return false;
+      }
       const replacement = structuredClone(durable);
       replacement.resultSequence = Math.max(
         replacement.resultSequence,
@@ -544,8 +565,19 @@ export class CapabilitySemanticToolRuntime {
         durable,
         replacement,
       )) return true;
+      attempt += 1;
+      if (attempt % RUNTIME_PERSIST_CAS_ATTEMPTS === 0) {
+        // Yield so lease heartbeats and other runtimes can make progress. Once
+        // the extension has executed, durable publication is a correctness
+        // boundary and must not be abandoned because of snapshot contention.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
-    return false;
+  }
+
+  #stopExtensionExecutionLease(record: ExtensionIdempotencyRecord): void {
+    if (record.leaseHeartbeat !== null) clearInterval(record.leaseHeartbeat);
+    record.leaseHeartbeat = null;
   }
 
   #restoreState(
@@ -566,6 +598,7 @@ export class CapabilitySemanticToolRuntime {
           execution: null,
           ownerId: extension.ownerId ?? null,
           leaseExpiresAtMs: extension.leaseExpiresAtMs ?? 0,
+          leaseHeartbeat: null,
         });
         continue;
       }
@@ -578,6 +611,7 @@ export class CapabilitySemanticToolRuntime {
         execution: Promise.resolve(structuredClone(completed)),
         ownerId: null,
         leaseExpiresAtMs: 0,
+        leaseHeartbeat: null,
         completed,
       });
     }
