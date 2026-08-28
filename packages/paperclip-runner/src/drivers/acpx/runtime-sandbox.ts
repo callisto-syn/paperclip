@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
-  chmod,
   lstat,
   mkdir,
   open,
@@ -160,19 +159,47 @@ async function ensurePrivateDirectory(
   } catch (error) {
     if (errorCode(error) !== "EEXIST") throw error;
   }
-  const metadata = await lstat(directory);
-  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      directory,
+      constants.O_RDONLY |
+        (constants.O_DIRECTORY ?? 0) |
+        (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch {
     throw new Error("ACPX sandbox path must be a real directory");
   }
-  await chmod(directory, PRIVATE_DIRECTORY_MODE);
-  const physical = await realpath(directory);
-  if (!isInside(physicalParent, physical)) {
-    throw new Error("ACPX sandbox directory escaped its private parent");
+  let physical: string;
+  try {
+    const opened = await handle.stat();
+    const entry = await lstat(directory);
+    if (
+      !opened.isDirectory() ||
+      entry.isSymbolicLink() ||
+      !entry.isDirectory() ||
+      !sameFile(entry, opened)
+    ) {
+      throw new Error("ACPX sandbox path must be a real directory");
+    }
+    // Apply permissions to the inode that was opened without following links.
+    // A directory-entry swap can therefore never redirect chmod to its target.
+    await handle.chmod(PRIVATE_DIRECTORY_MODE);
+    physical = await realpath(directory);
+    const verifiedEntry = await lstat(directory);
+    if (!sameFile(verifiedEntry, opened)) {
+      throw new Error("ACPX sandbox directory changed during preparation");
+    }
+    if (!isInside(physicalParent, physical)) {
+      throw new Error("ACPX sandbox directory escaped its private parent");
+    }
+    // Persist the child inode before the directory entry that names it.
+    if (process.platform !== "win32") await handle.sync();
+  } finally {
+    await handle.close();
   }
-  // Persist the child inode before the directory entry that names it. Sync the
-  // parent even during recovery: an earlier process may have created the entry
-  // and crashed before making that mkdir durable.
-  await syncDirectory(physical);
+  // Sync the parent even during recovery: an earlier process may have created
+  // the entry and crashed before making that mkdir durable.
   await syncDirectory(physicalParent);
   return physical;
 }
@@ -262,6 +289,10 @@ function isInside(parent: string, child: string): boolean {
     !childPath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
     !isAbsolute(childPath)
   );
+}
+
+function sameFile(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function errorCode(error: unknown): string | null {

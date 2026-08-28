@@ -1,4 +1,5 @@
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -99,6 +100,26 @@ describe("ACPX runtime sandbox", () => {
       `${fixture.binding.workspacePath}\n`,
     );
   });
+
+  it.runIf(process.platform !== "win32")(
+    "repairs existing directory permissions through its no-follow handle",
+    async () => {
+      const fixture = await sandboxFixture("codex");
+      const first = await prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+      });
+      await chmod(first.root, 0o755);
+
+      const second = await prepareAcpxRuntimeSandbox({
+        binding: fixture.binding,
+        agent: "codex",
+      });
+
+      expect(second.root).toBe(first.root);
+      expect((await stat(second.root)).mode & 0o777).toBe(0o700);
+    },
+  );
 
   it.runIf(process.platform !== "win32")(
     "rejects a symbolic-link ACPX namespace",
