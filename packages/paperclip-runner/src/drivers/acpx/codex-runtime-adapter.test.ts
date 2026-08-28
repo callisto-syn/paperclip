@@ -132,12 +132,16 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("terminates provider processes when runtime close never settles", async () => {
+  it("retains protocol cleanup ownership after a runtime close timeout", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
+      let resolveRuntimeClose: (() => void) | undefined;
       vi.mocked(runtime.close).mockImplementation(
-        () => new Promise<void>(() => undefined),
+        () =>
+          new Promise<void>((resolve) => {
+            resolveRuntimeClose = resolve;
+          }),
       );
       const child = fakeChild();
       const command = fakeCommand();
@@ -171,9 +175,11 @@ describe("Codex ACPX runtime adapter", () => {
       await firstCloseRejection;
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 
-      await expect(
-        port.close({ reason: "cleanup ownership retried" }),
-      ).resolves.toBeUndefined();
+      const retry = port.close({ reason: "cleanup ownership retried" });
+      await Promise.resolve();
+      expect(runtime.close).toHaveBeenCalledOnce();
+      resolveRuntimeClose?.();
+      await expect(retry).resolves.toBeUndefined();
       expect(runtime.close).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();

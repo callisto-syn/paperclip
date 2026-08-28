@@ -235,7 +235,8 @@ function runtimePort(
   children: SpawnedChildSet,
   runtimeCloseTimeoutMs: number,
 ): AcpxRuntimePort {
-  let forcedClosed = false;
+  let runtimeClosed = false;
+  let runtimeCloseAttempt: Promise<unknown | null> | undefined;
   return {
     async identity() {
       return structuredClone(identity);
@@ -267,22 +268,25 @@ function runtimePort(
       });
     },
     async close(input) {
-      if (forcedClosed) return;
-      const closeError = await boundedRuntimeClose(
-        runtime,
-        handle,
-        input.reason,
-        runtimeCloseTimeoutMs,
-      );
-      const processErrors = await children.terminate();
-      if (
-        closeError instanceof AcpxRuntimeCloseTimeoutError &&
-        processErrors.length === 0
-      ) {
-        // All provider processes are gone, so a retry can relinquish the
-        // logical runtime port without awaiting the same hung close again.
-        forcedClosed = true;
+      if (!runtimeClosed && !runtimeCloseAttempt) {
+        runtimeCloseAttempt = runtimeCloseOutcome(runtime, handle, input.reason);
       }
+      const closeError = runtimeClosed
+        ? null
+        : await boundedCloseOutcome(
+            runtimeCloseAttempt ??
+              runtimeCloseOutcome(runtime, handle, input.reason),
+            runtimeCloseTimeoutMs,
+          );
+      if (closeError === null) {
+        runtimeClosed = true;
+        runtimeCloseAttempt = undefined;
+      } else if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
+        // A settled failure may be retried. A timeout retains the exact pending
+        // close promise so no protocol-level cleanup owner is abandoned.
+        runtimeCloseAttempt = undefined;
+      }
+      const processErrors = await children.terminate();
       if (closeError !== null || processErrors.length > 0) {
         const errors = [...processErrors];
         if (closeError !== null) errors.unshift(closeError);
@@ -301,17 +305,35 @@ async function boundedRuntimeClose(
   reason: string,
   timeoutMs: number,
 ): Promise<unknown | null> {
+  return await boundedCloseOutcome(
+    runtimeCloseOutcome(runtime, handle, reason),
+    timeoutMs,
+  );
+}
+
+function runtimeCloseOutcome(
+  runtime: AcpRuntime,
+  handle: AcpRuntimeHandle,
+  reason: string,
+): Promise<unknown | null> {
+  return Promise.resolve()
+    .then(() =>
+      runtime.close({ handle, reason, discardPersistentState: false }),
+    )
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+}
+
+async function boundedCloseOutcome(
+  closeOutcome: Promise<unknown | null>,
+  timeoutMs: number,
+): Promise<unknown | null> {
   const boundedTimeoutMs = Math.max(1, timeoutMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
-    Promise.resolve()
-      .then(() =>
-        runtime.close({ handle, reason, discardPersistentState: false }),
-      )
-      .then(
-        () => ({ error: null }),
-        (error: unknown) => ({ error }),
-      ),
+    closeOutcome.then((error) => ({ error })),
     new Promise<{ error: unknown }>((resolve) => {
       timer = setTimeout(
         () => resolve({ error: new AcpxRuntimeCloseTimeoutError() }),
