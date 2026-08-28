@@ -453,6 +453,11 @@ describe("Capability exposure and authorization", () => {
 
     const inFlight = runtime.invoke(invocation);
     const serializedWhileInFlight = adapter.serialize();
+    expect(() =>
+      CapabilityMockControlPlaneAdapter.restore(serializedWhileInFlight),
+    ).toThrow(
+      "restoring pending semantic extensions requires a process-independent runtime store",
+    );
     const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
       serializedWhileInFlight,
       { semanticToolRuntimeStore: durableStore },

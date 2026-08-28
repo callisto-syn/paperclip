@@ -83,6 +83,17 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     this.#state.outOfScopeTaskIds ??= [];
     this.#state.semanticToolRuntimes ??= {};
     this.#validateState();
+    if (
+      this.#semanticToolRuntimeStore === undefined &&
+      Object.values(this.#state.semanticToolRuntimes).some((snapshot) =>
+        snapshot.extensions.some((extension) => extension.status === "pending"),
+      )
+    ) {
+      throw new CapabilityMockControlPlaneError(
+        "fixture_state_invalid",
+        "restoring pending semantic extensions requires a process-independent runtime store",
+      );
+    }
   }
 
   static restore(
