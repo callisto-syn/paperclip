@@ -48,6 +48,20 @@ describe("Codex ACPX runtime sidecar", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("bounds status verification before cleaning up the opened host", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const host = {
+      identity: () => ({ kind: "acpx" }),
+      status: vi.fn(() => new Promise<never>(() => undefined)),
+      close,
+    };
+
+    await expect(
+      verifyOpenedAcpxSidecarHost(host, () => ({}), 1),
+    ).rejects.toThrow("status verification exceeded its timeout");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("validates a complete run attachment before it can be committed", () => {
     let attachedRunId: string | null = null;
     const attach = (params: Record<string, unknown>) => {

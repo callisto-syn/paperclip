@@ -190,22 +190,16 @@ export async function openCodexAcpxRuntime(
       },
     });
   } catch (error) {
-    const runtimeCleanupError = failedHandshakeHandle
-      ? await boundedRuntimeClose(
-          runtime,
-          failedHandshakeHandle,
-          "ACPX session handshake failed",
-          runtimeCloseTimeoutMs,
-        )
-      : null;
-    const cleanupErrors = await children.terminate();
-    if (runtimeCleanupError !== null || cleanupErrors.length > 0) {
+    const cleanupErrors = await cleanupFailedRuntimeOpen(
+      runtime,
+      failedHandshakeHandle,
+      children,
+      "ACPX session handshake failed",
+      runtimeCloseTimeoutMs,
+    );
+    if (cleanupErrors.length > 0) {
       throw new AggregateError(
-        [
-          error,
-          ...(runtimeCleanupError === null ? [] : [runtimeCleanupError]),
-          ...cleanupErrors,
-        ],
+        [error, ...cleanupErrors],
         "ACPX session handshake and runtime cleanup failed",
       );
     }
@@ -221,28 +215,36 @@ export async function openCodexAcpxRuntime(
       runtimeCloseTimeoutMs,
     );
   } catch (error) {
-    const cleanupError = await boundedRuntimeClose(
+    const cleanupErrors = await cleanupFailedRuntimeOpen(
       runtime,
       handle,
+      children,
       "ACPX runtime identity validation failed",
       runtimeCloseTimeoutMs,
     );
-    if (cleanupError !== null) {
-      const processErrors = await children.terminate();
+    if (cleanupErrors.length > 0) {
       throw new AggregateError(
-        [error, cleanupError, ...processErrors],
+        [error, ...cleanupErrors],
         "ACPX runtime identity validation and cleanup failed",
-      );
-    }
-    const processErrors = await children.terminate();
-    if (processErrors.length > 0) {
-      throw new AggregateError(
-        [error, ...processErrors],
-        "ACPX runtime identity validation and provider cleanup failed",
       );
     }
     throw error;
   }
+}
+
+async function cleanupFailedRuntimeOpen(
+  runtime: AcpRuntime,
+  handle: AcpRuntimeHandle | null,
+  children: SpawnedChildSet,
+  reason: string,
+  timeoutMs: number,
+): Promise<unknown[]> {
+  const closeError = handle
+    ? await boundedRuntimeClose(runtime, handle, reason, timeoutMs)
+    : null;
+  const errors = await children.terminate();
+  if (closeError !== null) errors.unshift(closeError);
+  return errors;
 }
 
 function runtimePort(

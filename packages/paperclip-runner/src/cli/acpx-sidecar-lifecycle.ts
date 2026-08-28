@@ -13,7 +13,9 @@ export async function verifyOpenedAcpxSidecarHost(
 ): Promise<{ identity: unknown; status: Record<string, unknown> }> {
   try {
     const identity = host.identity();
-    const status = sanitizeStatus(await host.status());
+    const status = sanitizeStatus(
+      await boundedOpenedHostStatus(host.status(), closeTimeoutMs),
+    );
     return { identity, status };
   } catch (error) {
     const cleanupError = await boundedFailedAdmissionClose(
@@ -27,6 +29,32 @@ export async function verifyOpenedAcpxSidecarHost(
       );
     }
     throw error;
+  }
+}
+
+async function boundedOpenedHostStatus(
+  status: Promise<unknown>,
+  timeoutMs: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      status,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                "ACPX session status verification exceeded its timeout",
+              ),
+            ),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

@@ -426,6 +426,43 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
+  it("bounds invalid-identity cleanup before terminating the provider", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime({ ...HANDLE, agentSessionId: undefined });
+      vi.mocked(runtime.close).mockImplementation(
+        () => new Promise<void>(() => undefined),
+      );
+      const child = fakeChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      const opening = openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => ({
+          ...runtime,
+          ensureSession: vi.fn(async () => {
+            options.spawnAgent?.({
+              command: "ignored",
+              args: ["--stdio"],
+              options: {},
+            });
+            return { ...HANDLE, agentSessionId: undefined };
+          }),
+        }),
+      });
+      const rejected = expect(opening).rejects.toThrow(
+        "identity validation and cleanup failed",
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await rejected;
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("terminates a provider spawned before the session handshake rejects", async () => {
     const child = fakeChild();
     const command = fakeCommand();
