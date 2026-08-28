@@ -488,6 +488,145 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("bounds completion contention and retries the fulfilled execution without rerunning it", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    let rejectCompletion = true;
+    let completionAttempts = 0;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        const completing = snapshot.extensions.some(
+          (extension) => extension.status === "completed",
+        );
+        if (completing) completionAttempts += 1;
+        if (completing && rejectCompletion) return false;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const { runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
+    });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-bounded-contention", body: "Case body" },
+      idempotencyKey: "upsert-case-bounded-contention",
+    } as const;
+
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "operation_unsupported" },
+    });
+    expect(completionAttempts).toBe(64);
+    expect(durableSnapshot?.extensions).toEqual([
+      expect.objectContaining({ status: "pending" }),
+    ]);
+
+    rejectCompletion = false;
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: { key: "case-bounded-contention", upserted: true },
+    });
+    expect(completionAttempts).toBe(65);
+  });
+
+  it("retries rejected-execution cleanup through snapshot contention", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    let rejectExecutionAllocation = true;
+    let injectedCleanupContention = false;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => {
+        if (
+          rejectExecutionAllocation &&
+          durableSnapshot?.extensions.some((extension) => extension.status === "pending")
+        ) {
+          rejectExecutionAllocation = false;
+          throw new Error("injected extension result allocation failure");
+        }
+        return durableSnapshot === null ? null : structuredClone(durableSnapshot);
+      },
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        const removingFailedLease =
+          durableSnapshot?.extensions.some((extension) => extension.status === "pending") &&
+          snapshot.extensions.length === 0;
+        if (removingFailedLease && !injectedCleanupContention && durableSnapshot !== null) {
+          injectedCleanupContention = true;
+          durableSnapshot = {
+            ...structuredClone(durableSnapshot),
+            resultSequence: durableSnapshot.resultSequence + 1,
+          };
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const { runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
+    });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-cleanup-raced", body: "Case body" },
+      idempotencyKey: "upsert-case-cleanup-raced",
+    } as const;
+
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({ ok: false });
+    await vi.waitFor(() => expect(durableSnapshot?.extensions).toEqual([]));
+    expect(injectedCleanupContention).toBe(true);
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-2",
+      value: { key: "case-cleanup-raced", upserted: true },
+    });
+  });
+
+  it("allocates read result ids from the latest shared durable sequence", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const first = await runtimeFor({ semanticToolRuntimeStore: durableStore });
+    await expect(first.runtime.invoke({ operationId: "get_task_context", input: {} }))
+      .resolves.toMatchObject({ ok: true, operationResultId: "tool-result-1" });
+    const followerAdapter = CapabilityMockControlPlaneAdapter.restore(
+      first.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const follower = new CapabilitySemanticToolRuntime({
+      adapter: followerAdapter,
+      runId: OPEN.identity.runId,
+    });
+
+    await expect(follower.invoke({ operationId: "get_task_context", input: {} }))
+      .resolves.toMatchObject({ ok: true, operationResultId: "tool-result-2" });
+    await expect(first.runtime.invoke({ operationId: "get_task_context", input: {} }))
+      .resolves.toMatchObject({ ok: true, operationResultId: "tool-result-3" });
+    expect(Object.keys(durableSnapshot?.operationResults ?? {})).toEqual([
+      "tool-result-1",
+      "tool-result-2",
+      "tool-result-3",
+    ]);
+  });
+
   it("retries extension acquisition after an unrelated snapshot update", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
     let injectedContention = false;

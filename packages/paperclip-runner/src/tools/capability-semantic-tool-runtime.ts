@@ -64,6 +64,7 @@ const EXTENSION_EXECUTION_HEARTBEAT_MS = Math.floor(
   EXTENSION_EXECUTION_LEASE_MS / 3,
 );
 const RUNTIME_PERSIST_CAS_ATTEMPTS = 8;
+const RUNTIME_COMPLETION_CAS_ATTEMPTS = 64;
 
 export class CapabilitySemanticToolRuntime {
   readonly #adapter: CapabilityMockControlPlanePort;
@@ -199,7 +200,7 @@ export class CapabilitySemanticToolRuntime {
         return { observableResult: this.#denial(invocation.operationId, denied, "input_invalid") };
       }
       let execution: ExtensionExecution;
-      let resultId: string;
+      let resultId: string | null;
       let extensionRecord: ExtensionIdempotencyRecord | null = null;
       if (extensionIdempotencyKey !== null) {
         let idempotencyRecord = cachedExtension;
@@ -326,7 +327,7 @@ export class CapabilitySemanticToolRuntime {
         extensionRecord = idempotencyRecord;
       } else {
         execution = await this.#execute(descriptor, invocation);
-        resultId = execution.commandResult?.commandId ?? this.#nextResultId();
+        resultId = execution.commandResult?.commandId ?? null;
       }
       const finalAuthorization = this.#authorization.attachStateChange(
         authorization.sequence,
@@ -338,6 +339,48 @@ export class CapabilitySemanticToolRuntime {
       const observableCommandResult = execution.commandResult === null
         ? null
         : redactForBoundary(descriptor, toJsonValue(execution.commandResult), "output") as CapabilityToolSuccess["commandResult"];
+      if (
+        extensionIdempotencyKey !== null &&
+        extensionRecord !== null &&
+        extensionRecord.completed === undefined
+      ) {
+        if (resultId === null) {
+          throw new Error("durable extension execution omitted its result id");
+        }
+        const completed = {
+          resultId,
+          value: structuredClone(execution),
+        };
+        const completedResultId = await this.#completeExtensionExecution(
+          extensionIdempotencyKey,
+          extensionRecord,
+          completed,
+          observableValue,
+        );
+        if (completedResultId === null) {
+          this.#stopExtensionExecutionLease(extensionRecord);
+          throw new Error("durable extension execution lease was superseded");
+        }
+        resultId = completedResultId;
+        completed.resultId = completedResultId;
+        this.#stopExtensionExecutionLease(extensionRecord);
+        extensionRecord.completed = completed;
+        extensionRecord.execution = Promise.resolve(
+          structuredClone(extensionRecord.completed),
+        );
+        extensionRecord.ownerId = null;
+        extensionRecord.leaseExpiresAtMs = 0;
+      }
+      let sequencedResultPersisted = false;
+      if (extensionIdempotencyKey === null && resultId === null) {
+        resultId = this.#persistSequencedOperationResult(observableValue);
+        sequencedResultPersisted = true;
+      }
+      if (resultId === null) throw new Error("semantic tool result id was not allocated");
+      this.#state.operationResults.set(resultId, structuredClone(observableValue));
+      if (extensionIdempotencyKey === null && !sequencedResultPersisted) {
+        this.#persistState();
+      }
       const success: CapabilityToolSuccess = {
         schema: "paperclip.capability.tool-result.v1",
         ok: true,
@@ -347,34 +390,6 @@ export class CapabilitySemanticToolRuntime {
         commandResult: observableCommandResult,
         authorization: finalAuthorization,
       };
-      if (
-        extensionIdempotencyKey !== null &&
-        extensionRecord !== null &&
-        extensionRecord.completed === undefined
-      ) {
-        const completed = {
-          resultId,
-          value: structuredClone(execution),
-        };
-        if (!await this.#completeExtensionExecution(
-          extensionIdempotencyKey,
-          extensionRecord,
-          completed,
-          observableValue,
-        )) {
-          this.#stopExtensionExecutionLease(extensionRecord);
-          throw new Error("durable extension execution lease was superseded");
-        }
-        this.#stopExtensionExecutionLease(extensionRecord);
-        extensionRecord.completed = completed;
-        extensionRecord.execution = Promise.resolve(
-          structuredClone(extensionRecord.completed),
-        );
-        extensionRecord.ownerId = null;
-        extensionRecord.leaseExpiresAtMs = 0;
-      }
-      this.#state.operationResults.set(resultId, structuredClone(observableValue));
-      if (extensionIdempotencyKey === null) this.#persistState();
       const observableResult = deepFreeze(success);
       if (!includeModelResult) return { observableResult };
       const modelResult: CapabilityModelToolSuccess = deepFreeze({
@@ -398,6 +413,11 @@ export class CapabilitySemanticToolRuntime {
   }
 
   #nextResultId(): string {
+    const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+    this.#state.resultSequence = Math.max(
+      this.#state.resultSequence,
+      durable?.resultSequence ?? 0,
+    );
     return `tool-result-${++this.#state.resultSequence}`;
   }
 
@@ -469,21 +489,31 @@ export class CapabilitySemanticToolRuntime {
     record.leaseHeartbeat.unref();
     void execution.catch(() => {
       this.#stopExtensionExecutionLease(record);
-      const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
-      const currentExtension = current?.extensions.find(
-        (candidate) => candidate.key === key,
-      );
-      if (current !== null && currentExtension?.status === "pending" &&
-        currentExtension.ownerId === record.ownerId) {
-        const withoutFailedLease = structuredClone(current);
-        withoutFailedLease.extensions = withoutFailedLease.extensions.filter(
-          (candidate) => candidate.key !== key,
-        );
-        if (!this.#adapter.compareAndSwapSemanticToolRuntime(
-          this.#runId,
-          current,
-          withoutFailedLease,
-        )) return;
+      try {
+        for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+          const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
+          const currentExtension = current?.extensions.find(
+            (candidate) => candidate.key === key,
+          );
+          if (current === null || currentExtension?.status !== "pending" ||
+            currentExtension.ownerId !== record.ownerId) break;
+          const withoutFailedLease = structuredClone(current);
+          withoutFailedLease.extensions = withoutFailedLease.extensions.filter(
+            (candidate) => candidate.key !== key,
+          );
+          if (this.#adapter.compareAndSwapSemanticToolRuntime(
+            this.#runId,
+            current,
+            withoutFailedLease,
+          )) break;
+        }
+      } finally {
+        if (this.#state.extensionIdempotency.get(key) === record) {
+          this.#state.extensionIdempotency.delete(key);
+        }
+      }
+    }).catch(() => {
+      if (this.#state.extensionIdempotency.get(key) === record) {
         this.#state.extensionIdempotency.delete(key);
       }
     });
@@ -523,27 +553,40 @@ export class CapabilitySemanticToolRuntime {
     record: ExtensionIdempotencyRecord,
     completed: { resultId: string; value: ExtensionExecution },
     observableValue: CapabilityJsonValue,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     // Execution already happened. Retry only the durable completion merge so
     // a lease heartbeat or unrelated snapshot update cannot discard its
     // receipt or cause the operation to execute again.
-    let attempt = 0;
-    while (true) {
+    for (let attempt = 0; attempt < RUNTIME_COMPLETION_CAS_ATTEMPTS; attempt += 1) {
       const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
       const extension = durable?.extensions.find((candidate) => candidate.key === key);
-      if (durable === null || extension === undefined) return false;
+      if (durable === null || extension === undefined) return null;
       if (extension.status === "completed") {
         return extension.input === record.input &&
           extension.resultId === completed.resultId &&
           JSON.stringify(extension.execution) === JSON.stringify(completed.value) &&
           canonicalJson(durable.operationResults[completed.resultId]) ===
-            canonicalJson(observableValue);
+            canonicalJson(observableValue)
+          ? completed.resultId
+          : null;
       }
       if (extension.status !== "pending" || record.ownerId === null ||
         extension.ownerId !== record.ownerId) {
-        return false;
+        return null;
       }
       const replacement = structuredClone(durable);
+      const existingResult = replacement.operationResults[completed.resultId];
+      if (
+        existingResult !== undefined &&
+        canonicalJson(existingResult) !== canonicalJson(observableValue)
+      ) {
+        replacement.resultSequence = Math.max(
+          replacement.resultSequence,
+          this.#state.resultSequence,
+        ) + 1;
+        completed.resultId = `tool-result-${replacement.resultSequence}`;
+        this.#state.resultSequence = replacement.resultSequence;
+      }
       replacement.resultSequence = Math.max(
         replacement.resultSequence,
         this.#state.resultSequence,
@@ -564,15 +607,16 @@ export class CapabilitySemanticToolRuntime {
         this.#runId,
         durable,
         replacement,
-      )) return true;
-      attempt += 1;
-      if (attempt % RUNTIME_PERSIST_CAS_ATTEMPTS === 0) {
-        // Yield so lease heartbeats and other runtimes can make progress. Once
-        // the extension has executed, durable publication is a correctness
-        // boundary and must not be abandoned because of snapshot contention.
+      )) return completed.resultId;
+      if ((attempt + 1) % RUNTIME_PERSIST_CAS_ATTEMPTS === 0) {
+        // Yield so lease heartbeats and other runtimes can make progress. The
+        // bounded outer loop prevents a broken store from pinning invocation
+        // completion forever; the fulfilled local execution remains available
+        // for an exact publication retry without re-executing the extension.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
     }
+    return null;
   }
 
   #stopExtensionExecutionLease(record: ExtensionIdempotencyRecord): void {
@@ -627,8 +671,8 @@ export class CapabilitySemanticToolRuntime {
     };
   }
 
-  #persistState(): void {
-    const localSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+  #localSnapshot(): CapabilitySemanticToolRuntimeSnapshot {
+    return {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
       resultSequence: this.#state.resultSequence,
       operationResults: Object.fromEntries(
@@ -656,6 +700,35 @@ export class CapabilitySemanticToolRuntime {
               },
         ),
     };
+  }
+
+  #persistSequencedOperationResult(value: CapabilityJsonValue): string {
+    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const replacement = durable === null
+        ? this.#localSnapshot()
+        : structuredClone(durable);
+      const sequence = Math.max(
+        replacement.resultSequence,
+        this.#state.resultSequence,
+      ) + 1;
+      const resultId = `tool-result-${sequence}`;
+      replacement.resultSequence = sequence;
+      replacement.operationResults[resultId] = structuredClone(value);
+      if (!this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) continue;
+      this.#state.resultSequence = sequence;
+      this.#state.operationResults.set(resultId, structuredClone(value));
+      return resultId;
+    }
+    throw new Error("durable semantic tool runtime changed during result allocation");
+  }
+
+  #persistState(): void {
+    const localSnapshot = this.#localSnapshot();
     for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
       const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
       const replacement = durable === null
