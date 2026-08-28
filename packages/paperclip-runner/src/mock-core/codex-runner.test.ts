@@ -342,7 +342,13 @@ describe("Codex trace conformance", () => {
       timeoutMs: 1_000,
     });
 
-    expect(trace.resultDecision.status).toBe("accepted");
+    expect(trace.result).toBeNull();
+    expect(trace.resultDecision).toMatchObject({
+      status: "rejected",
+      result: null,
+      issues: [{ path: "/turn/terminal" }],
+    });
+    expect(trace.assertions.proposalAccepted).toBe(false);
     expect(trace.events.some((event) => event.eventType === "run.result.accepted")).toBe(false);
     expect(trace.events.find((event) => event.eventType === "run.result.rejected")?.payload)
       .toMatchObject({ reasonCode: "provider_turn_did_not_complete" });

@@ -404,7 +404,7 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
       (event) => event.eventType === "run.result.proposed",
     );
     const proposedResult = proposals.length === 1 ? structuredClone(proposals[0]!.payload) : null;
-    const resultDecision: CodexResultDecision =
+    const proposalDecision: CodexResultDecision =
       proposals.length === 1
         ? validateCodexResultProposal(proposedResult, input.taskEnvelope)
         : {
@@ -452,7 +452,20 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
     if (providerTerminal === undefined) throw new Error("turn terminal invariant failed");
     const providerRuntime = runtimeTerminal(providerTerminal);
     const resultAccepted =
-      resultDecision.status === "accepted" && providerRuntime.runTerminalState === "succeeded";
+      proposalDecision.status === "accepted" && providerRuntime.runTerminalState === "succeeded";
+    const resultDecision: CodexResultDecision = resultAccepted
+      ? proposalDecision
+      : proposalDecision.status === "rejected"
+        ? proposalDecision
+        : {
+            status: "rejected",
+            result: null,
+            issues: [{
+              code: "schema_validation",
+              path: "/turn/terminal",
+              message: `the provider turn ended as ${providerRuntime.turnTerminalState}`,
+            }],
+          };
     controlEvents.push(
       resultAccepted
         ? controlEvent("run.result.accepted", {
@@ -461,10 +474,10 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
           })
         : controlEvent("run.result.rejected", {
             reasonCode:
-              resultDecision.status === "rejected"
+              proposalDecision.status === "rejected"
                 ? "semantic_result_rejected"
                 : "provider_turn_did_not_complete",
-            issues: resultDecision.status === "rejected" ? resultDecision.issues : [],
+            issues: resultDecision.issues,
             recovery: { required: true, recoverable: true },
           }),
     );
