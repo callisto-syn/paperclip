@@ -200,7 +200,7 @@ describe("Codex trace conformance", () => {
     });
   });
 
-  it("rejects malformed goal and control declarations in the fixture", async () => {
+  it("rejects malformed runtime request, goal, and control declarations", async () => {
     const fixturePath = fileURLToPath(new URL(
       "../../protocol/fixtures/codex-driver/driver-conformance.json",
       import.meta.url,
@@ -209,12 +209,30 @@ describe("Codex trace conformance", () => {
     const directory = await mkdtemp(join(tmpdir(), "paperclip-live-fixture-"));
     const candidatePath = join(directory, "candidate.json");
     try {
+      source.runtimeRequests[0].requestKind = "file_approval";
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("invalid runtime request case");
+
+      source.runtimeRequests[0].requestKind = "command_approval";
+      source.runtimeRequests[0].expectedResponse.decision = "decline";
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("invalid runtime request case");
+
+      source.runtimeRequests[0].expectedResponse.decision = "acceptForSession";
       source.goals[0].method = "thread/goal/wrong";
       await writeFile(candidatePath, JSON.stringify(source));
       await expect(loadLiveConsoleConformanceFixture(candidatePath))
         .rejects.toThrow("invalid goal operation");
 
       source.goals[0].method = "thread/goal/get";
+      delete source.goals[1].params.objective;
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("invalid goal operation");
+
+      source.goals[1].params.objective = "Ship the Live console tracer";
       source.controls.sameTurnSteer.expected = 42;
       await writeFile(candidatePath, JSON.stringify(source));
       await expect(loadLiveConsoleConformanceFixture(candidatePath))
