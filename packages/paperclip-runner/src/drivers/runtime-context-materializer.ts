@@ -67,28 +67,43 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
   return target;
 }
 
-async function makeReadOnly(root: string): Promise<void> {
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const child = join(root, entry.name);
-    if (entry.isDirectory()) await makeReadOnly(child);
-    else await chmod(child, (await lstat(child)).mode & 0o555);
-  }
-  await chmod(root, 0o555);
-}
-
-async function makeWritableForRemoval(root: string): Promise<void> {
-  const stat = await lstat(root).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (!stat || stat.isSymbolicLink()) return;
-  if (stat.isDirectory()) {
-    await chmod(root, 0o700);
-    for (const entry of await readdir(root)) {
-      await makeWritableForRemoval(join(root, entry));
+async function protectStagedTree(root: string): Promise<void> {
+  const rootHandle = await open(
+    root,
+    constants.O_RDONLY
+      | (constants.O_NOFOLLOW ?? 0)
+      | (constants.O_DIRECTORY ?? 0),
+  );
+  try {
+    const opened = await rootHandle.stat();
+    if (!opened.isDirectory()) {
+      throw new Error("staged runtime context root must be a directory");
     }
-  } else if (stat.isFile()) {
-    await chmod(root, 0o600);
+    // Keep directories owner-writable so the private staging tree can be
+    // removed without a second path-based chmod traversal.
+    await rootHandle.chmod(0o700);
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const child = join(root, entry.name);
+      if (entry.isDirectory()) {
+        await protectStagedTree(child);
+        continue;
+      }
+      const childHandle = await open(
+        child,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
+      try {
+        const openedChild = await childHandle.stat();
+        if (!openedChild.isFile()) {
+          throw new Error("staged runtime context asset must be a regular file");
+        }
+        await childHandle.chmod(openedChild.mode & 0o555);
+      } finally {
+        await childHandle.close();
+      }
+    }
+  } finally {
+    await rootHandle.close();
   }
 }
 
@@ -120,7 +135,7 @@ export async function materializeNativeRuntimeSkills(
         verbatimSymlinks: true,
       });
       await assertSafeTree(target);
-      await makeReadOnly(target);
+      await protectStagedTree(target);
     }
 
     let movedPrevious = false;
@@ -137,11 +152,9 @@ export async function materializeNativeRuntimeSkills(
       throw error;
     }
     if (movedPrevious) {
-      await makeWritableForRemoval(previousHome);
       await rm(previousHome, { recursive: true, force: true });
     }
   } catch (error) {
-    await makeWritableForRemoval(stagingHome).catch(() => undefined);
     await rm(stagingHome, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
