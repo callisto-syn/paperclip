@@ -164,6 +164,7 @@ impl AcpxProviderSessionIdentity {
 pub struct AcpxProviderSession {
     transport: AcpxSidecarTransport,
     state: AcpxProviderState,
+    tool_bridge: ProviderToolBridge,
     identity: AcpxProviderSessionIdentity,
     catalog_revision: u64,
     working_directory: PathBuf,
@@ -173,6 +174,12 @@ pub struct AcpxProviderSession {
 impl AcpxProviderSession {
     pub fn start(config: &AcpxProviderSessionConfig) -> Result<Self, LocalRunnerError> {
         config.validate()?;
+        let mut tool_bridge = ProviderToolBridge::default();
+        tool_bridge
+            .prepare(config.tool_set.clone())
+            .map_err(|error| {
+                LocalRunnerError::invalid(format!("ACPX authorized tools are invalid: {error}"))
+            })?;
         let mut transport = AcpxSidecarTransport::start(&config.transport)?;
         let bootstrap = bootstrap(&mut transport, config);
         let (identity, state) = match bootstrap {
@@ -185,6 +192,7 @@ impl AcpxProviderSession {
         Ok(Self {
             transport,
             state,
+            tool_bridge,
             identity,
             catalog_revision: config.catalog_revision,
             working_directory: config.working_directory.clone(),
@@ -284,10 +292,38 @@ impl AcpxProviderSession {
         let Some(event) = event else {
             return Ok(None);
         };
-        match self.state.accept_event(&event) {
-            Ok(events) => Ok(Some(events)),
-            Err(error) => Err(self.fail_closed(error)),
+        let events = match self.state.accept_event(&event) {
+            Ok(events) => events,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        let mut next_bridge = self.tool_bridge.clone();
+        for event in &events {
+            match event {
+                AcpxProviderStateEvent::ToolCall {
+                    call_id,
+                    operation_id,
+                    input,
+                } => {
+                    if let Err(error) =
+                        next_bridge.begin_call(call_id.clone(), operation_id.clone(), input.clone())
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool authorization failed: {error}"
+                        ))));
+                    }
+                }
+                AcpxProviderStateEvent::TurnTerminal { .. } => {
+                    if let Err(error) = next_bridge.settle_turn("acpx_turn_settled") {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool settlement failed: {error}"
+                        ))));
+                    }
+                }
+                _ => {}
+            }
         }
+        self.tool_bridge = next_bridge;
+        Ok(Some(events))
     }
 
     pub fn shutdown(&mut self, reason: &str) -> Result<(), LocalRunnerError> {

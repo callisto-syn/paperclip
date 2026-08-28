@@ -95,6 +95,8 @@ terminates the process; session shutdown preserves persistent provider state.
 The session can then start one immutable-workspace turn, request interruption,
 and reduce polled events through the scope-first state boundary. A mismatched
 command acknowledgement or invalid event terminates the session fail closed.
+Polled semantic calls pass through the run-scoped authorized tool bridge before
+they can be returned to a caller.
 
 Run the complete contract gate with:
 

@@ -141,3 +141,36 @@ fn fails_closed_when_a_polled_event_violates_run_scope() {
     assert!(error.contains("stale run"), "{error}");
     assert!(session.shutdown("already closed").is_ok());
 }
+
+#[test]
+fn admits_only_catalog_authorized_tool_calls() {
+    let mut session = AcpxProviderSession::start(&config("turns-tool")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+    let events = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &events[0],
+        AcpxProviderStateEvent::ToolCall { operation_id, .. }
+            if operation_id == "issues.read"
+    ));
+    assert_eq!(
+        session.state().pending_tool("call-1").unwrap().operation_id,
+        "issues.read"
+    );
+    session.shutdown("test complete").unwrap();
+}
+
+#[test]
+fn fails_closed_before_returning_an_unauthorized_tool_call() {
+    let mut session = AcpxProviderSession::start(&config("turns-unauthorized-tool")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+    let error = session
+        .poll_event(Duration::from_secs(1))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unauthorized tool issues.delete"), "{error}");
+    assert!(session.shutdown("already closed").is_ok());
+}
