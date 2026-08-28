@@ -466,7 +466,7 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
     // A provider may complete its turn after proposing a result that the
     // controller cannot accept. Preserve the provider's turn fact, but never
     // promote a rejected semantic result to a successful run.
-    const runtime = resultDecision.status === "accepted"
+    const runtime = resultDecision.status === "accepted" || providerRuntime.runTerminalState === "cancelled"
       ? providerRuntime
       : { ...providerRuntime, runTerminalState: "failed" as const };
     controlEvents.push(controlEvent("run.terminal", {

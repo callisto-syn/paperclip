@@ -54,7 +54,10 @@ function completedResult(): PrpStructuredRunResult {
 }
 
 class TraceConformanceDriver implements HarnessDriver {
-  constructor(private readonly result: PrpStructuredRunResult = completedResult()) {}
+  constructor(
+    private readonly result: PrpStructuredRunResult = completedResult(),
+    private readonly terminalEvent: "turn.completed" | "turn.interrupted" = "turn.completed",
+  ) {}
 
   async descriptor() {
     return {
@@ -142,7 +145,7 @@ class TraceConformanceDriver implements HarnessDriver {
           event(1, "session.started", { context }, false),
           event(2, "turn.started", {}),
           event(3, "run.result.proposed", result),
-          event(4, "turn.completed", {}),
+          event(4, this.terminalEvent, {}),
         );
         releaseEvents?.();
         return { turnId };
@@ -308,6 +311,26 @@ describe("Codex trace conformance", () => {
       turnTerminalState: "completed",
       runTerminalState: "failed",
     });
+    expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
+  });
+
+  it("preserves cancellation when an interrupted provider proposal is rejected", async () => {
+    const rejectedResult = completedResult();
+    rejectedResult.completionClaim.contractRevision = "stale-contract-revision";
+    const trace = await runCodexCodexTracer({
+      driver: new TraceConformanceDriver(rejectedResult, "turn.interrupted"),
+      taskEnvelope: envelope,
+      workingDirectory: "/trace-workspace",
+      timeoutMs: 1_000,
+    });
+
+    expect(trace.resultDecision.status).toBe("rejected");
+    expect(trace.events.find((event) => event.eventType === "run.terminal")?.payload)
+      .toMatchObject({
+        turnTerminalState: "interrupted",
+        runTerminalState: "cancelled",
+        reportedWorkDisposition: "yielded",
+      });
     expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
   });
 });
