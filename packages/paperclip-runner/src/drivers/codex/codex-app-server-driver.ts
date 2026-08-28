@@ -643,6 +643,8 @@ export class CodexAppServerDriver implements HarnessDriver {
           activeTurnId: snapshot.activeTurnId ?? null,
           semanticResult: snapshot.semanticResult ?? null,
           terminalTurns: snapshot.terminalTurns ?? [],
+          dispositionOnlyRecoveryConsumed:
+            snapshot.dispositionOnlyRecoveryConsumed ?? false,
           stalePendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
           lineage: snapshot.lineage,
           sourceSequence: snapshot.lastSourceSequence ?? 0,
@@ -882,6 +884,7 @@ export class CodexAppServerDriver implements HarnessDriver {
     activeTurnId?: string | null;
     semanticResult?: PersistedHarnessSemanticResult | null;
     terminalTurns?: PersistedHarnessTurnTerminal[];
+    dispositionOnlyRecoveryConsumed?: boolean;
     stalePendingRuntimeRequests?: HarnessRuntimeRequest[];
     lineage?: HarnessThreadLineageEntry[];
     sourceSequence: number;
@@ -927,6 +930,7 @@ class CodexHarnessSession implements HarnessSession {
   #protocolFailureMessage: string | null = null;
   #terminal = false;
   #dispositionOnlyRecoveryAvailable = false;
+  #dispositionOnlyRecoveryConsumed = false;
   #turnStarted = false;
   readonly #terminalTurns = new Map<string, string>();
   readonly #workspaceChangesByTurn = new Map<string, Record<string, unknown>>();
@@ -954,6 +958,7 @@ class CodexHarnessSession implements HarnessSession {
     activeTurnId?: string | null;
     semanticResult?: PersistedHarnessSemanticResult | null;
     terminalTurns?: PersistedHarnessTurnTerminal[];
+    dispositionOnlyRecoveryConsumed?: boolean;
     stalePendingRuntimeRequests?: HarnessRuntimeRequest[];
     lineage?: HarnessThreadLineageEntry[];
     goal?: HarnessThreadGoal | null;
@@ -1022,16 +1027,27 @@ class CodexHarnessSession implements HarnessSession {
     if (this.#activeTurnId && this.#terminalTurns.has(this.#activeTurnId)) {
       this.#activeTurnId = null;
     }
-    this.#terminal =
+    this.#dispositionOnlyRecoveryConsumed =
+      input.dispositionOnlyRecoveryConsumed ?? false;
+    const settledSemanticResult =
       this.#conversationMode === "task"
       && this.#result !== null
       && this.#resultTurnId !== null
       && this.#terminalTurns.has(this.#resultTurnId);
+    const spentResultlessRecovery =
+      input.resumed
+      && this.#conversationMode === "task"
+      && this.#result === null
+      && this.#activeTurnId === null
+      && this.#terminalTurns.size > 0
+      && this.#dispositionOnlyRecoveryConsumed;
+    this.#terminal = settledSemanticResult || spentResultlessRecovery;
     this.#dispositionOnlyRecoveryAvailable =
       input.resumed &&
       this.#conversationMode === "task" &&
       this.#terminalTurns.size > 0 &&
-      this.#result === null;
+      this.#result === null &&
+      !this.#dispositionOnlyRecoveryConsumed;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );
@@ -1099,6 +1115,7 @@ class CodexHarnessSession implements HarnessSession {
     this.#resultFingerprint = null;
     this.#resultCallId = null;
     this.#resultTurnId = null;
+    this.#dispositionOnlyRecoveryConsumed = false;
     this.#terminal = false;
     this.#terminalTurns.clear();
     this.#turnStarted = false;
@@ -1137,6 +1154,12 @@ class CodexHarnessSession implements HarnessSession {
       );
     }
     const dispositionOnlyRecovery = this.#dispositionOnlyRecoveryAvailable;
+    if (dispositionOnlyRecovery) {
+      // Consume before the submitted event: the event consumer checkpoints
+      // this marker before provider start can perform or acknowledge work.
+      this.#dispositionOnlyRecoveryAvailable = false;
+      this.#dispositionOnlyRecoveryConsumed = true;
+    }
     const taskText =
       this.#conversationMode === "direct"
         ? input.message.text
@@ -1200,9 +1223,6 @@ class CodexHarnessSession implements HarnessSession {
       throw new Error("Codex turn identity changed during start");
     }
     this.#activeTurnId ??= turnId;
-    if (dispositionOnlyRecovery) {
-      this.#dispositionOnlyRecoveryAvailable = false;
-    }
     this.#emit("turn.accepted", { turnId }, { turnId });
     if (this.#interruptQueued) {
       this.#interruptQueued = false;
@@ -1613,6 +1633,8 @@ class CodexHarnessSession implements HarnessSession {
         turnId,
         fingerprint,
       })),
+      dispositionOnlyRecoveryConsumed:
+        this.#dispositionOnlyRecoveryConsumed,
       pendingRuntimeRequests: this.pendingRuntimeRequests(),
       goal: this.#goal === null ? null : structuredClone(this.#goal),
       lineage: this.lineage(),

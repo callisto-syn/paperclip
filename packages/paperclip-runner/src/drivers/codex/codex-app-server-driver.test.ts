@@ -3272,6 +3272,7 @@ describe("Codex app-server Codex driver", () => {
   it("permits one recovery turn for a result-less terminal task", async () => {
     const first = new FakeCodexTransport();
     const second = new FakeCodexTransport();
+    const third = new FakeCodexTransport();
     second.turnStartResponse = Promise.resolve({
       turn: { id: "turn-2", status: "inProgress", items: [] },
     });
@@ -3283,7 +3284,18 @@ describe("Codex app-server Codex driver", () => {
         turns: [{ id: "turn-1", status: "completed", items: [] }],
       },
     };
-    const driver = makeDriver([first, second]);
+    third.readResponse = {
+      thread: {
+        id: "thread-1",
+        sessionId: "provider-session-1",
+        cwd: "/workspace",
+        turns: [
+          { id: "turn-1", status: "completed", items: [] },
+          { id: "turn-2", status: "completed", items: [] },
+        ],
+      },
+    };
+    const driver = makeDriver([first, second, third]);
     const original = await driver.openSession({
       runId: "run-result-less-terminal",
       normalizedSessionId: "normalized-result-less-terminal",
@@ -3308,9 +3320,14 @@ describe("Codex app-server Codex driver", () => {
     expect(recovered).toBeDefined();
     await recovered!.reconcile?.();
     const recoveryMessage = "Do not execute twice; report disposition only.";
+    const recoveryTerminal = collectUntilTerminal(recovered!.events());
     await expect(recovered!.startTurn({
       message: { role: "user", text: recoveryMessage },
     })).resolves.toMatchObject({ turnId: "turn-2" });
+    await expect(recovered!.snapshot()).resolves.toMatchObject({
+      activeTurnId: "turn-2",
+      dispositionOnlyRecoveryConsumed: true,
+    });
     await expect(recovered!.startTurn({
       message: { role: "user", text: "Do not start concurrently." },
     })).rejects.toThrow("session cannot start another turn");
@@ -3324,7 +3341,30 @@ describe("Codex app-server Codex driver", () => {
     expect(JSON.stringify(recoveryStarts[0]!.params.input)).not.toContain(
       "Complete.",
     );
-    await recovered!.close({ reason: "test complete" });
+    second.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-2", status: "completed", items: [] },
+    });
+    await recoveryTerminal;
+    const spentSnapshot = await recovered!.snapshot();
+    expect(spentSnapshot).toMatchObject({
+      activeTurnId: null,
+      semanticResult: null,
+      dispositionOnlyRecoveryConsumed: true,
+      terminalTurns: [{ turnId: "turn-1" }, { turnId: "turn-2" }],
+    });
+    await recovered!.close({ reason: "simulate another restart" });
+
+    const repeatedRecovery = await driver.recoverSession?.(spentSnapshot);
+    expect(repeatedRecovery?.session).toBeDefined();
+    await repeatedRecovery!.session!.reconcile?.();
+    await expect(repeatedRecovery!.session!.startTurn({
+      message: { role: "user", text: "Do not repeat recovery work." },
+    })).rejects.toThrow("session cannot start another turn");
+    expect(
+      third.calls.filter((call) => call.method === "turn/start"),
+    ).toHaveLength(0);
+    await repeatedRecovery!.session!.close({ reason: "test complete" });
   });
 
   it("keeps a newer result-bearing recovery turn active beside an older result-less terminal", async () => {
