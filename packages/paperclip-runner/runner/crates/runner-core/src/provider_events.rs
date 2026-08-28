@@ -680,11 +680,12 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         raw_path
     };
     if path.is_empty()
-        || path.starts_with('/')
-        || windows_normalized_path.starts_with("//")
+        || windows_normalized_path.starts_with('/')
         || is_absolute_windows_drive_path(&windows_normalized_path)
         || (cfg!(windows) && has_drive_relative_prefix(path))
-        || path.split('/').any(|segment| segment == "..")
+        || windows_normalized_path
+            .split('/')
+            .any(|segment| segment == "..")
         || path.contains("://")
     {
         Value::Null
