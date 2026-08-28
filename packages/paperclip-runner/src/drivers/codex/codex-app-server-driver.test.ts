@@ -3319,6 +3319,11 @@ describe("Codex app-server Codex driver", () => {
     const recovered = recovery?.session;
     expect(recovered).toBeDefined();
     await recovered!.reconcile?.();
+    await expect(recovered!.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      dispositionOnlyRecoveryConsumed: true,
+      terminalTurns: [{ turnId: "turn-1" }],
+    });
     const recoveryMessage = "Do not execute twice; report disposition only.";
     const recoveryTerminal = collectUntilTerminal(recovered!.events());
     await expect(recovered!.startTurn({

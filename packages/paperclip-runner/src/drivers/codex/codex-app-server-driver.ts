@@ -1027,7 +1027,7 @@ class CodexHarnessSession implements HarnessSession {
     if (this.#activeTurnId && this.#terminalTurns.has(this.#activeTurnId)) {
       this.#activeTurnId = null;
     }
-    this.#dispositionOnlyRecoveryConsumed =
+    const dispositionOnlyRecoveryPreviouslyConsumed =
       input.dispositionOnlyRecoveryConsumed ?? false;
     const settledSemanticResult =
       this.#conversationMode === "task"
@@ -1040,14 +1040,21 @@ class CodexHarnessSession implements HarnessSession {
       && this.#result === null
       && this.#activeTurnId === null
       && this.#terminalTurns.size > 0
-      && this.#dispositionOnlyRecoveryConsumed;
+      && dispositionOnlyRecoveryPreviouslyConsumed;
     this.#terminal = settledSemanticResult || spentResultlessRecovery;
     this.#dispositionOnlyRecoveryAvailable =
       input.resumed &&
       this.#conversationMode === "task" &&
       this.#terminalTurns.size > 0 &&
       this.#result === null &&
-      !this.#dispositionOnlyRecoveryConsumed;
+      !dispositionOnlyRecoveryPreviouslyConsumed;
+    // Reserve the one-shot recovery allowance in the snapshot emitted as soon
+    // as recovery succeeds. Native orchestration checkpoints that snapshot
+    // before calling startTurn, so a crash can lose the recovery attempt but
+    // can never grant a second provider execution.
+    this.#dispositionOnlyRecoveryConsumed =
+      dispositionOnlyRecoveryPreviouslyConsumed ||
+      this.#dispositionOnlyRecoveryAvailable;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );
@@ -1155,10 +1162,10 @@ class CodexHarnessSession implements HarnessSession {
     }
     const dispositionOnlyRecovery = this.#dispositionOnlyRecoveryAvailable;
     if (dispositionOnlyRecovery) {
-      // Consume before the submitted event: the event consumer checkpoints
-      // this marker before provider start can perform or acknowledge work.
+      // The allowance was durably reserved in the post-recovery checkpoint.
+      // Clear the in-memory grant before provider work so this session cannot
+      // submit it twice either.
       this.#dispositionOnlyRecoveryAvailable = false;
-      this.#dispositionOnlyRecoveryConsumed = true;
     }
     const taskText =
       this.#conversationMode === "direct"

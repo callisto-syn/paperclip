@@ -48,6 +48,8 @@ export interface PersistedNativeSession {
   terminal?: PrpTerminalState | null;
   activeTurnId?: string | null;
   terminalTurns?: PersistedHarnessTurnTerminal[];
+  /** Durable at-most-once marker for a resultless terminal recovery turn. */
+  dispositionOnlyRecoveryConsumed?: boolean;
   pendingRuntimeRequests?: HarnessRuntimeRequest[];
   lineage?: HarnessThreadLineageEntry[];
 }

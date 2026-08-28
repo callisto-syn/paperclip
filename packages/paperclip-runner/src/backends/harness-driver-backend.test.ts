@@ -198,11 +198,14 @@ describe("HarnessDriverBackend", () => {
   it("passes the persisted harness driver kind through recovery", async () => {
     let recoveredDriverKind: string | null = null;
     let recoveredProviderIdentity: PersistedHarnessSession["providerIdentity"];
+    let recoveredDispositionAllowance: boolean | undefined;
     const recoveryDriver: HarnessDriver = {
       ...driver,
       async recoverSession(snapshot) {
         recoveredDriverKind = snapshot.driverKind;
         recoveredProviderIdentity = snapshot.providerIdentity;
+        recoveredDispositionAllowance =
+          snapshot.dispositionOnlyRecoveryConsumed;
         return { recovered: true, session: new FakeHarnessSession() };
       },
     };
@@ -214,11 +217,43 @@ describe("HarnessDriverBackend", () => {
       providerSessionId: "provider-1",
       providerIdentity,
       providerRecoveryPolicy: "allow_replacement_after_governed_wait",
+      dispositionOnlyRecoveryConsumed: true,
       identity: { runId: "run-2", sessionId: "session-1", companyId: "company-1", issueId: "issue-1", agentId: "agent-1" },
     });
     expect(recovery.recovered).toBe(true);
     expect(recoveredDriverKind).toBe("fake");
     expect(recoveredProviderIdentity).toEqual(providerIdentity);
+    expect(recoveredDispositionAllowance).toBe(true);
+  });
+
+  it("preserves a consumed disposition allowance in native snapshots", async () => {
+    class ConsumedRecoverySession extends FakeHarnessSession {
+      override async snapshot(): Promise<PersistedHarnessSession> {
+        return {
+          ...(await super.snapshot()),
+          dispositionOnlyRecoveryConsumed: true,
+        };
+      }
+    }
+    const backend = new HarnessDriverBackend({
+      ...driver,
+      async openSession() {
+        return new ConsumedRecoverySession();
+      },
+    });
+    const session = await backend.openSession({
+      identity: {
+        runId: "run-consumed-recovery",
+        sessionId: "session-1",
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+      },
+    });
+
+    await expect(session.snapshot()).resolves.toMatchObject({
+      dispositionOnlyRecoveryConsumed: true,
+    });
   });
 
   it("allows only the run id to change when a harness session is attached", async () => {
