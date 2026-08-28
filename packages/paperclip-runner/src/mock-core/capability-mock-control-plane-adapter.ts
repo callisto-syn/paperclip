@@ -1854,7 +1854,10 @@ function isSemanticToolRuntimeSnapshot(
           (typeof extension.ownerId !== "string" || extension.ownerId.length === 0)) ||
         (extension.leaseExpiresAtMs !== undefined &&
           (!Number.isSafeInteger(extension.leaseExpiresAtMs) ||
-            Number(extension.leaseExpiresAtMs) < 0))
+            Number(extension.leaseExpiresAtMs) < 0)) ||
+        (extension.phase !== undefined &&
+          extension.phase !== "reserved" &&
+          extension.phase !== "executing")
       ) {
         return false;
       }

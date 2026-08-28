@@ -421,11 +421,14 @@ describe("Capability exposure and authorization", () => {
     });
 
     expect(result).toMatchObject({ ok: true });
-    expect(compareAndSwapRuntime).toHaveBeenCalledTimes(2);
+    expect(compareAndSwapRuntime).toHaveBeenCalledTimes(3);
     expect(compareAndSwapRuntime.mock.calls[0]![2].extensions).toEqual([
-      expect.objectContaining({ status: "pending" }),
+      expect.objectContaining({ status: "pending", phase: "reserved" }),
     ]);
-    const snapshot = compareAndSwapRuntime.mock.calls[1]![2];
+    expect(compareAndSwapRuntime.mock.calls[1]![2].extensions).toEqual([
+      expect.objectContaining({ status: "pending", phase: "executing" }),
+    ]);
+    const snapshot = compareAndSwapRuntime.mock.calls[2]![2];
     expect(snapshot.extensions).toHaveLength(1);
     const [extension] = snapshot.extensions;
     expect(extension).toMatchObject({ status: "completed" });
@@ -562,6 +565,73 @@ describe("Capability exposure and authorization", () => {
         value: { key: "case-bounded-contention", upserted: true },
       });
       expect(completionAttempts).toBe(65);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never reclaims an expired execution whose durable completion cannot be stored", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+        save: (_runId, snapshot) => {
+          durableSnapshot = structuredClone(snapshot);
+        },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+          const pending = snapshot.extensions.find(
+            (extension) => extension.status === "pending",
+          );
+          if (pending?.phase === "reserved" ||
+            (pending?.phase === "executing" &&
+              durableSnapshot?.extensions[0]?.status === "pending" &&
+              durableSnapshot.extensions[0].phase === "reserved")) {
+            durableSnapshot = structuredClone(snapshot);
+            return true;
+          }
+          return false;
+        },
+      };
+      const first = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+        now: Date.now,
+      });
+      const invocation = {
+        operationId: "upsert_case",
+        input: { key: "case-ambiguous-effect", body: "Case body" },
+        idempotencyKey: "upsert-case-ambiguous-effect",
+      } as const;
+
+      const contended = first.runtime.invoke(invocation);
+      for (let yieldIndex = 0; yieldIndex < 8; yieldIndex += 1) {
+        await vi.advanceTimersToNextTimerAsync();
+      }
+      await expect(contended).resolves.toMatchObject({
+        ok: false,
+        error: { code: "operation_unsupported" },
+      });
+      expect(durableSnapshot?.extensions).toEqual([
+        expect.objectContaining({ status: "pending", phase: "executing" }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const followerAdapter = CapabilityMockControlPlaneAdapter.restore(
+        first.adapter.serialize(),
+        { semanticToolRuntimeStore: durableStore },
+      );
+      const follower = new CapabilitySemanticToolRuntime({
+        adapter: followerAdapter,
+        runId: OPEN.identity.runId,
+        scenarioGrants: ["cases:write"],
+        now: Date.now,
+      });
+      await expect(follower.invoke(invocation)).resolves.toMatchObject({
+        ok: false,
+        error: { reason: "idempotency_recovery_in_flight" },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -971,7 +1041,8 @@ describe("Capability exposure and authorization", () => {
         }
         if (snapshot.extensions.some((extension) =>
           extension.status === "pending" &&
-          extension.ownerId !== "terminated-executor"
+          extension.ownerId !== "terminated-executor" &&
+          extension.phase === "reserved"
         )) successfulClaims += 1;
         durableSnapshot = structuredClone(snapshot);
         return true;
