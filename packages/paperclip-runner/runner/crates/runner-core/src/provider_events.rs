@@ -695,7 +695,15 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     {
         Value::Null
     } else {
-        Value::String(path.chars().take(4_000).collect())
+        let display_path = if !cfg!(windows) && has_ambiguous_single_slash_prefix(raw_path) {
+            // A leading `./` preserves the exact POSIX-relative target while
+            // preventing consumers from interpreting an extensible prefix
+            // such as `custom:/...` as a URI scheme.
+            format!("./{path}")
+        } else {
+            path.to_owned()
+        };
+        Value::String(display_path.chars().take(4_000).collect())
     }
 }
 
@@ -731,6 +739,17 @@ fn has_unsafe_uri_spelling(path: &str) -> bool {
             || suffix.starts_with('\\')
             || (suffix.starts_with('/')
                 && (scheme.contains(['+', '-', '.']) || is_known_uri_scheme(scheme)))
+    })
+}
+
+fn has_ambiguous_single_slash_prefix(path: &str) -> bool {
+    path.split_once(':').is_some_and(|(prefix, suffix)| {
+        prefix.len() > 1
+            && prefix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && prefix.as_bytes()[0].is_ascii_alphabetic()
+            && suffix.starts_with('/')
+            && !suffix.starts_with("//")
+            && !is_known_uri_scheme(prefix)
     })
 }
 
@@ -804,8 +823,20 @@ mod tests {
             if cfg!(windows) {
                 assert_eq!(normalized, Value::Null);
             } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
+                assert_eq!(normalized, Value::String(format!("./{location}")));
             }
+        }
+    }
+
+    #[test]
+    fn disambiguates_extensible_single_slash_uri_prefixes() {
+        let normalized = safe_acpx_location(Some(&json!({
+            "path": "custom:/host/path",
+        })));
+        if cfg!(windows) {
+            assert_eq!(normalized, Value::Null);
+        } else {
+            assert_eq!(normalized, Value::String("./custom:/host/path".to_owned()));
         }
     }
 

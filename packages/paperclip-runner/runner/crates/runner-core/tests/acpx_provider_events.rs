@@ -203,8 +203,34 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 serde_json::Value::Null
             );
         } else {
-            assert_eq!(colon_component[0].payload["target"], posix_path);
+            assert_eq!(
+                colon_component[0].payload["target"],
+                format!("./{posix_path}"),
+            );
         }
+    }
+
+    let extensible_scheme = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-extensible-scheme",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"custom:/host/path"}]
+        }),
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            extensible_scheme[0].payload["target"],
+            serde_json::Value::Null
+        );
+    } else {
+        assert_eq!(
+            extensible_scheme[0].payload["target"],
+            "./custom:/host/path"
+        );
     }
 
     for unsafe_path in [
