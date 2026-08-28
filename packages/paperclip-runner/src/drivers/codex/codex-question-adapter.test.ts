@@ -148,13 +148,19 @@ describe("Codex structured question adapter", () => {
 
     const boundaryPrefix = "Bearer a ";
     const boundaryDescription = `${boundaryPrefix}${"x".repeat(4_000 - boundaryPrefix.length)}`;
-    const boundaryForm = normalizeCodexQuestionSet("tool/requestUserInput", {
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
       description: boundaryDescription,
       questions: [{ id: "form", question: "Choose one" }],
+    })).toThrow("Codex form description exceeds 4000 characters after redaction");
+
+    const preservedTail = "description-tail";
+    const safeDescription = `${boundaryPrefix}${"x".repeat(3_900)}${preservedTail}`;
+    const safeForm = normalizeCodexQuestionSet("tool/requestUserInput", {
+      description: safeDescription,
+      questions: [{ id: "form", question: "Choose one" }],
     });
-    expect(boundaryForm?.description).toHaveLength(4_000);
-    expect(boundaryForm?.description).toContain("Bearer [REDACTED]");
-    expect(boundaryForm?.description).not.toContain("Bearer a");
+    expect(safeForm?.description).toContain("Bearer [REDACTED]");
+    expect(safeForm?.description.endsWith(preservedTail)).toBe(true);
 
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
