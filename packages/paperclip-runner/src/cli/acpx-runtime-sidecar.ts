@@ -49,6 +49,11 @@ import {
   enqueueAcpxSidecarInput,
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
+import {
+  boundedIdentity,
+  parseAcpxRunAttachment,
+  verifyOpenedAcpxSidecarHost,
+} from "./acpx-sidecar-lifecycle.js";
 
 const MAX_PENDING_TOOLS = 512;
 const MAX_PENDING_INPUTS = 16;
@@ -168,30 +173,30 @@ async function dispatch(
     if (params.model !== initializedModel) {
       throw new Error("ACPX session model differs from its initialization");
     }
-    openParams = params;
-    try {
-      host = await AcpxRuntimeHost.open(
-        {
-          runtimeDirectory: params.runtimeDirectory,
-          normalizedSessionId: params.normalizedSessionId,
-          workingDirectory: params.workingDirectory,
-          agent: "codex",
-          model: params.model,
-          permissionMode: params.permissionMode,
-          systemInstructions: params.systemInstructions,
-          environment: process.env,
-          expectedIdentity: params.expectedIdentity,
-          semanticTools: {
-            tools: params.tools,
-            handler: waitForTool,
-          },
+    const openedHost = await AcpxRuntimeHost.open(
+      {
+        runtimeDirectory: params.runtimeDirectory,
+        normalizedSessionId: params.normalizedSessionId,
+        workingDirectory: params.workingDirectory,
+        agent: "codex",
+        model: params.model,
+        permissionMode: params.permissionMode,
+        systemInstructions: params.systemInstructions,
+        environment: process.env,
+        expectedIdentity: params.expectedIdentity,
+        semanticTools: {
+          tools: params.tools,
+          handler: waitForTool,
         },
-        { openRuntime: openCodexAcpxRuntime },
-      );
-    } catch (error) {
-      openParams = null;
-      throw error;
-    }
+      },
+      { openRuntime: openCodexAcpxRuntime },
+    );
+    const opened = await verifyOpenedAcpxSidecarHost(
+      openedHost,
+      sanitizeRuntimeStatus,
+    );
+    host = openedHost;
+    openParams = params;
     emit("runtime.process", {
       role: "sidecar",
       pid: process.pid,
@@ -199,9 +204,9 @@ async function dispatch(
       startedAt: new Date().toISOString(),
     });
     return {
-      identity: host.identity(),
+      identity: opened.identity,
       sidecarPid: process.pid,
-      status: sanitizeRuntimeStatus(await host.status()),
+      status: opened.status,
     };
   }
   if (request.command === "run.attach") {
@@ -213,13 +218,11 @@ async function dispatch(
     ) {
       throw new Error("ACPX run tool catalog differs from the opened session");
     }
-    runId = boundedIdentity(request.params.runId, "runId");
+    const attachment = parseAcpxRunAttachment(request.params);
+    runId = attachment.runId;
     return {
-      runId,
-      catalogRevision: positiveInteger(
-        request.params.catalogRevision,
-        "catalogRevision",
-      ),
+      runId: attachment.runId,
+      catalogRevision: attachment.catalogRevision,
     };
   }
   if (request.command === "turn.start") {
@@ -929,21 +932,6 @@ function boundedOptionalText(
   return bytes.length <= maxBytes
     ? result
     : bytes.subarray(0, maxBytes).toString("utf8");
-}
-
-function boundedIdentity(value: unknown, field: string): string {
-  const result = requiredText(value, field);
-  if (result.length > 240 || /[\u0000-\u001f\u007f]/.test(result)) {
-    throw new Error(`${field} is invalid`);
-  }
-  return result;
-}
-
-function positiveInteger(value: unknown, field: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) < 1) {
-    throw new Error(`${field} must be a positive integer`);
-  }
-  return Number(value);
 }
 
 function safeCode(value: unknown, fallback: string): string {

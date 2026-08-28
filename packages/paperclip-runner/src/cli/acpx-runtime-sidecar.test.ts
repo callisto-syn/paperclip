@@ -1,9 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ACPX_SIDECAR_PROTOCOL_VERSION } from "../drivers/acpx/sidecar-protocol.js";
+import {
+  parseAcpxRunAttachment,
+  verifyOpenedAcpxSidecarHost,
+} from "./acpx-sidecar-lifecycle.js";
 
 const children = new Set<SidecarProcess>();
 
@@ -13,6 +17,42 @@ afterEach(async () => {
 });
 
 describe("Codex ACPX runtime sidecar", () => {
+  it("closes an opened host when post-open verification fails", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const host = {
+      identity: () => ({ kind: "acpx" }),
+      status: vi.fn().mockRejectedValue(new Error("status failed")),
+      close,
+    };
+
+    await expect(verifyOpenedAcpxSidecarHost(host, () => ({}))).rejects.toThrow(
+      "status failed",
+    );
+    expect(close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledWith({
+      reason: "ACPX session open verification failed",
+    });
+  });
+
+  it("validates a complete run attachment before it can be committed", () => {
+    let attachedRunId: string | null = null;
+    const attach = (params: Record<string, unknown>) => {
+      const attachment = parseAcpxRunAttachment(params);
+      attachedRunId = attachment.runId;
+      return attachment;
+    };
+
+    expect(() => attach({ runId: "run-1", catalogRevision: 0 })).toThrow(
+      "catalogRevision must be a positive integer",
+    );
+    expect(attachedRunId).toBeNull();
+    expect(attach({ runId: "run-1", catalogRevision: 2 })).toEqual({
+      runId: "run-1",
+      catalogRevision: 2,
+    });
+    expect(attachedRunId).toBe("run-1");
+  });
+
   it("recovers after malformed input and reports its qualified Codex profile", async () => {
     const sidecar = startSidecar();
     sidecar.write({
