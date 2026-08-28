@@ -61,6 +61,28 @@ fn accepts_answers_that_match_the_exact_question_set() {
     let mut javascript_numeric_syntax = valid_response();
     javascript_numeric_syntax["answers"]["count"] = json!({"text":"\u{feff}0x2\u{feff}"});
     validate_question_response(&question_set(), &javascript_numeric_syntax).unwrap();
+
+    let mut empty_custom_with_selection = valid_response();
+    empty_custom_with_selection["answers"]["target"] =
+        json!({"selectedOptionIds":["first"],"customText":"\u{feff}"});
+    validate_question_response(&question_set(), &empty_custom_with_selection).unwrap();
+}
+
+#[test]
+fn treats_ecmascript_bom_whitespace_as_an_empty_required_answer() {
+    let mut unconstrained_set = question_set();
+    unconstrained_set["questions"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("textValidation");
+
+    let mut bom_text = valid_response();
+    bom_text["answers"]["notes"] = json!({"text":"\u{feff}"});
+    assert!(validate_question_response(&unconstrained_set, &bom_text).is_err());
+
+    let mut bom_custom = valid_response();
+    bom_custom["answers"]["target"] = json!({"customText":"\u{feff}"});
+    assert!(validate_question_response(&question_set(), &bom_custom).is_err());
 }
 
 #[test]

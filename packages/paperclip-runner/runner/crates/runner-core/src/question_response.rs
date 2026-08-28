@@ -105,8 +105,8 @@ fn validate_answer(question: &Value, answer: Option<&Value>) -> Result<(), Local
     let text = answer.get("text").and_then(Value::as_str);
     let custom = answer.get("customText").and_then(Value::as_str);
     let has_value = selected.as_ref().is_some_and(|values| !values.is_empty())
-        || text.is_some_and(|value| !value.trim().is_empty())
-        || custom.is_some_and(|value| !value.trim().is_empty());
+        || text.is_some_and(|value| !value.trim_matches(is_ecmascript_whitespace).is_empty())
+        || custom.is_some_and(|value| !value.trim_matches(is_ecmascript_whitespace).is_empty());
     if required && !has_value {
         return Err(LocalRunnerError::invalid(format!(
             "question response answer {question_id} is required"
@@ -165,7 +165,8 @@ fn validate_answer(question: &Value, answer: Option<&Value>) -> Result<(), Local
             }
             if question.get("answerMode").and_then(Value::as_str) == Some("single_select")
                 && selected.as_ref().is_some_and(|values| !values.is_empty())
-                && custom.is_some_and(|value| !value.trim().is_empty())
+                && custom
+                    .is_some_and(|value| !value.trim_matches(is_ecmascript_whitespace).is_empty())
             {
                 return Err(LocalRunnerError::invalid(format!(
                     "single-select answer {question_id} cannot combine an option and custom text"
