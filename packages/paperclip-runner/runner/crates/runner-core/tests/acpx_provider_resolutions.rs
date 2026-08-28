@@ -150,7 +150,7 @@ fn rejects_permission_requests_that_bypass_the_pinned_codex_policy() {
 #[test]
 fn fake_sidecar_rejects_the_unsupported_permission_resolution_command() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_fake-acpx-sidecar"))
-        .args(["--mode", "turns-permission"])
+        .args(["--mode", "happy"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

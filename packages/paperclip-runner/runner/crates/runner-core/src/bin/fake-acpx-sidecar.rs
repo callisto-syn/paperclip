@@ -30,6 +30,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .get("command")
             .and_then(Value::as_str)
             .ok_or("request command is missing")?;
+        if command == "permission.resolve" {
+            write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
+            continue;
+        }
         match mode {
             "silent" => continue,
             "wrong-id" => {
