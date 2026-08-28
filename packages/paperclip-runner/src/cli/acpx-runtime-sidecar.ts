@@ -76,6 +76,7 @@ interface PendingInput {
 }
 
 let host: AcpxRuntimeHost | null = null;
+let activeHostCleanup: Promise<void> | null = null;
 let failedAdmissionCleanup: Promise<void> | null = null;
 let openParams: AcpxSidecarOpenParams | null = null;
 let runId: string | null = null;
@@ -83,6 +84,7 @@ let turnId: string | null = null;
 let sequence = 0;
 let requestSequence = 0;
 let closing = false;
+let shutdownRequested = false;
 let pendingInput = Promise.resolve();
 let bootstrapFailure: Error | null = null;
 let initializedModel: string | null = null;
@@ -102,16 +104,28 @@ lines.on("line", (line) => {
   );
 });
 lines.on("close", () => {
-  void pendingInput.then(() => shutdown("sidecar stdin closed"));
+  requestShutdown("sidecar stdin closed");
 });
 process.once("SIGTERM", () => {
-  void shutdown("sidecar received SIGTERM");
+  requestShutdown("sidecar received SIGTERM");
 });
 process.once("SIGINT", () => {
-  void shutdown("sidecar received SIGINT");
+  requestShutdown("sidecar received SIGINT");
 });
 
+function requestShutdown(reason: string): void {
+  if (shutdownRequested) return;
+  shutdownRequested = true;
+  lines.pause();
+  pendingInput = enqueueAcpxSidecarInput(
+    pendingInput,
+    () => shutdown(reason),
+    (error) => diagnostic("sidecar_shutdown_failed", safeMessage(error)),
+  );
+}
+
 async function receiveLine(line: string): Promise<void> {
+  if (shutdownRequested) return;
   if (!line.trim()) return;
   if (Buffer.byteLength(line) > ACPX_SIDECAR_MAX_FRAME_BYTES) {
     diagnostic("oversized_frame", "Rejected an oversized sidecar request.");
@@ -1008,7 +1022,13 @@ async function shutdown(reason: string): Promise<void> {
   if (turnId) rejectTurnWaiters(turnId, reason);
   let cleanupDeferred = false;
   if (host) {
-    const cleanupDisposition = await closeActiveSidecarHostWithin(host, reason);
+    const activeHost = host;
+    const cleanupDisposition = await closeActiveSidecarHostWithin(
+      activeHost,
+      reason,
+      undefined,
+      (cleanup) => retainActiveHostCleanup(activeHost, cleanup),
+    );
     if (cleanupDisposition === "deferred") {
       cleanupDeferred = true;
       diagnostic(
@@ -1028,19 +1048,25 @@ async function shutdown(reason: string): Promise<void> {
       );
     }
   }
-  host = null;
+  if (!cleanupDeferred) host = null;
   openParams = null;
   runId = null;
   turnId = null;
   lines.close();
   process.stdin.pause();
   process.exitCode = 0;
-  if (cleanupDeferred) {
-    // A provider resource may still own referenced handles. Once both cleanup
-    // waits have exhausted their fixed deadline, the sidecar must not remain
-    // alive indefinitely waiting for an uncooperative child.
-    setImmediate(() => process.exit(0));
-  }
+}
+
+function retainActiveHostCleanup(
+  activeHost: AcpxRuntimeHost,
+  cleanup: Promise<void>,
+): void {
+  const retained = cleanup.catch(() => undefined);
+  activeHostCleanup = retained;
+  void retained.finally(() => {
+    if (activeHostCleanup === retained) activeHostCleanup = null;
+    if (host === activeHost) host = null;
+  });
 }
 
 function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {

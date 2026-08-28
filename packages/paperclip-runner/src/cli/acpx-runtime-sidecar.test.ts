@@ -77,10 +77,17 @@ describe("Codex ACPX runtime sidecar", () => {
   it("bounds active-host cleanup during sidecar shutdown", async () => {
     const cleanup = new Promise<void>(() => undefined);
     const close = vi.fn(() => cleanup);
+    const retainCleanup = vi.fn();
 
-    await expect(closeActiveSidecarHostWithin({ close }, "SIGTERM", 1))
+    await expect(closeActiveSidecarHostWithin(
+      { close },
+      "SIGTERM",
+      1,
+      retainCleanup,
+    ))
       .resolves.toBe("deferred");
     expect(close).toHaveBeenCalledWith({ reason: "SIGTERM" });
+    expect(retainCleanup).toHaveBeenCalledWith(cleanup);
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {

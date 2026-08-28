@@ -31,8 +31,11 @@ export async function closeActiveSidecarHostWithin(
   host: Pick<OpenedAcpxSidecarHost, "close">,
   reason: string,
   timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+  retainCleanup: (cleanup: Promise<void>) => void = () => undefined,
 ): Promise<"settled" | "deferred"> {
-  return await awaitSidecarCleanupWithin(host.close({ reason }), timeoutMs);
+  const cleanup = host.close({ reason });
+  retainCleanup(cleanup);
+  return await awaitSidecarCleanupWithin(cleanup, timeoutMs);
 }
 
 export async function verifyOpenedAcpxSidecarHost(
