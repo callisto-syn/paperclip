@@ -700,7 +700,8 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
       return;
     }
     this.#inflightServerRequests += 1;
-    void this.#serverRequestHandler(request)
+    void Promise.resolve()
+      .then(() => this.#serverRequestHandler(request))
       .then(
         (result) => {
           this.#writeServerResponse({ id: request.id, result });

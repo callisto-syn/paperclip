@@ -126,6 +126,35 @@ describe("Codex app-server transport limits", () => {
     await transport?.close();
   });
 
+  it("turns a synchronous server handler throw into a JSON-RPC error", async () => {
+    const transport = nodeTransport(`
+      process.stdin.setEncoding("utf8");
+      process.stdin.once("data", (chunk) => {
+        const response = JSON.parse(chunk.trim());
+        process.stdout.write(JSON.stringify({ method: "observed", params: response }) + "\\n");
+      });
+      setTimeout(() => process.stdout.write(JSON.stringify({ id: "server-1", method: "tool/call", params: {} }) + "\\n"), 20);
+      setInterval(() => {}, 1000);
+    `);
+    transport.setServerRequestHandler((): Promise<Record<string, unknown>> => {
+      throw new Error("synchronous handler failure");
+    });
+
+    await expect(
+      transport.notifications()[Symbol.asyncIterator]().next(),
+    ).resolves.toMatchObject({
+      done: false,
+      value: {
+        method: "observed",
+        params: {
+          id: "server-1",
+          error: { code: -32_000, message: "Error: synchronous handler failure" },
+        },
+      },
+    });
+    await transport.close();
+  });
+
   it("routes an asynchronous child-stdin failure through deterministic closure", async () => {
     const diagnostics: string[] = [];
     const transport = nodeTransport(
