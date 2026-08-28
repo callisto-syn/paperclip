@@ -684,6 +684,13 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         { id: "approval-unlinked", status: "pending" },
       ],
     });
+    expect(adapter.snapshot().wakes).toEqual([
+      expect.objectContaining({
+        actorId: "actor-1",
+        taskId: "task-1",
+        reason: "approval_resolved",
+      }),
+    ]);
   });
 
   it("rejects stale interaction targets and invalid interaction outcomes", async () => {
