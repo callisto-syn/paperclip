@@ -2,16 +2,18 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   stat,
   symlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { stageManagedCodexCredential } from "./codex-credentials.js";
 
@@ -50,6 +52,39 @@ describe("managed Codex credentials", () => {
       code: "ENOENT",
     });
   });
+
+  it.runIf(process.platform !== "win32")(
+    "retries the directory sync after unlink already succeeded",
+    async () => {
+      const fixture = await credentialFixture();
+      const lease = await stageManagedCodexCredential({
+        agentHomeDirectory: fixture.home,
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      });
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const originalSync = prototype.sync;
+      let syncAttempts = 0;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          syncAttempts += 1;
+          if (syncAttempts === 1) throw new Error("injected directory sync failure");
+          await originalSync.call(this);
+        },
+      );
+      try {
+        await expect(lease.close()).rejects.toThrow("injected directory sync failure");
+        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lease.close()).resolves.toBeUndefined();
+        expect(syncAttempts).toBe(2);
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
 
   it("copies an explicit private source without changing the source", async () => {
     const fixture = await credentialFixture();

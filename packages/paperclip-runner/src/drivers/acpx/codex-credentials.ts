@@ -257,6 +257,10 @@ async function removeCredential(path: string, home: string): Promise<void> {
     await syncDirectory(home);
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
+    // The file may be absent because a previous unlink succeeded before its
+    // directory fsync failed. Retry the directory sync so cleanup is durable
+    // before the lease reports success.
+    await syncDirectory(home);
   }
 }
 
