@@ -14,7 +14,7 @@ pub const CODEX_APP_SERVER_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BUFFERED_MESSAGES: usize = 1_024;
 const MAX_INSTRUCTIONS_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_TOOL_REQUESTS: usize = 4_096;
-const MAX_PENDING_TOOL_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PENDING_TOOL_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 type QuestionOptionLabels = BTreeMap<String, BTreeMap<String, String>>;
 type QuestionSetMapping = (String, Value, QuestionOptionLabels);
 
@@ -128,7 +128,7 @@ struct PendingToolRequest {
     rpc_id: Value,
     operation_id: String,
     input: Value,
-    input_bytes: usize,
+    retained_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +149,7 @@ pub struct CodexProvider {
     pending_messages: VecDeque<Value>,
     authorized_tool_ids: BTreeSet<String>,
     pending_tool_requests: BTreeMap<String, PendingToolRequest>,
-    pending_tool_input_bytes: usize,
+    pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
 }
@@ -183,7 +183,7 @@ impl CodexProvider {
             pending_messages: VecDeque::new(),
             authorized_tool_ids,
             pending_tool_requests: BTreeMap::new(),
-            pending_tool_input_bytes: 0,
+            pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
         };
@@ -417,11 +417,24 @@ impl CodexProvider {
                         ))
                     })?
                     .len();
+                let rpc_id_bytes = serde_json::to_vec(&rpc_id)
+                    .map_err(|error| {
+                        LocalRunnerError::invalid(format!(
+                            "Codex JSON-RPC id is not serializable: {error}"
+                        ))
+                    })?
+                    .len();
+                let retained_bytes = pending_tool_request_size([
+                    input_bytes,
+                    rpc_id_bytes,
+                    call_id.len(),
+                    operation_id.len(),
+                ])?;
                 let pending = PendingToolRequest {
                     rpc_id: rpc_id.clone(),
                     operation_id: operation_id.clone(),
                     input: input.clone(),
-                    input_bytes,
+                    retained_bytes,
                 };
                 if let Some(existing) = self.pending_tool_requests.get(&call_id) {
                     if existing != &pending {
@@ -445,10 +458,12 @@ impl CodexProvider {
                         "Codex emitted too many pending tool calls",
                     ));
                 }
-                let retained_input_bytes =
-                    retain_pending_tool_input_bytes(self.pending_tool_input_bytes, input_bytes)?;
+                let retained_request_bytes = retain_pending_tool_request_bytes(
+                    self.pending_tool_request_bytes,
+                    retained_bytes,
+                )?;
                 self.pending_tool_requests.insert(call_id.clone(), pending);
-                self.pending_tool_input_bytes = retained_input_bytes;
+                self.pending_tool_request_bytes = retained_request_bytes;
                 return Ok(Some(CodexProviderEvent::ToolCall {
                     call_id,
                     operation_id,
@@ -556,9 +571,9 @@ impl CodexProvider {
             },
         }))?;
         if let Some(completed) = self.pending_tool_requests.remove(&result.call_id) {
-            self.pending_tool_input_bytes = self
-                .pending_tool_input_bytes
-                .saturating_sub(completed.input_bytes);
+            self.pending_tool_request_bytes = self
+                .pending_tool_request_bytes
+                .saturating_sub(completed.retained_bytes);
         }
         Ok(())
     }
@@ -572,7 +587,7 @@ impl CodexProvider {
     fn cancel_pending_requests(&mut self) -> Result<(), LocalRunnerError> {
         self.cancel_pending_runtime_requests()?;
         let pending = std::mem::take(&mut self.pending_tool_requests);
-        self.pending_tool_input_bytes = 0;
+        self.pending_tool_request_bytes = 0;
         for request in pending.into_values() {
             self.process.send(&json!({
                 "id": request.rpc_id,
@@ -630,15 +645,27 @@ impl CodexProvider {
     }
 }
 
-fn retain_pending_tool_input_bytes(
+fn pending_tool_request_size(
+    parts: impl IntoIterator<Item = usize>,
+) -> Result<usize, LocalRunnerError> {
+    parts.into_iter().try_fold(0usize, |total, part| {
+        total
+            .checked_add(part)
+            .ok_or_else(|| LocalRunnerError::invalid("Codex pending tool request size overflowed"))
+    })
+}
+
+fn retain_pending_tool_request_bytes(
     current: usize,
     incoming: usize,
 ) -> Result<usize, LocalRunnerError> {
     current
         .checked_add(incoming)
-        .filter(|total| *total <= MAX_PENDING_TOOL_INPUT_BYTES)
+        .filter(|total| *total <= MAX_PENDING_TOOL_REQUEST_BYTES)
         .ok_or_else(|| {
-            LocalRunnerError::invalid("Codex pending tool inputs exceed the 16 MiB aggregate limit")
+            LocalRunnerError::invalid(
+                "Codex pending tool requests exceed the 16 MiB aggregate limit",
+            )
         })
 }
 
@@ -1118,12 +1145,16 @@ mod tests {
     }
 
     #[test]
-    fn bounds_retained_pending_tool_inputs_in_aggregate() {
+    fn bounds_all_retained_pending_tool_request_data_in_aggregate() {
+        let request_bytes = pending_tool_request_size([1, 2, 3, 4]).unwrap();
+        assert_eq!(request_bytes, 10);
         assert_eq!(
-            retain_pending_tool_input_bytes(MAX_PENDING_TOOL_INPUT_BYTES - 1, 1).unwrap(),
-            MAX_PENDING_TOOL_INPUT_BYTES
+            retain_pending_tool_request_bytes(MAX_PENDING_TOOL_REQUEST_BYTES - 10, request_bytes)
+                .unwrap(),
+            MAX_PENDING_TOOL_REQUEST_BYTES
         );
-        assert!(retain_pending_tool_input_bytes(MAX_PENDING_TOOL_INPUT_BYTES, 1).is_err());
-        assert!(retain_pending_tool_input_bytes(usize::MAX, 1).is_err());
+        assert!(retain_pending_tool_request_bytes(MAX_PENDING_TOOL_REQUEST_BYTES, 1).is_err());
+        assert!(retain_pending_tool_request_bytes(usize::MAX, 1).is_err());
+        assert!(pending_tool_request_size([usize::MAX, 1]).is_err());
     }
 }
