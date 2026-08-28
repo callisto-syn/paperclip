@@ -96,6 +96,20 @@ describe("PRP v1 JSON Schema contract", () => {
     });
   });
 
+  it("accepts a pending semantic call closed by reconciliation alone", async () => {
+    const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
+    const events = fixture.events as Array<Record<string, unknown>>;
+    const reconciled = structuredClone(events[0]!);
+    reconciled.sourceEventId = "semantic_happy_reconciled";
+    reconciled.sourceSeq = 2;
+    reconciled.eventType = "semantic_tool.reconciled";
+    const payload = reconciled.payload as Record<string, unknown>;
+    (payload.semantic_tool as Record<string, unknown>).phase = "reconciled";
+    events[1] = reconciled;
+
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({ ok: true });
+  });
+
   it("binds a pending-call reconciliation to its original semantic input", async () => {
     const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
     const events = fixture.events as Array<Record<string, unknown>>;
