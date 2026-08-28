@@ -220,14 +220,9 @@ fn validate_text_constraints(
         validation.get("inputType").and_then(Value::as_str),
         Some("number" | "integer")
     ) {
-        let trimmed = text.trim();
-        let number = if trimmed.is_empty() {
-            0.0
-        } else {
-            trimmed.parse::<f64>().map_err(|_| {
-                LocalRunnerError::invalid(format!("answer {question_id} must be numeric"))
-            })?
-        };
+        let number = parse_javascript_number(text).ok_or_else(|| {
+            LocalRunnerError::invalid(format!("answer {question_id} must be numeric"))
+        })?;
         if !number.is_finite()
             || (validation.get("inputType").and_then(Value::as_str) == Some("integer")
                 && number.fract() != 0.0)
@@ -246,4 +241,27 @@ fn validate_text_constraints(
         }
     }
     Ok(())
+}
+
+fn parse_javascript_number(value: &str) -> Option<f64> {
+    let value =
+        value.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    if value.is_empty() {
+        return Some(0.0);
+    }
+    for (prefixes, radix) in [(["0x", "0X"], 16), (["0o", "0O"], 8), (["0b", "0B"], 2)] {
+        if let Some(digits) = prefixes
+            .iter()
+            .find_map(|prefix| value.strip_prefix(prefix))
+        {
+            if digits.is_empty() {
+                return None;
+            }
+            return digits.chars().try_fold(0.0_f64, |number, character| {
+                let digit = character.to_digit(radix)?;
+                Some(number.mul_add(f64::from(radix), f64::from(digit)))
+            });
+        }
+    }
+    value.parse::<f64>().ok()
 }

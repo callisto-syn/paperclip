@@ -57,6 +57,10 @@ fn accepts_answers_that_match_the_exact_question_set() {
     let mut custom = valid_response();
     custom["answers"]["target"] = json!({"customText":"another"});
     validate_question_response(&question_set(), &custom).unwrap();
+
+    let mut javascript_numeric_syntax = valid_response();
+    javascript_numeric_syntax["answers"]["count"] = json!({"text":"0x2"});
+    validate_question_response(&question_set(), &javascript_numeric_syntax).unwrap();
 }
 
 #[test]
@@ -101,6 +105,11 @@ fn rejects_cross_document_and_answer_mode_mismatches() {
         ("numeric mismatch", {
             let mut value = valid_response();
             value["answers"]["count"] = json!({"text":"4"});
+            value
+        }),
+        ("invalid numeric syntax", {
+            let mut value = valid_response();
+            value["answers"]["count"] = json!({"text":"0xGG"});
             value
         }),
     ];
