@@ -571,7 +571,7 @@ export class CodexAppServerDriver implements HarnessDriver {
       const initialize = await this.#initialize(transport);
       const existing = await transport.request("thread/read", {
         threadId: snapshot.driverSessionId,
-        includeTurns: false,
+        includeTurns: true,
       });
       const existingThread = record(existing.thread);
       if (text(existingThread.id) !== snapshot.driverSessionId) {
@@ -628,27 +628,76 @@ export class CodexAppServerDriver implements HarnessDriver {
           reason: "provider resumed a different provider session",
         };
       }
+      let recoveredActiveTurnId = snapshot.activeTurnId ?? null;
+      let dispositionOnlyRecoveryConsumed =
+        snapshot.dispositionOnlyRecoveryConsumed ?? false;
+      let reconcileUncheckpointedDispositionTurn = false;
+      if (
+        !this.#direct()
+        && snapshot.semanticResult == null
+        && recoveredActiveTurnId === null
+        && (snapshot.terminalTurns?.length ?? 0) > 0
+        && !dispositionOnlyRecoveryConsumed
+      ) {
+        const turns = Array.isArray(existingThread.turns)
+          ? existingThread.turns.map(record)
+          : [];
+        const terminalIds = new Set(
+          (snapshot.terminalTurns ?? []).map((turn) => turn.turnId),
+        );
+        let lastKnownTerminalIndex = -1;
+        turns.forEach((turn, index) => {
+          if (terminalIds.has(text(turn.id))) lastKnownTerminalIndex = index;
+        });
+        const laterTurns = lastKnownTerminalIndex < 0
+          ? []
+          : turns.slice(lastKnownTerminalIndex + 1);
+        if (laterTurns.length > 1) {
+          await transport.close();
+          return {
+            recovered: false,
+            reason: "provider exposed multiple uncheckpointed disposition recovery turns",
+          };
+        }
+        const uncheckpointedTurnId = text(laterTurns[0]?.id);
+        if (laterTurns.length === 1 && uncheckpointedTurnId.length === 0) {
+          await transport.close();
+          return {
+            recovered: false,
+            reason: "provider exposed an unidentifiable disposition recovery turn",
+          };
+        }
+        if (uncheckpointedTurnId.length > 0) {
+          // A previous process reached the provider but crashed before it could
+          // checkpoint the accepted turn. Adopt that exact turn instead of
+          // submitting the disposition-only recovery a second time.
+          recoveredActiveTurnId = uncheckpointedTurnId;
+          dispositionOnlyRecoveryConsumed = true;
+          reconcileUncheckpointedDispositionTurn = true;
+        }
+      }
       const goal = await this.#discoverGoal(transport, opened.threadId);
       if (opened.context.liveConsole)
         opened.context.liveConsole.goals = this.#caps.goals;
+      const session = this.#session({
+        transport,
+        runId: snapshot.runId,
+        normalizedSessionId: snapshot.normalizedSessionId,
+        opened,
+        goal,
+        resumed: true,
+        activeTurnId: recoveredActiveTurnId,
+        semanticResult: snapshot.semanticResult ?? null,
+        terminalTurns: snapshot.terminalTurns ?? [],
+        dispositionOnlyRecoveryConsumed,
+        stalePendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
+        lineage: snapshot.lineage,
+        sourceSequence: snapshot.lastSourceSequence ?? 0,
+      });
+      if (reconcileUncheckpointedDispositionTurn) await session.reconcile?.();
       return {
         recovered: true,
-        session: this.#session({
-          transport,
-          runId: snapshot.runId,
-          normalizedSessionId: snapshot.normalizedSessionId,
-          opened,
-          goal,
-          resumed: true,
-          activeTurnId: snapshot.activeTurnId ?? null,
-          semanticResult: snapshot.semanticResult ?? null,
-          terminalTurns: snapshot.terminalTurns ?? [],
-          dispositionOnlyRecoveryConsumed:
-            snapshot.dispositionOnlyRecoveryConsumed ?? false,
-          stalePendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
-          lineage: snapshot.lineage,
-          sourceSequence: snapshot.lastSourceSequence ?? 0,
-        }),
+        session,
       };
     } catch (error) {
       await transport.close().catch(() => {});
@@ -1048,13 +1097,13 @@ class CodexHarnessSession implements HarnessSession {
       this.#terminalTurns.size > 0 &&
       this.#result === null &&
       !dispositionOnlyRecoveryPreviouslyConsumed;
-    // Reserve the one-shot recovery allowance in the snapshot emitted as soon
-    // as recovery succeeds. Native orchestration checkpoints that snapshot
-    // before calling startTurn, so a crash can lose the recovery attempt but
-    // can never grant a second provider execution.
+    // Recovery itself does not consume the allowance. A checkpoint can occur
+    // before startTurn, and consuming it here would strand the run if the
+    // process crashed at that boundary. startTurn consumes it in memory; a
+    // later recovery adopts provider evidence for an accepted, uncheckpointed
+    // turn before deciding whether another submission is safe.
     this.#dispositionOnlyRecoveryConsumed =
-      dispositionOnlyRecoveryPreviouslyConsumed ||
-      this.#dispositionOnlyRecoveryAvailable;
+      dispositionOnlyRecoveryPreviouslyConsumed;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );
@@ -1161,12 +1210,6 @@ class CodexHarnessSession implements HarnessSession {
       );
     }
     const dispositionOnlyRecovery = this.#dispositionOnlyRecoveryAvailable;
-    if (dispositionOnlyRecovery) {
-      // The allowance was durably reserved in the post-recovery checkpoint.
-      // Clear the in-memory grant before provider work so this session cannot
-      // submit it twice either.
-      this.#dispositionOnlyRecoveryAvailable = false;
-    }
     const taskText =
       this.#conversationMode === "direct"
         ? input.message.text
@@ -1184,6 +1227,13 @@ class CodexHarnessSession implements HarnessSession {
       throw new Error(
         `collaboration_mode_mismatch: requested ${input.requestedCollaborationMode}, effective ${effectiveCollaborationMode}`,
       );
+    }
+    if (dispositionOnlyRecovery) {
+      // Prevent a second submission in this process. The resulting accepted
+      // turn id is checkpointed by orchestration; if the process dies before
+      // that checkpoint, recoverSession adopts the provider-side turn.
+      this.#dispositionOnlyRecoveryAvailable = false;
+      this.#dispositionOnlyRecoveryConsumed = true;
     }
     // The submitted text is part of the canonical record so a tracer can show
     // the operator's own message without keeping shadow state next to the
@@ -1215,6 +1265,9 @@ class CodexHarnessSession implements HarnessSession {
           ? {}
           : { outputSchema: CODEX_RESULT_OUTPUT_SCHEMA }),
       });
+    } catch (error) {
+      if (dispositionOnlyRecovery) this.#terminal = true;
+      throw error;
     } finally {
       this.#turnStartPending = false;
     }
