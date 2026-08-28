@@ -1,6 +1,17 @@
 import { createHash } from "node:crypto";
+import {
+  spawn as spawnChildProcess,
+  type ChildProcess,
+  type SpawnOptionsWithoutStdio,
+} from "node:child_process";
 import { constants } from "node:fs";
-import { open, readFile, realpath, stat } from "node:fs/promises";
+import {
+  open,
+  readFile,
+  realpath,
+  stat,
+  type FileHandle,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
@@ -12,14 +23,21 @@ const MAX_AGENT_COMMAND_BYTES = 16 * 1024 * 1024;
 export type AcpxPackageJsonResolver = (packageName: string) => string;
 
 export interface VerifiedAcpxInstallation {
-  commandPath: string;
-  commandDigest: string;
-  commandIdentity: VerifiedAcpxCommandIdentity;
-  agentServerPackageJsonPath: string;
-  agentRuntimePackageJsonPath: string | null;
+  readonly commandDigest: string;
+  readonly agentServerPackageJsonPath: string;
+  readonly agentRuntimePackageJsonPath: string | null;
+  openCommand(): Promise<VerifiedAcpxCommandLease>;
 }
 
-export interface VerifiedAcpxCommandIdentity {
+export interface VerifiedAcpxCommandLease {
+  spawn(
+    args?: readonly string[],
+    options?: SpawnOptionsWithoutStdio,
+  ): ChildProcess;
+  close(): Promise<void>;
+}
+
+interface VerifiedAcpxCommandIdentity {
   device: string;
   inode: string;
   size: string;
@@ -50,11 +68,12 @@ export async function verifyQualifiedAcpxInstallation(
   if (!isInside(packageDirectory, commandPath)) {
     throw new Error(`ACPX ${profile.agent} executable escapes its package`);
   }
-  const command = await inspectCommand(
+  const command = await openInspectedCommand(
     commandPath,
     profile.commandDigest,
     profile.agent,
   );
+  await command.handle.close();
 
   let runtimePackageJsonPath: string | null = null;
   if (profile.agentRuntimePackage !== null) {
@@ -77,29 +96,27 @@ export async function verifyQualifiedAcpxInstallation(
     throw new Error("Qualified ACPX runtime version omitted its package");
   }
 
-  return {
-    commandPath,
-    commandDigest: command.digest,
-    commandIdentity: command.identity,
+  const commandDigest = command.digest;
+  const commandIdentity = command.identity;
+  return Object.freeze({
+    commandDigest,
     agentServerPackageJsonPath: serverPackageJsonPath,
     agentRuntimePackageJsonPath: runtimePackageJsonPath,
-  };
-}
-
-/** Revalidate the exact filesystem identity immediately before process launch. */
-export async function revalidateVerifiedAcpxCommand(
-  installation: VerifiedAcpxInstallation,
-): Promise<void> {
-  const current = await inspectCommand(
-    installation.commandPath,
-    installation.commandDigest,
-    "provider",
-  );
-  if (!sameIdentity(current.identity, installation.commandIdentity)) {
-    throw new Error(
-      "ACPX provider executable identity changed after verification",
-    );
-  }
+    async openCommand(): Promise<VerifiedAcpxCommandLease> {
+      const current = await openInspectedCommand(
+        commandPath,
+        commandDigest,
+        "provider",
+      );
+      if (!sameIdentity(current.identity, commandIdentity)) {
+        await current.handle.close();
+        throw new Error(
+          "ACPX provider executable identity changed after verification",
+        );
+      }
+      return commandLease(current.handle);
+    },
+  });
 }
 
 function defaultPackageJsonResolver(packageName: string): string {
@@ -143,11 +160,15 @@ async function readBoundedRegularFile(
   return bytes;
 }
 
-async function inspectCommand(
+async function openInspectedCommand(
   commandPath: string,
   expectedDigest: string,
   agent: string,
-): Promise<{ digest: string; identity: VerifiedAcpxCommandIdentity }> {
+): Promise<{
+  digest: string;
+  identity: VerifiedAcpxCommandIdentity;
+  handle: FileHandle;
+}> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(
@@ -170,7 +191,7 @@ async function inspectCommand(
         `ACPX ${agent} executable must be a bounded regular file`,
       );
     }
-    const bytes = await handle.readFile();
+    const bytes = await readHandleAtStart(handle, Number(before.size));
     const after = await handle.stat({ bigint: true });
     const beforeIdentity = fileIdentity(before);
     const afterIdentity = fileIdentity(after);
@@ -186,10 +207,74 @@ async function inspectCommand(
     if (digest !== expectedDigest) {
       throw new Error(`ACPX ${agent} executable digest mismatch`);
     }
-    return { digest, identity: afterIdentity };
-  } finally {
+    return { digest, identity: afterIdentity, handle };
+  } catch (error) {
     await handle.close();
+    throw error;
   }
+}
+
+async function readHandleAtStart(
+  handle: FileHandle,
+  size: number,
+): Promise<Buffer> {
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = await handle.read(bytes, offset, size - offset, offset);
+    if (read.bytesRead === 0) break;
+    offset += read.bytesRead;
+  }
+  if (offset !== size) {
+    throw new Error("ACPX provider executable ended during verification");
+  }
+  return bytes;
+}
+
+function commandLease(handle: FileHandle): VerifiedAcpxCommandLease {
+  let consumed = false;
+  const close = async (): Promise<void> => {
+    if (consumed) return;
+    consumed = true;
+    await handle.close();
+  };
+  return {
+    spawn(
+      args: readonly string[] = [],
+      options: SpawnOptionsWithoutStdio = {},
+    ): ChildProcess {
+      if (consumed) throw new Error("Verified ACPX command lease is closed");
+      if (process.platform !== "linux" && process.platform !== "darwin") {
+        throw new Error(
+          "Verified descriptor launch is unavailable on this platform",
+        );
+      }
+      consumed = true;
+      const childDescriptor = 3;
+      const descriptorPath =
+        process.platform === "linux"
+          ? `/proc/self/fd/${childDescriptor}`
+          : `/dev/fd/${childDescriptor}`;
+      let child: ChildProcess;
+      try {
+        child = spawnChildProcess(process.execPath, [descriptorPath, ...args], {
+          ...options,
+          shell: false,
+          stdio: ["pipe", "pipe", "pipe", handle.fd],
+        });
+      } catch (error) {
+        void handle.close().catch(() => undefined);
+        throw error;
+      }
+      const release = (): void => {
+        void handle.close().catch(() => undefined);
+      };
+      child.once("spawn", release);
+      child.once("error", release);
+      return child;
+    },
+    close,
+  };
 }
 
 function fileIdentity(metadata: {

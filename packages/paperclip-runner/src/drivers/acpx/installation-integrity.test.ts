@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -13,10 +16,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
-import {
-  revalidateVerifiedAcpxCommand,
-  verifyQualifiedAcpxInstallation,
-} from "./installation-integrity.js";
+import { verifyQualifiedAcpxInstallation } from "./installation-integrity.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -36,13 +36,8 @@ describe("ACPX installation integrity", () => {
       fixture.resolve,
     );
     expect(installation).toMatchObject({
-      commandPath: await realpath(fixture.commandPath),
       commandDigest: fixture.profile.commandDigest,
-      commandIdentity: {
-        device: expect.any(String),
-        inode: expect.any(String),
-        size: expect.any(String),
-      },
+      openCommand: expect.any(Function),
       agentServerPackageJsonPath: await realpath(fixture.serverPackageJsonPath),
       agentRuntimePackageJsonPath: await realpath(
         fixture.runtimePackageJsonPath,
@@ -118,7 +113,7 @@ describe("ACPX installation integrity", () => {
     },
   );
 
-  it("detects pathname replacement before launch", async () => {
+  it("detects pathname replacement before opening a launch lease", async () => {
     const fixture = await installationFixture();
     const installation = await verifyQualifiedAcpxInstallation(
       fixture.profile,
@@ -126,10 +121,39 @@ describe("ACPX installation integrity", () => {
     );
     await writeFile(fixture.commandPath, "replacement");
 
-    await expect(revalidateVerifiedAcpxCommand(installation)).rejects.toThrow(
+    await expect(installation.openCommand()).rejects.toThrow(
       /digest mismatch|identity changed/,
     );
   });
+
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+    "launches the verified open file after its pathname is replaced",
+    async () => {
+      const fixture = await installationFixture();
+      const installation = await verifyQualifiedAcpxInstallation(
+        fixture.profile,
+        fixture.resolve,
+      );
+      const lease = await installation.openCommand();
+      const replacement = `${fixture.commandPath}.replacement`;
+      await writeFile(
+        replacement,
+        '#!/usr/bin/env node\nprocess.stdout.write("replacement");\n',
+      );
+      await chmod(replacement, 0o755);
+      await rename(replacement, fixture.commandPath);
+
+      const child = lease.spawn();
+      let stdout = "";
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      const [exitCode] = await once(child, "exit");
+      expect(exitCode).toBe(0);
+      expect(stdout).toBe("verified");
+    },
+  );
 });
 
 async function installationFixture() {
@@ -145,7 +169,7 @@ async function installationFixture() {
   const serverPackageJsonPath = join(serverDirectory, "package.json");
   const runtimePackageJsonPath = join(runtimeDirectory, "package.json");
   const commandPath = join(commandDirectory, "server.js");
-  const command = "#!/usr/bin/env node\nprocess.exit(0);\n";
+  const command = '#!/usr/bin/env node\nprocess.stdout.write("verified");\n';
   await Promise.all([
     writeFile(
       serverPackageJsonPath,
@@ -154,6 +178,7 @@ async function installationFixture() {
     writeFile(runtimePackageJsonPath, JSON.stringify({ version: "0.84.2" })),
     writeFile(commandPath, command),
   ]);
+  await chmod(commandPath, 0o755);
   const base = resolveQualifiedAcpxProfile(
     "pi",
     "openrouter/deepseek/deepseek-v4-flash-0731",
