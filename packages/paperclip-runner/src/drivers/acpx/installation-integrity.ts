@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
@@ -13,8 +14,17 @@ export type AcpxPackageJsonResolver = (packageName: string) => string;
 export interface VerifiedAcpxInstallation {
   commandPath: string;
   commandDigest: string;
+  commandIdentity: VerifiedAcpxCommandIdentity;
   agentServerPackageJsonPath: string;
   agentRuntimePackageJsonPath: string | null;
+}
+
+export interface VerifiedAcpxCommandIdentity {
+  device: string;
+  inode: string;
+  size: string;
+  modifiedNanoseconds: string;
+  changedNanoseconds: string;
 }
 
 /** Resolve and verify every installed artifact bound by a qualified profile. */
@@ -22,7 +32,9 @@ export async function verifyQualifiedAcpxInstallation(
   profile: QualifiedAcpxProfile,
   resolvePackageJson: AcpxPackageJsonResolver = defaultPackageJsonResolver,
 ): Promise<VerifiedAcpxInstallation> {
-  const serverPackageJsonPath = resolvePackageJson(profile.agentServerPackage);
+  const serverPackageJsonPath = await realpath(
+    resolvePackageJson(profile.agentServerPackage),
+  );
   const serverPackage = await readPackageJson(
     serverPackageJsonPath,
     profile.agentServerPackage,
@@ -38,22 +50,20 @@ export async function verifyQualifiedAcpxInstallation(
   if (!isInside(packageDirectory, commandPath)) {
     throw new Error(`ACPX ${profile.agent} executable escapes its package`);
   }
-  const command = await readBoundedRegularFile(
+  const command = await inspectCommand(
     commandPath,
-    MAX_AGENT_COMMAND_BYTES,
-    `ACPX ${profile.agent} executable`,
+    profile.commandDigest,
+    profile.agent,
   );
-  const commandDigest = `sha256:${createHash("sha256").update(command).digest("hex")}`;
-  if (commandDigest !== profile.commandDigest) {
-    throw new Error(`ACPX ${profile.agent} executable digest mismatch`);
-  }
 
   let runtimePackageJsonPath: string | null = null;
   if (profile.agentRuntimePackage !== null) {
     if (profile.agentRuntimeVersion === null) {
       throw new Error("Qualified ACPX runtime package omitted its version");
     }
-    runtimePackageJsonPath = resolvePackageJson(profile.agentRuntimePackage);
+    runtimePackageJsonPath = await realpath(
+      resolvePackageJson(profile.agentRuntimePackage),
+    );
     const runtimePackage = await readPackageJson(
       runtimePackageJsonPath,
       profile.agentRuntimePackage,
@@ -69,10 +79,27 @@ export async function verifyQualifiedAcpxInstallation(
 
   return {
     commandPath,
-    commandDigest,
+    commandDigest: command.digest,
+    commandIdentity: command.identity,
     agentServerPackageJsonPath: serverPackageJsonPath,
     agentRuntimePackageJsonPath: runtimePackageJsonPath,
   };
+}
+
+/** Revalidate the exact filesystem identity immediately before process launch. */
+export async function revalidateVerifiedAcpxCommand(
+  installation: VerifiedAcpxInstallation,
+): Promise<void> {
+  const current = await inspectCommand(
+    installation.commandPath,
+    installation.commandDigest,
+    "provider",
+  );
+  if (!sameIdentity(current.identity, installation.commandIdentity)) {
+    throw new Error(
+      "ACPX provider executable identity changed after verification",
+    );
+  }
 }
 
 function defaultPackageJsonResolver(packageName: string): string {
@@ -114,6 +141,84 @@ async function readBoundedRegularFile(
     throw new Error(`${label} changed outside its bounded size`);
   }
   return bytes;
+}
+
+async function inspectCommand(
+  commandPath: string,
+  expectedDigest: string,
+  agent: string,
+): Promise<{ digest: string; identity: VerifiedAcpxCommandIdentity }> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(
+      commandPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+  } catch {
+    throw new Error(
+      `ACPX ${agent} executable could not be opened as a no-follow regular file`,
+    );
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.size < 1n ||
+      before.size > BigInt(MAX_AGENT_COMMAND_BYTES)
+    ) {
+      throw new Error(
+        `ACPX ${agent} executable must be a bounded regular file`,
+      );
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    const beforeIdentity = fileIdentity(before);
+    const afterIdentity = fileIdentity(after);
+    if (
+      bytes.length < 1 ||
+      bytes.length > MAX_AGENT_COMMAND_BYTES ||
+      !sameIdentity(beforeIdentity, afterIdentity) ||
+      after.size !== BigInt(bytes.length)
+    ) {
+      throw new Error(`ACPX ${agent} executable changed while it was verified`);
+    }
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (digest !== expectedDigest) {
+      throw new Error(`ACPX ${agent} executable digest mismatch`);
+    }
+    return { digest, identity: afterIdentity };
+  } finally {
+    await handle.close();
+  }
+}
+
+function fileIdentity(metadata: {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}): VerifiedAcpxCommandIdentity {
+  return {
+    device: metadata.dev.toString(),
+    inode: metadata.ino.toString(),
+    size: metadata.size.toString(),
+    modifiedNanoseconds: metadata.mtimeNs.toString(),
+    changedNanoseconds: metadata.ctimeNs.toString(),
+  };
+}
+
+function sameIdentity(
+  left: VerifiedAcpxCommandIdentity,
+  right: VerifiedAcpxCommandIdentity,
+): boolean {
+  return (
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.size === right.size &&
+    left.modifiedNanoseconds === right.modifiedNanoseconds &&
+    left.changedNanoseconds === right.changedNanoseconds
+  );
 }
 
 function oneExecutable(value: unknown, agent: string): string {

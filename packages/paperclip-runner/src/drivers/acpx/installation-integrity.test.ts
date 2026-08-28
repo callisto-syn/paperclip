@@ -1,12 +1,22 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
-import { verifyQualifiedAcpxInstallation } from "./installation-integrity.js";
+import {
+  revalidateVerifiedAcpxCommand,
+  verifyQualifiedAcpxInstallation,
+} from "./installation-integrity.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -21,13 +31,22 @@ afterEach(async () => {
 describe("ACPX installation integrity", () => {
   it("accepts the exact package, version, executable, and runtime", async () => {
     const fixture = await installationFixture();
-    await expect(
-      verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve),
-    ).resolves.toEqual({
-      commandPath: fixture.commandPath,
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    expect(installation).toMatchObject({
+      commandPath: await realpath(fixture.commandPath),
       commandDigest: fixture.profile.commandDigest,
-      agentServerPackageJsonPath: fixture.serverPackageJsonPath,
-      agentRuntimePackageJsonPath: fixture.runtimePackageJsonPath,
+      commandIdentity: {
+        device: expect.any(String),
+        inode: expect.any(String),
+        size: expect.any(String),
+      },
+      agentServerPackageJsonPath: await realpath(fixture.serverPackageJsonPath),
+      agentRuntimePackageJsonPath: await realpath(
+        fixture.runtimePackageJsonPath,
+      ),
     });
   });
 
@@ -83,6 +102,34 @@ describe("ACPX installation integrity", () => {
       verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve),
     ).rejects.toThrow(/runtime version mismatch/);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects an executable symlink even when its target has the expected digest",
+    async () => {
+      const fixture = await installationFixture();
+      const target = join(fixture.root, "outside.js");
+      await writeFile(target, fixture.command);
+      await rm(fixture.commandPath);
+      await symlink(target, fixture.commandPath);
+
+      await expect(
+        verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve),
+      ).rejects.toThrow(/no-follow regular file/);
+    },
+  );
+
+  it("detects pathname replacement before launch", async () => {
+    const fixture = await installationFixture();
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    await writeFile(fixture.commandPath, "replacement");
+
+    await expect(revalidateVerifiedAcpxCommand(installation)).rejects.toThrow(
+      /digest mismatch|identity changed/,
+    );
+  });
 });
 
 async function installationFixture() {
@@ -120,6 +167,8 @@ async function installationFixture() {
     ["@earendil-works/pi-coding-agent", runtimePackageJsonPath],
   ]);
   return {
+    root,
+    command,
     profile,
     commandPath,
     serverPackageJsonPath,
