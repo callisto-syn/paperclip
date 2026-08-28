@@ -955,6 +955,51 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
+  it("retries a lease heartbeat after a transient durable-store failure", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      let failNextLoad = false;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () => {
+          if (failNextLoad) {
+            failNextLoad = false;
+            throw new Error("transient store read failure");
+          }
+          return durableSnapshot === null ? null : structuredClone(durableSnapshot);
+        },
+        save: (_runId, snapshot) => {
+          durableSnapshot = structuredClone(snapshot);
+        },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+            return false;
+          }
+          durableSnapshot = structuredClone(snapshot);
+          return true;
+        },
+      };
+      const { runtime } = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+      });
+      const inFlight = runtime.invoke({
+        operationId: "upsert_case",
+        input: { key: "case-heartbeat-retry", body: "Case body" },
+        idempotencyKey: "heartbeat-retry",
+      });
+
+      failNextLoad = true;
+      expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+      expect(durableSnapshot?.extensions[0]?.leaseExpiresAtMs).toBe(30_000);
+      vi.advanceTimersByTime(10_000);
+      expect(durableSnapshot?.extensions[0]?.leaseExpiresAtMs).toBe(50_000);
+      await expect(inFlight).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reclaims an expired durable extension lease after executor loss", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",

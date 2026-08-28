@@ -518,7 +518,13 @@ export class CapabilitySemanticToolRuntime {
     }));
     record.execution = execution;
     record.leaseHeartbeat = setInterval(() => {
-      this.#renewExtensionExecutionLease(key, record);
+      try {
+        this.#renewExtensionExecutionLease(key, record);
+      } catch {
+        // A transient durable-store failure does not prove that ownership was
+        // lost. Keep the execution alive and retry at the next heartbeat; the
+        // completion CAS still validates the exact owner before publishing.
+      }
     }, EXTENSION_EXECUTION_HEARTBEAT_MS);
     record.leaseHeartbeat.unref();
     void execution.catch(() => {
