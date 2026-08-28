@@ -67,6 +67,14 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
   return target;
 }
 
+function portableRuntimeNameKey(runtimeName: string): string {
+  // Skill assignments must remain unambiguous when the same context is moved
+  // between the case-sensitive Linux runner and the case-insensitive default
+  // filesystems on macOS or Windows. NFC also catches composed/decomposed
+  // aliases before either spelling reaches the staging tree.
+  return runtimeName.normalize("NFC").toLowerCase();
+}
+
 async function protectStagedTree(root: string): Promise<void> {
   const rootHandle = await open(
     root,
@@ -122,10 +130,11 @@ export async function materializeNativeRuntimeSkills(
     const runtimeNames = new Set<string>();
     for (const skill of context.skills) {
       safeMaterializationTarget(skillsHome, skill.runtimeName);
-      if (runtimeNames.has(skill.runtimeName)) {
+      const runtimeName = portableRuntimeNameKey(skill.runtimeName);
+      if (runtimeNames.has(runtimeName)) {
         throw new Error("runtime context skill names must not overlap");
       }
-      runtimeNames.add(skill.runtimeName);
+      runtimeNames.add(runtimeName);
     }
     for (const runtimeName of runtimeNames) {
       const segments = runtimeName.split("/");

@@ -229,30 +229,32 @@ describe("runtime context materialization", () => {
       codexHome,
     });
     const replacementContext = context(replacement, instructions, "group/child");
-    const collidingSkill = {
-      ...replacementContext.skills[0]!,
-      key: "company/group",
-      runtimeName: "group",
-    };
-    for (const skills of [
-      [...replacementContext.skills, collidingSkill],
-      [collidingSkill, ...replacementContext.skills],
-    ]) {
-      const value = { ...replacementContext, skills };
-      const collidingContext = {
-        ...value,
-        aggregateDigest: canonicalNativeRuntimeContextDigest(value),
+    for (const runtimeName of ["group", "GROUP"]) {
+      const collidingSkill = {
+        ...replacementContext.skills[0]!,
+        key: `company/${runtimeName}`,
+        runtimeName,
       };
+      for (const skills of [
+        [...replacementContext.skills, collidingSkill],
+        [collidingSkill, ...replacementContext.skills],
+      ]) {
+        const value = { ...replacementContext, skills };
+        const collidingContext = {
+          ...value,
+          aggregateDigest: canonicalNativeRuntimeContextDigest(value),
+        };
 
-      await expect(prepareIsolatedCodexHome({
-        context: collidingContext,
-        codexHome,
-      })).rejects.toThrow("skill names must not overlap");
-      await expect(readFile(
-        join(codexHome, "skills", "assigned", "SKILL.md"),
-        "utf8",
-      )).resolves.toBe("# Assigned\n");
-      await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+        await expect(prepareIsolatedCodexHome({
+          context: collidingContext,
+          codexHome,
+        })).rejects.toThrow("skill names must not overlap");
+        await expect(readFile(
+          join(codexHome, "skills", "assigned", "SKILL.md"),
+          "utf8",
+        )).resolves.toBe("# Assigned\n");
+        await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+      }
     }
   });
 
