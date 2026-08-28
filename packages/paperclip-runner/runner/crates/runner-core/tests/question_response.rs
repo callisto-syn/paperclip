@@ -69,6 +69,24 @@ fn accepts_answers_that_match_the_exact_question_set() {
 }
 
 #[test]
+fn rounds_large_prefixed_integers_like_javascript_number() {
+    let mut bounded_set = question_set();
+    bounded_set["questions"][3]["textValidation"]["minimum"] = json!(1_152_921_504_606_847_200_u64);
+    bounded_set["questions"][3]["textValidation"]["maximum"] = json!(1_152_921_504_606_847_200_u64);
+
+    for value in [
+        "0x1000000000000081",
+        "0o100000000000000000201",
+        "0b1000000000000000000000000000000000000000000000000000010000001",
+    ] {
+        let mut response = valid_response();
+        response["answers"]["count"] = json!({"text":value});
+        validate_question_response(&bounded_set, &response)
+            .unwrap_or_else(|error| panic!("{value} should match JavaScript Number: {error}"));
+    }
+}
+
+#[test]
 fn treats_ecmascript_bom_whitespace_as_an_empty_required_answer() {
     let mut unconstrained_set = question_set();
     unconstrained_set["questions"][2]

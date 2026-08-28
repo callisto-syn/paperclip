@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde_json::{json, Value};
 
 use crate::local_runner::LocalRunnerError;
@@ -257,10 +259,15 @@ fn parse_javascript_number(value: &str) -> Option<f64> {
             if digits.is_empty() {
                 return None;
             }
-            return digits.chars().try_fold(0.0_f64, |number, character| {
-                let digit = character.to_digit(radix)?;
-                Some(number.mul_add(f64::from(radix), f64::from(digit)))
-            });
+            let digits = digits
+                .chars()
+                .map(|character| character.to_digit(radix).map(|digit| digit as u8))
+                .collect::<Option<Vec<_>>>()?;
+            // JavaScript parses the entire prefixed integer exactly and rounds
+            // once when converting it to Number. BigUint's f64 conversion uses
+            // round-to-odd before the final nearest-ties-to-even conversion,
+            // preserving that behavior without intermediate digit rounding.
+            return BigUint::from_radix_be(&digits, radix).and_then(|number| number.to_f64());
         }
     }
     value.parse::<f64>().ok()
