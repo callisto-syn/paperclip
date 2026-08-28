@@ -310,6 +310,7 @@ function commandLease(
           ],
           {
             ...options,
+            env: sanitizedNodeEnvironment(options.env),
             shell: false,
             stdio: ["pipe", "pipe", "pipe", "pipe"],
           },
@@ -333,6 +334,19 @@ function commandLease(
     },
     close,
   };
+}
+
+function sanitizedNodeEnvironment(
+  environment: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv {
+  const sanitized = { ...(environment ?? process.env) };
+  for (const key of Object.keys(sanitized)) {
+    // Environment keys are case-insensitive on Windows. Dropping every case
+    // variant also keeps a context portable instead of admitting a preload on
+    // one runner host and rejecting it on another.
+    if (key.toUpperCase() === "NODE_OPTIONS") delete sanitized[key];
+  }
+  return sanitized;
 }
 
 function snapshotBootstrap(format: AcpxCommandFormat): string {

@@ -179,6 +179,33 @@ describe("ACPX installation integrity", () => {
     await expectOutput(lease.spawn(), "verified");
   });
 
+  it("drops inherited and caller-supplied Node preload options", async () => {
+    const fixture = await installationFixture();
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    const preload = join(fixture.root, "unverified-preload.cjs");
+    await writeFile(preload, 'process.stdout.write("unverified-preload");\n');
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    let inheritedChild: ChildProcess;
+    try {
+      process.env.NODE_OPTIONS = `--require=${preload}`;
+      inheritedChild = (await installation.openCommand()).spawn();
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+    await expectOutput(inheritedChild, "verified");
+
+    await expectOutput(
+      (await installation.openCommand()).spawn([], {
+        env: { ...process.env, node_options: `--require=${preload}` },
+      }),
+      "verified",
+    );
+  });
+
   it("loads a verified ESM snapshot with relative imports and arguments", async () => {
     const fixture = await installationFixture();
     const command = [
