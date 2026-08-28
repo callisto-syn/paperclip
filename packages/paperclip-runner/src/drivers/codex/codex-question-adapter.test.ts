@@ -100,6 +100,27 @@ describe("Codex structured question adapter", () => {
       }],
     })).toThrow("Codex option label exceeds 1000 characters");
 
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      description: "x".repeat(4_001),
+      questions: [{ id: "prompt", question: "Choose one" }],
+    })).toThrow("Codex form description exceeds 4000 characters");
+
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{ id: "prompt", question: "x".repeat(4_001) }],
+    })).toThrow("Codex question prompt exceeds 4000 characters");
+
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{
+        id: "option-description",
+        question: "Choose one",
+        options: [{
+          id: "option-1",
+          label: "One",
+          description: "x".repeat(4_001),
+        }],
+      }],
+    })).toThrow("Codex option description exceeds 4000 characters");
+
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
         type: "object",

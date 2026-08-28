@@ -107,6 +107,20 @@ function exactOptionLabel(value: unknown, index: number): string {
   return label || `Option ${index + 1}`;
 }
 
+function exactQuestionText(
+  value: unknown,
+  field: string,
+  maxCharacters = 4_000,
+): string {
+  const candidate = text(value);
+  if (candidate.length > maxCharacters) {
+    throw new Error(
+      `Codex ${field} exceeds ${maxCharacters} characters`,
+    );
+  }
+  return candidate;
+}
+
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
   if (!Array.isArray(value)) return undefined;
   if (value.length > 128) throw new Error("Codex question exceeds 128 options");
@@ -120,7 +134,12 @@ function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]>
       id: stableQuestionId(option.id, index).replace(/^question-/, "option-"),
       label,
       ...(text(option.description).length > 0
-        ? { description: boundedText(redactCodexDiagnostic(text(option.description))) }
+        ? {
+            description: exactQuestionText(
+              redactCodexDiagnostic(text(option.description)),
+              "option description",
+            ),
+          }
         : {}),
     };
   });
@@ -145,7 +164,12 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
         index,
       ),
       ...(text(oneOf.description).length > 0
-        ? { description: boundedText(text(oneOf.description)) }
+        ? {
+            description: exactQuestionText(
+              text(oneOf.description),
+              "option description",
+            ),
+          }
         : {}),
     };
   });
@@ -161,9 +185,27 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       const options = codexOptions(question.options);
       return {
         id: stableQuestionId(question.id, index),
-        ...(text(question.header).length > 0 ? { header: boundedText(text(question.header), "", 1_000) } : {}),
-        prompt: boundedText(text(question.question, text(question.prompt, `Question ${index + 1}`))),
-        ...(text(question.description).length > 0 ? { helpText: boundedText(text(question.description)) } : {}),
+        ...(text(question.header).length > 0
+          ? {
+              header: exactQuestionText(
+                text(question.header),
+                "question header",
+                1_000,
+              ),
+            }
+          : {}),
+        prompt: exactQuestionText(
+          text(question.question, text(question.prompt, `Question ${index + 1}`)),
+          "question prompt",
+        ),
+        ...(text(question.description).length > 0
+          ? {
+              helpText: exactQuestionText(
+                redactCodexDiagnostic(text(question.description)),
+                "question description",
+              ),
+            }
+          : {}),
         // Codex requestUserInput questions do not normally declare requiredness.
         // Do not invent a required constraint when the provider omitted one.
         required: question.required === true,
@@ -185,7 +227,14 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
     return parsePaperclipQuestionSet({
       schema: PAPERCLIP_QUESTION_SET_SCHEMA,
       title: text(params.title, "Codex needs your input"),
-      ...(text(params.description).length > 0 ? { description: boundedText(text(params.description)) } : {}),
+      ...(text(params.description).length > 0
+        ? {
+            description: exactQuestionText(
+              redactCodexDiagnostic(text(params.description)),
+              "form description",
+            ),
+          }
+        : {}),
       submitLabel: text(params.submitLabel, "Submit answers"),
       questions,
     });
@@ -212,9 +261,24 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
     const inputType = propertyType === "integer" ? "integer" : propertyType === "number" ? "number" : "text";
     return {
       id,
-      ...(text(property.title).length > 0 ? { header: boundedText(text(property.title), "", 1_000) } : {}),
-      prompt: boundedText(text(property.title, id)),
-      ...(text(property.description).length > 0 ? { helpText: boundedText(text(property.description)) } : {}),
+      ...(text(property.title).length > 0
+        ? {
+            header: exactQuestionText(
+              text(property.title),
+              "question header",
+              1_000,
+            ),
+          }
+        : {}),
+      prompt: exactQuestionText(text(property.title, id), "question prompt"),
+      ...(text(property.description).length > 0
+        ? {
+            helpText: exactQuestionText(
+              text(property.description),
+              "question description",
+            ),
+          }
+        : {}),
       required: required.has(id),
       answerMode,
       ...(options.length > 0 ? { options } : {}),
@@ -232,7 +296,14 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
   return parsePaperclipQuestionSet({
     schema: PAPERCLIP_QUESTION_SET_SCHEMA,
     title: "A tool needs your input",
-    ...(text(params.message).length > 0 ? { description: boundedText(text(params.message)) } : {}),
+    ...(text(params.message).length > 0
+      ? {
+          description: exactQuestionText(
+            text(params.message),
+            "form description",
+          ),
+        }
+      : {}),
     submitLabel: "Submit",
     questions,
   });
