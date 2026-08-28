@@ -280,10 +280,15 @@ export class AcpxRuntimeHost {
 
   async #close(reason: string): Promise<void> {
     const errors: unknown[] = [];
-    if (this.#activeTurn) {
+    const activeTurn = this.#activeTurn;
+    // Once shutdown starts no new turn can be admitted. Detach the current turn
+    // before cancellation so an uncooperative provider cannot make every close
+    // retry repeat the same bounded wait.
+    this.#activeTurn = null;
+    if (activeTurn) {
       try {
         const cancellationError = await boundedCancellation(
-          this.#activeTurn.cancel({ reason }),
+          activeTurn.cancel({ reason }),
         );
         if (cancellationError) errors.push(cancellationError);
       } catch (error) {
@@ -297,6 +302,13 @@ export class AcpxRuntimeHost {
       reason,
     );
     if (cleanupError) errors.push(...cleanupError.errors);
+    if (!cleanupError) {
+      // Runtime, credential, and command ownership has been relinquished even
+      // when the provider never acknowledged turn cancellation. Preserve that
+      // cancellation error for this caller, but make later close calls
+      // idempotently observe the successfully closed host.
+      this.#closed = true;
+    }
     if (errors.length > 0) {
       throw new AggregateError(errors, "ACPX runtime cleanup failed");
     }

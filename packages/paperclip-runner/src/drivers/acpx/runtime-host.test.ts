@@ -313,6 +313,12 @@ describe("ACPX runtime host", () => {
       await expect(closing).rejects.toThrow(/cleanup failed/);
       expect(runtime.close).toHaveBeenCalledOnce();
       expect(fixture.commandClose).toHaveBeenCalledOnce();
+      await expect(
+        host.close({ reason: "retry after cancellation timeout" }),
+      ).resolves.toBeUndefined();
+      expect(turn.cancel).toHaveBeenCalledOnce();
+      expect(runtime.close).toHaveBeenCalledOnce();
+      expect(fixture.commandClose).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
