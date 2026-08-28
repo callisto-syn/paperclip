@@ -52,6 +52,7 @@ export interface ExecuteNativeSessionOptions {
   resolveGovernedWait?: (input: {
     turnId: string | null;
     event: PrpEvent;
+    signal: AbortSignal;
   }) => Promise<PrpStructuredRunResult | null>;
 }
 
@@ -83,6 +84,26 @@ async function attemptOptionalSessionCancellation(session: NativeSession, reason
     }),
   ]);
   if (graceTimer !== undefined) clearTimeout(graceTimer);
+}
+
+async function settleBeforeAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  // The callback may not support cancellation yet. Keep observing its eventual
+  // rejection after the runtime stops awaiting it so it cannot become an
+  // unhandled rejection.
+  void operation.catch(() => undefined);
+  if (signal.aborted) throw signal.reason ?? new Error("native event consumption aborted");
+
+  let removeAbortListener = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error("native event consumption aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", abort);
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    removeAbortListener();
+  }
 }
 
 async function consumeTurn(
@@ -180,14 +201,21 @@ async function consumeTurn(
             clearInputTimer(payload.requestId);
           }
           if (governedResult === null && resolveGovernedWait) {
-            governedResult = await resolveGovernedWait({
-              turnId: event.turnId ?? null,
-              event,
-            });
+            governedResult = await settleBeforeAbort(
+              Promise.resolve().then(() => resolveGovernedWait({
+                turnId: event.turnId ?? null,
+                event,
+                signal: appendAbort.signal,
+              })),
+              appendAbort.signal,
+            );
             if (governedResult !== null && !isTurnTerminal(event)) {
-              await session.cancel?.({
-                reason: "Paperclip parked this turn on a durable governed interaction.",
-              }).catch(() => undefined);
+              await settleBeforeAbort(
+                Promise.resolve().then(() => session.cancel?.({
+                  reason: "Paperclip parked this turn on a durable governed interaction.",
+                })).catch(() => undefined),
+                appendAbort.signal,
+              );
             }
           }
           if (isTurnTerminal(event)) {

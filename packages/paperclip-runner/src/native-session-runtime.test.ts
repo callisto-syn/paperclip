@@ -536,6 +536,144 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it("times out a governed-wait resolver that never settles", async () => {
+    let markResolverStarted = () => {};
+    const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve; });
+    let resolverSignal: AbortSignal | undefined;
+    const close = vi.fn(async () => undefined);
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      async *events() {
+        yield runnerEvent(1, "item.completed");
+      },
+      async startTurn() { return { turnId: "turn-recovery" }; },
+      async result() { return null; },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity,
+          providerSessionId: "provider-recovery",
+          cursor: null,
+          activeTurnId: "turn-recovery",
+          pendingRuntimeRequests: [],
+          lineage: [],
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { return session; },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent() {
+        return { cursor: 1, highestContiguousSourceSeq: 1, disposition: "committed" };
+      },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    const execution = executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      timeoutMs: 5,
+      resolveGovernedWait: ({ signal }) => {
+        resolverSignal = signal;
+        markResolverStarted();
+        return new Promise<never>(() => undefined);
+      },
+    });
+    await resolverStarted;
+    await expect(execution).rejects.toThrow("native session timed out");
+    expect(resolverSignal?.aborted).toBe(true);
+    expect(close).toHaveBeenCalled();
+  });
+
+  it("times out a governed-wait cancellation that never settles", async () => {
+    let markCancelStarted = () => {};
+    const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
+    const cancel = vi.fn(() => {
+      markCancelStarted();
+      return new Promise<never>(() => undefined);
+    });
+    const close = vi.fn(async () => undefined);
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      async *events() {
+        yield runnerEvent(1, "item.completed");
+      },
+      async startTurn() { return { turnId: "turn-recovery" }; },
+      cancel,
+      async result() { return null; },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity,
+          providerSessionId: "provider-recovery",
+          cursor: null,
+          activeTurnId: "turn-recovery",
+          pendingRuntimeRequests: [],
+          lineage: [],
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { return session; },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent() {
+        return { cursor: 1, highestContiguousSourceSeq: 1, disposition: "committed" };
+      },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    const execution = executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      timeoutMs: 5,
+      resolveGovernedWait: async () => yieldedResult,
+    });
+    await cancelStarted;
+    await expect(execution).rejects.toThrow("native session timed out");
+    expect(cancel).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+  });
+
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
     const openRun = vi.fn(async () => undefined);
     const checkpointSession = vi.fn(async () => undefined);
