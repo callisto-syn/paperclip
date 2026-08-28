@@ -13,7 +13,15 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+} from "node:path";
+import type { Writable } from "node:stream";
 
 import type { QualifiedAcpxProfile } from "./qualified-profiles.js";
 
@@ -45,6 +53,11 @@ interface VerifiedAcpxCommandIdentity {
   changedNanoseconds: string;
 }
 
+type AcpxCommandFormat = "commonjs" | "module";
+
+const COMMONJS_SNAPSHOT_BOOTSTRAP = snapshotBootstrap("commonjs");
+const MODULE_SNAPSHOT_BOOTSTRAP = snapshotBootstrap("module");
+
 /** Resolve and verify every installed artifact bound by a qualified profile. */
 export async function verifyQualifiedAcpxInstallation(
   profile: QualifiedAcpxProfile,
@@ -63,17 +76,29 @@ export async function verifyQualifiedAcpxInstallation(
     );
   }
   const relativeCommand = oneExecutable(serverPackage.bin, profile.agent);
+  const commandFormat = executableFormat(
+    relativeCommand,
+    serverPackage.type,
+    profile.agent,
+  );
   const packageDirectory = dirname(serverPackageJsonPath);
-  const commandPath = resolve(packageDirectory, relativeCommand);
-  if (!isInside(packageDirectory, commandPath)) {
+  const unresolvedCommandPath = resolve(packageDirectory, relativeCommand);
+  if (!isInside(packageDirectory, unresolvedCommandPath)) {
     throw new Error(`ACPX ${profile.agent} executable escapes its package`);
   }
-  const command = await openInspectedCommand(
+  const commandDirectory = await realpath(dirname(unresolvedCommandPath));
+  if (!isInsideOrEqual(packageDirectory, commandDirectory)) {
+    throw new Error(`ACPX ${profile.agent} executable escapes its package`);
+  }
+  const commandPath = resolve(
+    commandDirectory,
+    basename(unresolvedCommandPath),
+  );
+  const command = await inspectCommand(
     commandPath,
     profile.commandDigest,
     profile.agent,
   );
-  await command.handle.close();
 
   let runtimePackageJsonPath: string | null = null;
   if (profile.agentRuntimePackage !== null) {
@@ -103,18 +128,18 @@ export async function verifyQualifiedAcpxInstallation(
     agentServerPackageJsonPath: serverPackageJsonPath,
     agentRuntimePackageJsonPath: runtimePackageJsonPath,
     async openCommand(): Promise<VerifiedAcpxCommandLease> {
-      const current = await openInspectedCommand(
+      const current = await inspectCommand(
         commandPath,
         commandDigest,
         "provider",
       );
       if (!sameIdentity(current.identity, commandIdentity)) {
-        await current.handle.close();
+        current.bytes.fill(0);
         throw new Error(
           "ACPX provider executable identity changed after verification",
         );
       }
-      return commandLease(current.handle);
+      return commandLease(commandPath, commandFormat, current.bytes);
     },
   });
 }
@@ -126,7 +151,7 @@ function defaultPackageJsonResolver(packageName: string): string {
 async function readPackageJson(
   packageJsonPath: string,
   packageName: string,
-): Promise<{ version?: string; bin?: unknown }> {
+): Promise<{ version?: string; bin?: unknown; type?: unknown }> {
   const bytes = await readBoundedRegularFile(
     packageJsonPath,
     MAX_PACKAGE_JSON_BYTES,
@@ -141,7 +166,7 @@ async function readPackageJson(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`ACPX package ${packageName} has invalid package metadata`);
   }
-  return value as { version?: string; bin?: unknown };
+  return value as { version?: string; bin?: unknown; type?: unknown };
 }
 
 async function readBoundedRegularFile(
@@ -160,14 +185,14 @@ async function readBoundedRegularFile(
   return bytes;
 }
 
-async function openInspectedCommand(
+async function inspectCommand(
   commandPath: string,
   expectedDigest: string,
   agent: string,
 ): Promise<{
+  bytes: Buffer;
   digest: string;
   identity: VerifiedAcpxCommandIdentity;
-  handle: FileHandle;
 }> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -207,10 +232,11 @@ async function openInspectedCommand(
     if (digest !== expectedDigest) {
       throw new Error(`ACPX ${agent} executable digest mismatch`);
     }
-    return { digest, identity: afterIdentity, handle };
+    return { bytes, digest, identity: afterIdentity };
   } catch (error) {
-    await handle.close();
     throw error;
+  } finally {
+    await handle.close();
   }
 }
 
@@ -231,12 +257,16 @@ async function readHandleAtStart(
   return bytes;
 }
 
-function commandLease(handle: FileHandle): VerifiedAcpxCommandLease {
+function commandLease(
+  commandPath: string,
+  format: AcpxCommandFormat,
+  verifiedBytes: Buffer,
+): VerifiedAcpxCommandLease {
   let consumed = false;
   const close = async (): Promise<void> => {
     if (consumed) return;
     consumed = true;
-    await handle.close();
+    verifiedBytes.fill(0);
   };
   return {
     spawn(
@@ -244,37 +274,76 @@ function commandLease(handle: FileHandle): VerifiedAcpxCommandLease {
       options: SpawnOptionsWithoutStdio = {},
     ): ChildProcess {
       if (consumed) throw new Error("Verified ACPX command lease is closed");
-      if (process.platform !== "linux" && process.platform !== "darwin") {
-        throw new Error(
-          "Verified descriptor launch is unavailable on this platform",
-        );
-      }
       consumed = true;
-      const childDescriptor = 3;
-      const descriptorPath =
-        process.platform === "linux"
-          ? `/proc/self/fd/${childDescriptor}`
-          : `/dev/fd/${childDescriptor}`;
       let child: ChildProcess;
       try {
-        child = spawnChildProcess(process.execPath, [descriptorPath, ...args], {
-          ...options,
-          shell: false,
-          stdio: ["pipe", "pipe", "pipe", handle.fd],
-        });
+        child = spawnChildProcess(
+          process.execPath,
+          [
+            "--eval",
+            format === "module"
+              ? MODULE_SNAPSHOT_BOOTSTRAP
+              : COMMONJS_SNAPSHOT_BOOTSTRAP,
+            commandPath,
+            ...args,
+          ],
+          {
+            ...options,
+            shell: false,
+            stdio: ["pipe", "pipe", "pipe", "pipe"],
+          },
+        );
       } catch (error) {
-        void handle.close().catch(() => undefined);
+        verifiedBytes.fill(0);
         throw error;
       }
+      const sourceInput = child.stdio[3] as Writable | null;
+      if (sourceInput === null) {
+        verifiedBytes.fill(0);
+        child.kill();
+        throw new Error("Verified ACPX command source pipe was not created");
+      }
       const release = (): void => {
-        void handle.close().catch(() => undefined);
+        verifiedBytes.fill(0);
       };
-      child.once("spawn", release);
-      child.once("error", release);
+      sourceInput.once("error", release);
+      sourceInput.end(verifiedBytes, release);
       return child;
     },
     close,
   };
+}
+
+function snapshotBootstrap(format: AcpxCommandFormat): string {
+  return [
+    'const fs = require("node:fs");',
+    'const { registerHooks } = require("node:module");',
+    'const { pathToFileURL } = require("node:url");',
+    "const target = pathToFileURL(process.argv[1]).href;",
+    "const source = fs.readFileSync(3);",
+    "registerHooks({ load(url, context, nextLoad) {",
+    `if (url === target) return { format: ${JSON.stringify(format)}, source, shortCircuit: true };`,
+    "return nextLoad(url, context);",
+    "} });",
+    "import(target).catch((error) => { console.error(error); process.exitCode = 1; });",
+  ].join("");
+}
+
+function executableFormat(
+  relativeCommand: string,
+  packageType: unknown,
+  agent: string,
+): AcpxCommandFormat {
+  const extension = extname(relativeCommand);
+  if (extension === ".mjs") return "module";
+  if (extension === ".cjs") return "commonjs";
+  if (extension === ".js") {
+    if (packageType === undefined || packageType === "commonjs") {
+      return "commonjs";
+    }
+    if (packageType === "module") return "module";
+  }
+  throw new Error(`ACPX ${agent} package exposes an unsupported executable`);
 }
 
 function fileIdentity(metadata: {
@@ -339,4 +408,8 @@ function isInside(parent: string, child: string): boolean {
     ) &&
     !isAbsolute(relativePath)
   );
+}
+
+function isInsideOrEqual(parent: string, child: string): boolean {
+  return resolve(parent) === resolve(child) || isInside(parent, child);
 }

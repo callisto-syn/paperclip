@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
@@ -8,6 +9,7 @@ import {
   rename,
   rm,
   symlink,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -126,35 +128,91 @@ describe("ACPX installation integrity", () => {
     );
   });
 
-  it.runIf(process.platform === "linux" || process.platform === "darwin")(
-    "launches the verified open file after its pathname is replaced",
-    async () => {
-      const fixture = await installationFixture();
-      const installation = await verifyQualifiedAcpxInstallation(
-        fixture.profile,
-        fixture.resolve,
-      );
-      const lease = await installation.openCommand();
-      const replacement = `${fixture.commandPath}.replacement`;
-      await writeFile(
-        replacement,
-        '#!/usr/bin/env node\nprocess.stdout.write("replacement");\n',
-      );
-      await chmod(replacement, 0o755);
-      await rename(replacement, fixture.commandPath);
+  it("launches the verified bytes after its pathname is replaced", async () => {
+    const fixture = await installationFixture();
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    const lease = await installation.openCommand();
+    const replacement = `${fixture.commandPath}.replacement`;
+    await writeFile(
+      replacement,
+      '#!/usr/bin/env node\nprocess.stdout.write("replacement");\n',
+    );
+    await chmod(replacement, 0o755);
+    await rename(replacement, fixture.commandPath);
 
-      const child = lease.spawn();
-      let stdout = "";
-      child.stdout?.setEncoding("utf8");
-      child.stdout?.on("data", (chunk) => {
-        stdout += String(chunk);
-      });
-      const [exitCode] = await once(child, "exit");
-      expect(exitCode).toBe(0);
-      expect(stdout).toBe("verified");
-    },
-  );
+    await expectOutput(lease.spawn(), "verified");
+  });
+
+  it("launches the verified bytes after the open inode is modified", async () => {
+    const fixture = await installationFixture();
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    const lease = await installation.openCommand();
+    const before = await stat(fixture.commandPath, { bigint: true });
+    await writeFile(
+      fixture.commandPath,
+      '#!/usr/bin/env node\nprocess.stdout.write("modified");\n',
+    );
+    const after = await stat(fixture.commandPath, { bigint: true });
+    expect(after.ino).toBe(before.ino);
+
+    await expectOutput(lease.spawn(), "verified");
+  });
+
+  it("loads a verified ESM snapshot with relative imports and arguments", async () => {
+    const fixture = await installationFixture();
+    const command = [
+      'import value from "./value.js";',
+      "process.stdout.write(`${value}:${process.argv[2]}`);",
+    ].join("\n");
+    await Promise.all([
+      writeFile(
+        fixture.serverPackageJsonPath,
+        JSON.stringify({
+          version: "0.0.33",
+          type: "module",
+          bin: "bin/server.js",
+        }),
+      ),
+      writeFile(fixture.commandPath, command),
+      writeFile(
+        join(fixture.commandDirectory, "value.js"),
+        'export default "relative";',
+      ),
+    ]);
+    const installation = await verifyQualifiedAcpxInstallation(
+      {
+        ...fixture.profile,
+        commandDigest: `sha256:${createHash("sha256").update(command).digest("hex")}`,
+      },
+      fixture.resolve,
+    );
+
+    await expectOutput(
+      (await installation.openCommand()).spawn(["argument"]),
+      "relative:argument",
+    );
+  });
 });
+
+async function expectOutput(
+  child: ChildProcess,
+  expected: string,
+): Promise<void> {
+  let stdout = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => {
+    stdout += String(chunk);
+  });
+  const [exitCode] = await once(child, "exit");
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe(expected);
+}
 
 async function installationFixture() {
   const root = await mkdtemp(join(tmpdir(), "paperclip-acpx-installation-"));
@@ -196,6 +254,7 @@ async function installationFixture() {
     command,
     profile,
     commandPath,
+    commandDirectory,
     serverPackageJsonPath,
     runtimePackageJsonPath,
     resolve(packageName: string): string {
