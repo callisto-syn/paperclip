@@ -43,7 +43,6 @@ export function createSanitizedAcpxEnvironment(
     "RUST_BACKTRACE",
     "PAPERCLIP_NATIVE_MCP_NAME",
     "PAPERCLIP_NATIVE_MCP_URL",
-    "PAPERCLIP_NATIVE_MCP_TOKEN",
     ...credentialNames,
   ]);
   let retainedBytes = 0;

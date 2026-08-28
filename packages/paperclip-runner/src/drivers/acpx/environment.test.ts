@@ -12,6 +12,7 @@ describe("ACPX launch environment", () => {
       ANTHROPIC_API_KEY: "anthropic-secret",
       OPENROUTER_API_KEY: "openrouter-secret",
       PAPERCLIP_RUNNER_BOOTSTRAP_TICKET: "transport-secret",
+      PAPERCLIP_NATIVE_MCP_TOKEN: "bridge-secret",
       UNRELATED_SECRET: "not-visible",
     };
 
