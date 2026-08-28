@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACPX_SIDECAR_PROTOCOL_VERSION } from "../drivers/acpx/sidecar-protocol.js";
 import {
   awaitSidecarCleanupWithin,
+  closeActiveSidecarHostWithin,
   parseAcpxRunAttachment,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
@@ -71,6 +72,15 @@ describe("Codex ACPX runtime sidecar", () => {
     await cleanup;
     expect(settled).toBe(true);
     await expect(awaitSidecarCleanupWithin(cleanup, 1)).resolves.toBe("settled");
+  });
+
+  it("bounds active-host cleanup during sidecar shutdown", async () => {
+    const cleanup = new Promise<void>(() => undefined);
+    const close = vi.fn(() => cleanup);
+
+    await expect(closeActiveSidecarHostWithin({ close }, "SIGTERM", 1))
+      .resolves.toBe("deferred");
+    expect(close).toHaveBeenCalledWith({ reason: "SIGTERM" });
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {

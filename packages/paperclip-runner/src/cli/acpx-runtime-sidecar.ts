@@ -53,6 +53,7 @@ import {
 import {
   awaitSidecarCleanupWithin,
   boundedIdentity,
+  closeActiveSidecarHostWithin,
   parseAcpxRunAttachment,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
@@ -1005,11 +1006,22 @@ async function shutdown(reason: string): Promise<void> {
   if (closing) return;
   closing = true;
   if (turnId) rejectTurnWaiters(turnId, reason);
-  if (host) await host.close({ reason }).catch(() => undefined);
+  let cleanupDeferred = false;
+  if (host) {
+    const cleanupDisposition = await closeActiveSidecarHostWithin(host, reason);
+    if (cleanupDisposition === "deferred") {
+      cleanupDeferred = true;
+      diagnostic(
+        "active_host_cleanup_deferred",
+        "ACPX active-host cleanup exceeded the bounded shutdown wait.",
+      );
+    }
+  }
   const retainedCleanup = failedAdmissionCleanup;
   if (retainedCleanup) {
     const cleanupDisposition = await awaitSidecarCleanupWithin(retainedCleanup);
     if (cleanupDisposition === "deferred") {
+      cleanupDeferred = true;
       diagnostic(
         "failed_admission_cleanup_deferred",
         "ACPX failed-admission cleanup remains owned after the bounded shutdown wait.",
@@ -1020,7 +1032,15 @@ async function shutdown(reason: string): Promise<void> {
   openParams = null;
   runId = null;
   turnId = null;
+  lines.close();
+  process.stdin.pause();
   process.exitCode = 0;
+  if (cleanupDeferred) {
+    // A provider resource may still own referenced handles. Once both cleanup
+    // waits have exhausted their fixed deadline, the sidecar must not remain
+    // alive indefinitely waiting for an uncooperative child.
+    setImmediate(() => process.exit(0));
+  }
 }
 
 function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {
