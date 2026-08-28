@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -23,7 +23,10 @@ import {
   type NativeRuntimeContextSnapshot,
 } from "../contracts/runtime-context.js";
 import { nativeMcpLaunchBinding } from "./native-mcp.js";
-import { prepareIsolatedCodexHome } from "./runtime-context-materializer.js";
+import {
+  materializeNativeRuntimeSkills,
+  prepareIsolatedCodexHome,
+} from "./runtime-context-materializer.js";
 
 const roots: string[] = [];
 
@@ -249,6 +252,52 @@ describe("runtime context materialization", () => {
       "utf8",
     )).resolves.toBe("# Assigned\n");
     await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+  });
+
+  it("does not report replacement failure after the live-tree swap commits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-runtime-cleanup-"));
+    roots.push(root);
+    const assigned = join(root, "assigned-source");
+    const replacement = join(root, "replacement-source");
+    const instructions = join(root, "instructions-source");
+    const skillsHome = join(root, "codex-home", "skills");
+    await Promise.all([
+      mkdir(assigned),
+      mkdir(replacement),
+      mkdir(instructions),
+    ]);
+    await writeFile(join(assigned, "SKILL.md"), "# Assigned\n");
+    await writeFile(join(replacement, "SKILL.md"), "# Replacement\n");
+    await writeFile(join(instructions, "AGENTS.md"), "Instructions\n");
+
+    await materializeNativeRuntimeSkills(
+      context(assigned, instructions),
+      skillsHome,
+    );
+    await expect(
+      materializeNativeRuntimeSkills(
+        context(replacement, instructions, "replacement"),
+        skillsHome,
+        {
+          removeTree: async (path) => {
+            if (path.includes(".paperclip-skills-previous-")) {
+              throw new Error("simulated post-swap cleanup failure");
+            }
+            await rm(path, { recursive: true, force: true });
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readFile(join(skillsHome, "replacement", "SKILL.md"), "utf8"),
+    ).resolves.toBe("# Replacement\n");
+    await expect(stat(join(skillsHome, "assigned"))).rejects.toThrow();
+    expect(
+      (await readdir(dirname(skillsHome))).some((entry) =>
+        entry.startsWith(".paperclip-skills-previous-"),
+      ),
+    ).toBe(true);
   });
 
   it("rejects skill names that can escape or alias the skills home", async () => {

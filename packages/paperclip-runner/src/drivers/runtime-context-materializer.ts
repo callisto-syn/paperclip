@@ -110,7 +110,14 @@ async function protectStagedTree(root: string): Promise<void> {
 export async function materializeNativeRuntimeSkills(
   context: NativeRuntimeContextSnapshot | null,
   skillsHome: string,
+  dependencies: {
+    /** Internal test seam for post-swap cleanup failure coverage. */
+    removeTree?: (path: string) => Promise<void>;
+  } = {},
 ): Promise<void> {
+  const removeTree =
+    dependencies.removeTree ??
+    ((path: string) => rm(path, { recursive: true, force: true }));
   if (context) {
     for (const skill of context.skills) {
       safeMaterializationTarget(skillsHome, skill.runtimeName);
@@ -152,10 +159,13 @@ export async function materializeNativeRuntimeSkills(
       throw error;
     }
     if (movedPrevious) {
-      await rm(previousHome, { recursive: true, force: true });
+      // The replacement is committed once stagingHome becomes skillsHome.
+      // Cleanup is best-effort from that point forward: reporting a failed
+      // replacement would expose new live state behind a rejected operation.
+      await removeTree(previousHome).catch(() => undefined);
     }
   } catch (error) {
-    await rm(stagingHome, { recursive: true, force: true }).catch(() => undefined);
+    await removeTree(stagingHome).catch(() => undefined);
     throw error;
   }
 }
