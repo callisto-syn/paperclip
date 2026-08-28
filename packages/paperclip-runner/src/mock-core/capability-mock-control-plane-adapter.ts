@@ -1224,15 +1224,14 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       );
       if (
         approval === undefined ||
-        approval.taskIds.length !== 1 ||
-        approval.taskIds[0] !== run.taskId
+        !approval.taskIds.includes(run.taskId)
       ) {
         this.#deny(run.id, command.kind, "active_task_scope_required", [
           `task:${run.taskId}`,
         ]);
         throw new CapabilityMockControlPlaneError(
           "approval_scope_violation",
-          "the approval is not exclusively linked to the active fixture task",
+          "the approval is not linked to the active fixture task",
         );
       }
       if (approval?.requestedByActorId === actor.id) {
@@ -1270,10 +1269,10 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     if (approval === undefined) {
       throw new CapabilityMockControlPlaneError("approval_missing", "fixture approval not found");
     }
-    if (approval.taskIds.length !== 1 || approval.taskIds[0] !== task.id) {
+    if (!approval.taskIds.includes(task.id)) {
       throw new CapabilityMockControlPlaneError(
         "approval_scope_violation",
-        "the approval is not exclusively linked to the active fixture task",
+        "the approval is not linked to the active fixture task",
       );
     }
     return approval;

@@ -551,7 +551,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
-  it("rejects approval decisions outside the active task", async () => {
+  it("admits shared approvals linked to the active task and rejects unlinked approvals", async () => {
     const adapter = seeded({
       actors: [
         {
@@ -621,27 +621,68 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           createdAt: "2026-08-09T00:00:00.000Z",
           decidedAt: null,
         },
+        {
+          id: "approval-unlinked",
+          companyId: "company-1",
+          taskIds: ["task-2"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
       ],
     });
     await adapter.start();
     await adapter.openFixtureRun({
       ...OPEN,
-      capabilities: ["governance:approvals:decide"],
+      capabilities: [
+        "governance:approvals:comment",
+        "governance:approvals:decide",
+      ],
     });
 
     await expect(adapter.applyCommand({
       runId: "run-1",
-      idempotencyKey: "cross-task-approval",
+      idempotencyKey: "shared-approval-comment",
+      command: {
+        kind: "comment_on_approval",
+        approvalId: "approval-other-task",
+        body: "Scoped from the active task.",
+      },
+    })).resolves.toMatchObject({ disposition: "applied" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "shared-approval-decision",
       command: {
         kind: "decide_approval",
         approvalId: "approval-other-task",
+        decision: "approved",
+        note: "Shared approval is in scope.",
+      },
+    })).resolves.toMatchObject({ disposition: "applied" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "unlinked-approval-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-unlinked",
         decision: "approved",
         note: "Must remain scoped.",
       },
     })).rejects.toMatchObject({ code: "approval_scope_violation" });
     expect(adapter.snapshot()).toMatchObject({
-      approvals: [{ id: "approval-other-task", status: "pending" }],
-      wakes: [],
+      approvals: [
+        {
+          id: "approval-other-task",
+          status: "approved",
+          comments: [{ body: "Scoped from the active task." }],
+        },
+        { id: "approval-unlinked", status: "pending" },
+      ],
     });
   });
 
