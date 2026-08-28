@@ -668,8 +668,15 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       const recoveredActiveTurnId = recovered
         ? recoveredSnapshot.activeTurnId ?? null
         : persistedSession?.activeTurnId ?? null;
+      const adoptedDispositionTerminal = Boolean(
+        recovered
+        && recoveredSnapshot.dispositionOnlyRecoveryConsumed
+        && !recoveredActiveTurnId
+        && (recoveredSnapshot.terminalTurns?.length ?? 0)
+          > (persistedSession?.terminalTurns?.length ?? 0)
+      );
       try {
-        if (!recovered || !recoveredActiveTurnId) {
+        if (!recovered || (!recoveredActiveTurnId && !adoptedDispositionTerminal)) {
           const modelEnvelope = buildNativeModelEnvelope(input);
           const dispositionOnlyRecovery = Boolean(
             recovered &&
