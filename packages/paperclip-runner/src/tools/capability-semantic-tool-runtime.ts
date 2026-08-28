@@ -259,7 +259,11 @@ export class CapabilitySemanticToolRuntime {
             };
           }
           if (durableExtension.status === "pending") {
-            if ((durableExtension.leaseExpiresAtMs ?? 0) > this.#now()) {
+            if (
+              (durableExtension.leaseExpiresAtMs ?? 0) > this.#now() ||
+              (durableExtension.phase === "executing" &&
+                !isReplaySafeMockExtension(descriptor))
+            ) {
               const denied = this.#authorization.denyInvocation(
                 invocation.operationId,
                 context,
@@ -454,6 +458,8 @@ export class CapabilitySemanticToolRuntime {
         existing !== undefined &&
         (existing.status !== "pending" ||
           existing.input !== record.input ||
+          (existing.phase === "executing" &&
+            !isReplaySafeMockExtension(descriptor)) ||
           (existing.leaseExpiresAtMs ?? 0) > this.#now())
       ) {
         return false;
@@ -1080,6 +1086,30 @@ export class CapabilitySemanticToolRuntime {
       },
       authorization,
     });
+  }
+}
+
+/**
+ * These package-local mock extensions are pure result projections: they do
+ * not call the control plane, filesystem, or network. Only that closed set may
+ * replay after an executor disappears in the executing phase. A future
+ * effectful extension remains fail-closed until its backend provides its own
+ * durable idempotency/reconciliation contract.
+ */
+function isReplaySafeMockExtension(
+  descriptor: CapabilitySemanticToolDescriptor,
+): boolean {
+  if (descriptor.mockCommandMapping.kind !== "mock_extension") return false;
+  switch (descriptor.mockCommandMapping.extension) {
+    case "company_skills.sync":
+    case "routines.manage":
+    case "cases.upsert":
+    case "company.admin":
+    case "portability.export":
+    case "test.generic_api":
+      return true;
+    default:
+      return false;
   }
 }
 
