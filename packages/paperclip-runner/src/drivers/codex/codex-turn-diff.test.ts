@@ -83,4 +83,27 @@ describe("Codex turn diff parser", () => {
       }),
     ]);
   });
+
+  it("does not interpret rename or mode metadata after a hunk begins", () => {
+    expect(parseCodexTurnDiff([
+      "diff --git a/src/markers.ts b/src/markers.ts",
+      "--- a/src/markers.ts",
+      "+++ b/src/markers.ts",
+      "@@ -1 +1 @@",
+      "rename from ../../outside.ts",
+      "rename to src/renamed.ts",
+      "old mode 100644",
+      "new mode 100755",
+      "-old",
+      "+new",
+    ].join("\n"))).toEqual([
+      expect.objectContaining({
+        path: "src/markers.ts",
+        previousPath: null,
+        operation: "modify",
+        additions: 1,
+        deletions: 1,
+      }),
+    ]);
+  });
 });

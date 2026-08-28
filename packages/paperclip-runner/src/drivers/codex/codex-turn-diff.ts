@@ -100,9 +100,9 @@ export function parseCodexTurnDiff(value: unknown): ParsedCodexTurnDiffFile[] {
     current.lines.push(line);
     if (!current.inHunk && line.startsWith("--- ")) current.oldPath = gitDiffPath(line.slice(4));
     else if (!current.inHunk && line.startsWith("+++ ")) current.newPath = gitDiffPath(line.slice(4));
-    else if (line.startsWith("rename from ")) current.renameFrom = gitDiffPath(line.slice(12));
-    else if (line.startsWith("rename to ")) current.renameTo = gitDiffPath(line.slice(10));
-    else if (line.startsWith("old mode ") || line.startsWith("new mode ")) current.modeChange = true;
+    else if (!current.inHunk && line.startsWith("rename from ")) current.renameFrom = gitDiffPath(line.slice(12));
+    else if (!current.inHunk && line.startsWith("rename to ")) current.renameTo = gitDiffPath(line.slice(10));
+    else if (!current.inHunk && (line.startsWith("old mode ") || line.startsWith("new mode "))) current.modeChange = true;
     else if (line.startsWith("Binary files ") || line === "GIT binary patch") current.binary = true;
     else if (line.startsWith("@@")) current.inHunk = true;
     else if (current.inHunk && line.startsWith("+")) current.additions += 1;
