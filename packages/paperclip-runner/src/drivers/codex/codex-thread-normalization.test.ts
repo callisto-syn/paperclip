@@ -74,7 +74,7 @@ describe("Codex thread normalization", () => {
     expect(isBoundCodexNotification({
       method: "item/completed",
       params: { runId: "run-1" },
-    }, binding)).toBe(true);
+    }, binding)).toBe(false);
     expect(isBoundCodexNotification({
       method: "thread/started",
       params: {

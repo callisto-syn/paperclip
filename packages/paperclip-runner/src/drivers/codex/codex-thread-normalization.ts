@@ -174,7 +174,7 @@ export function isBoundCodexNotification(
   if (parentThreadId.length > 0) return allowedThreads.has(parentThreadId);
   if (threadId.length > 0) return false;
 
-  return claimedRunId === binding.runId;
+  return false;
 }
 
 export function codexWorkspaceRelativePath(value: unknown): string | null {
