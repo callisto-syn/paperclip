@@ -374,18 +374,21 @@ describe("executeNativeSession recovery", () => {
       controlPlaneInstanceId: "control-recovery",
       timeoutMs: 1,
       keepSessionOpen: true,
-    }).finally(() => { executionSettled = true; });
+    });
+    void execution.then(
+      () => { executionSettled = true; },
+      () => { executionSettled = true; },
+    );
     await appendStarted;
     await vi.waitFor(() => expect(iteratorTeardown).toHaveBeenCalledOnce());
-    expect(executionSettled).toBe(false);
-    releaseTeardown();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(executionSettled).toBe(false);
-    releaseAppend();
     await expect(execution).rejects.toThrow("native session timed out");
+    expect(executionSettled).toBe(true);
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalled();
     expect(appendEvent).toHaveBeenCalledOnce();
+    releaseTeardown();
+    releaseAppend();
+    await new Promise<void>((resolve) => setImmediate(resolve));
   });
 
   it("uses required session closure to release a blocked event read", async () => {
