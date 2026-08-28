@@ -119,7 +119,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
             if message.pointer("/result/success") == Some(&json!(false)) {
-                finish_turn(&state_path, &mut state, "failed")?;
+                log_call(call_log.as_deref(), "tool-response:failure")?;
+                if state.active_turn_id.is_some() {
+                    finish_turn(&state_path, &mut state, "failed")?;
+                }
                 continue;
             }
             if message.pointer("/result/success") != Some(&json!(true)) {

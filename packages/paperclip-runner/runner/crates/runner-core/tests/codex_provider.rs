@@ -195,7 +195,7 @@ fn codex_dynamic_tool_round_trips_through_the_provider_boundary() {
 }
 
 #[test]
-fn codex_completion_releases_pending_tool_request_capacity() {
+fn codex_completion_cancels_pending_tool_request_before_releasing_capacity() {
     let directory = temporary_directory("completed-tool-call");
     let config = provider_config(
         &directory,
@@ -231,6 +231,17 @@ fn codex_completion_releases_pending_tool_request_capacity() {
         )
     });
     assert!(completed, "Codex completed with a tool call still pending");
+    for _ in 0..100 {
+        if call_count(&directory, "tool-response:failure") == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        call_count(&directory, "tool-response:failure"),
+        1,
+        "Paperclip explicitly resolves the provider RPC as cancelled",
+    );
     assert!(provider
         .deliver_tool_result(&ToolResult {
             call_id: first_call.0,
