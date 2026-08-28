@@ -201,6 +201,8 @@ describeEmbeddedPostgres("native Codex server vertical slice", () => {
           resolve(runtimeRoot, "fake-codex-state.json"),
           "--call-log",
           resolve(runtimeRoot, "fake-codex-calls.log"),
+          "--require-dynamic-tool",
+          "--emit-tool-call",
         ],
         providerVersion: "fake-codex-v1",
       },
@@ -256,6 +258,8 @@ describeEmbeddedPostgres("native Codex server vertical slice", () => {
       .from(heartbeatRunEvents)
       .where(eq(heartbeatRunEvents.runId, runId));
     expect(eventTypes.map((event) => event.eventType)).toEqual(expect.arrayContaining([
+      "semantic_tool.input",
+      "semantic_tool.result",
       "turn.completed",
       "run.result.proposed",
       "run.terminal",
