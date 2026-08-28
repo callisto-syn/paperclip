@@ -133,6 +133,19 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         serde_json::Value::Null
     );
 
+    let windows_unc = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-unc",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"\\\\server\\share\\repo\\src\\main.rs"}]
+        }),
+    );
+    assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
+
     let windows_drive_relative = normalize(
         AcpxRuntimeEventKind::ToolCall,
         json!({
