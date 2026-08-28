@@ -45,6 +45,7 @@ import {
 
 const MAX_BUFFERED_EVENTS = 512;
 const TERMINAL_EVENT_RESERVE = 3;
+const TURN_START_EVENT_COUNT = 3;
 const MAX_TRANSCRIPT_EVENTS = 1_024;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
@@ -125,7 +126,7 @@ export class CodexAcpxDriver implements HarnessDriver {
       Math.floor(dependencies.maxHostCleanupRecoveryAttempts ?? 3),
     );
     this.#maxBufferedEvents = Math.max(
-      TERMINAL_EVENT_RESERVE,
+      TERMINAL_EVENT_RESERVE + TURN_START_EVENT_COUNT,
       Math.floor(dependencies.maxBufferedEvents ?? MAX_BUFFERED_EVENTS),
     );
   }
@@ -298,7 +299,7 @@ class CodexAcpxSession implements HarnessSession {
     if (this.#activeTurnId) {
       throw new Error("Codex ACPX session already has an active turn");
     }
-    if (!this.#events.hasCapacity(TERMINAL_EVENT_RESERVE)) {
+    if (!this.#events.hasCapacity(TERMINAL_EVENT_RESERVE + TURN_START_EVENT_COUNT)) {
       throw new HarnessCapabilityUnavailableError(
         "turn.start",
         "the event consumer must drain the previous turn before another turn can start",

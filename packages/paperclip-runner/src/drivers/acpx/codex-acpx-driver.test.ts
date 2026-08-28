@@ -436,15 +436,42 @@ describe("Codex ACPX harness driver", () => {
     expect(retained).toHaveLength(6);
   });
 
+  it("rejects turn admission when only terminal reserve capacity remains", async () => {
+    const fixture = driverFixture({}, { maxBufferedEvents: 6 });
+    const session = await fixture.driver.openSession({
+      runId: "run-admission-bounds",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    await session.startTurn({
+      message: { role: "user", text: "Fill the regular event capacity." },
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await vi.waitFor(async () => {
+      await expect(session.snapshot()).resolves.toMatchObject({
+        terminalTurns: [expect.objectContaining({ turnId: expect.any(String) })],
+      });
+    });
+    const iterator = session.events()[Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.next();
+
+    await expect(session.startTurn({
+      message: { role: "user", text: "Must wait for the remaining events." },
+    })).rejects.toThrow("event consumer must drain");
+    expect(fixture.host.startTurn).toHaveBeenCalledOnce();
+    await session.close({ reason: "admission bound verified" });
+  });
+
   it("preserves every terminal when the bounded consumer keeps draining", async () => {
-    const fixture = driverFixture({}, { maxBufferedEvents: 4 });
+    const fixture = driverFixture({}, { maxBufferedEvents: 6 });
     const session = await fixture.driver.openSession({
       runId: "run-critical-bounds",
       normalizedSessionId: "session-1",
       workingDirectory: "/workspace",
     });
     const terminalTurnIds: string[] = [];
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 6; index += 1) {
       const terminalEvents = collectUntil(session.events(), "turn.completed");
       const { turnId } = await session.startTurn({
         message: { role: "user", text: `Complete turn ${index}.` },
