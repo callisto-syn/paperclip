@@ -1748,15 +1748,15 @@ function isSemanticToolRuntimeSnapshot(
   ) {
     return false;
   }
-  if (
-    !Object.values(snapshot.operationResults as Record<string, unknown>).every(
-      isCapabilityJsonValue,
-    )
-  ) {
+  const operationResults = snapshot.operationResults as Record<
+    string,
+    unknown
+  >;
+  if (!Object.values(operationResults).every(isCapabilityJsonValue)) {
     return false;
   }
   const keys = new Set<string>();
-  return snapshot.extensions.every((candidate) => {
+  const validExtensions = snapshot.extensions.every((candidate) => {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
       return false;
     }
@@ -1768,6 +1768,10 @@ function isSemanticToolRuntimeSnapshot(
       typeof extension.input !== "string" ||
       typeof extension.resultId !== "string" ||
       extension.resultId.length === 0 ||
+      !Object.prototype.hasOwnProperty.call(
+        operationResults,
+        extension.resultId,
+      ) ||
       typeof extension.execution !== "object" ||
       extension.execution === null ||
       Array.isArray(extension.execution)
@@ -1788,6 +1792,23 @@ function isSemanticToolRuntimeSnapshot(
     }
     keys.add(extension.key);
     return true;
+  });
+  if (!validExtensions) return false;
+  const generatedResultIds = [
+    ...Object.keys(operationResults),
+    ...snapshot.extensions.map((candidate) =>
+      String((candidate as Record<string, unknown>).resultId),
+    ),
+  ];
+  return generatedResultIds.every((resultId) => {
+    const match = /^tool-result-(\d+)$/.exec(resultId);
+    if (match === null) return true;
+    const sequence = Number(match[1]);
+    return (
+      Number.isSafeInteger(sequence) &&
+      sequence > 0 &&
+      sequence <= Number(snapshot.resultSequence)
+    );
   });
 }
 

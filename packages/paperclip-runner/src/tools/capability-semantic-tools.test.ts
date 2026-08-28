@@ -427,6 +427,26 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
+  it("rejects a restored result sequence that can reuse a prior result id", async () => {
+    const { adapter, runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+    });
+    const result = await runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-1", body: "Case body" },
+      idempotencyKey: "upsert-case-1",
+    });
+    expect(result).toMatchObject({ operationResultId: "tool-result-1" });
+
+    const snapshot = JSON.parse(adapter.serialize()) as {
+      semanticToolRuntimes: Record<string, { resultSequence: number }>;
+    };
+    snapshot.semanticToolRuntimes[OPEN.identity.runId]!.resultSequence = 0;
+    expect(() =>
+      CapabilityMockControlPlaneAdapter.restore(JSON.stringify(snapshot)),
+    ).toThrow("semantic tool runtime for run-tools is invalid");
+  });
+
   it("serializes concurrent retries for required-idempotency extensions", async () => {
     const { runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
     const invocation = {
