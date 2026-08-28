@@ -797,9 +797,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
           const wakeActorId =
-            linkedTask.id === task.id
-              ? approval.requestedByActorId ?? linkedTask.assigneeActorId
-              : linkedTask.assigneeActorId;
+            approval.requestedByActorId ?? linkedTask.assigneeActorId;
           if (wakeActorId === null) continue;
           const wakeId = this.#scheduleWake(
             wakeActorId,

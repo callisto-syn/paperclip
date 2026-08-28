@@ -600,7 +600,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           priority: "medium",
           workMode: "standard",
           parentId: null,
-          assigneeActorId: "actor-2",
+          assigneeActorId: "actor-1",
           checkoutRunId: null,
           executionRunId: null,
           startedAt: null,
