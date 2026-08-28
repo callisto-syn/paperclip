@@ -47,6 +47,19 @@ fn log_call(path: Option<&Path>, method: &str) -> io::Result<()> {
     writeln!(file, "{method}")
 }
 
+fn has_task_context_tool(message: &Value) -> bool {
+    message
+        .pointer("/params/dynamicTools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("name").and_then(Value::as_str) == Some("get_task_context")
+                    && tool.get("description").and_then(Value::as_str) == Some("Read task context.")
+                    && tool.pointer("/inputSchema/type").and_then(Value::as_str) == Some("object")
+            })
+        })
+}
+
 fn finish_turn(state_path: &Path, state: &mut FakeState, status: &str) -> io::Result<()> {
     let turn_id = state
         .active_turn_id
@@ -85,6 +98,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(argument(&args, "--state-file").ok_or("--state-file is required")?);
     let call_log = argument(&args, "--call-log").map(PathBuf::from);
     let emit_question = args.iter().any(|value| value == "--emit-question");
+    let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
+    let require_dynamic_tool = args.iter().any(|value| value == "--require-dynamic-tool");
     let hold_turn = args.iter().any(|value| value == "--hold-turn");
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
     let pre_response_notification = args
@@ -96,6 +111,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let message: Value = serde_json::from_str(&line?)?;
         if message.get("method").is_none() && message.get("id") == Some(&json!("runtime-request-1"))
         {
+            finish_turn(&state_path, &mut state, "completed")?;
+            continue;
+        }
+        if message.get("method").is_none() && message.get("id") == Some(&json!("tool-request-1")) {
+            if message.pointer("/result/success") == Some(&json!(false)) {
+                finish_turn(&state_path, &mut state, "failed")?;
+                continue;
+            }
+            if message.pointer("/result/success") != Some(&json!(true)) {
+                return Err("semantic tool response omitted success".into());
+            }
+            let text = message
+                .pointer("/result/contentItems/0/text")
+                .and_then(Value::as_str)
+                .ok_or("semantic tool response omitted content text")?;
+            let result: Value = serde_json::from_str(text)?;
+            if result != json!({"ok": true, "task": {"id": "task-1"}}) {
+                return Err("semantic tool response changed the operation result".into());
+            }
             finish_turn(&state_path, &mut state, "completed")?;
             continue;
         }
@@ -111,6 +145,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }))?,
             "initialized" => {}
             "thread/start" => {
+                if require_dynamic_tool && !has_task_context_tool(&message) {
+                    return Err("thread/start omitted the authorized dynamic tool".into());
+                }
                 state.thread_id = "codex-thread-1".to_owned();
                 state.active_turn_id = None;
                 save_state(&state_path, &state)?;
@@ -125,10 +162,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "result": {"thread": {"id": state.thread_id, "sessionId": "codex-account-session"}}
                 }))?;
             }
-            "thread/resume" => send(json!({
-                "id": id,
-                "result": {"thread": {"id": state.thread_id, "sessionId": "codex-account-session"}}
-            }))?,
+            "thread/resume" => {
+                if require_dynamic_tool && !has_task_context_tool(&message) {
+                    return Err("thread/resume omitted the authorized dynamic tool".into());
+                }
+                send(json!({
+                    "id": id,
+                    "result": {"thread": {"id": state.thread_id, "sessionId": "codex-account-session"}}
+                }))?;
+            }
             "thread/read" => {
                 let turns = state
                     .active_turn_id
@@ -153,6 +195,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }))?;
                 if exit_after_turn_start {
                     return Ok(());
+                } else if emit_tool_call {
+                    send(json!({
+                        "id": "tool-request-1",
+                        "method": "item/tool/call",
+                        "params": {
+                            "threadId": state.thread_id,
+                            "turnId": "provider-turn-1",
+                            "callId": "semantic-call-1",
+                            "tool": "get_task_context",
+                            "arguments": {}
+                        }
+                    }))?;
                 } else if emit_question {
                     send(json!({
                         "id": "runtime-request-1",

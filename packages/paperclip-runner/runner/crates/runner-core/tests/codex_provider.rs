@@ -7,6 +7,7 @@ use paperclip_runner_core::codex_provider::{
 };
 use paperclip_runner_core::durable::{Command, CommandExecutor, DurableRunnerError, PolledEvent};
 use paperclip_runner_core::provider_backend::CodexCommandExecutor;
+use paperclip_runner_core::provider_bridge::{AuthorizedTool, ToolResult};
 use paperclip_runner_core::provider_events::normalize_codex_notification;
 use serde_json::{json, Value};
 
@@ -48,6 +49,16 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
         provider_session_id: None,
         instructions: "Stay inside the test workspace.".to_owned(),
         approval_policy: "never".to_owned(),
+    }
+}
+
+fn task_context_tool() -> AuthorizedTool {
+    AuthorizedTool {
+        operation_id: "get_task_context".to_owned(),
+        version: 1,
+        description: "Read task context.".to_owned(),
+        input_schema: json!({"type": "object"}),
+        response_schema: json!({"type": "object"}),
     }
 }
 
@@ -118,6 +129,95 @@ fn codex_transport_buffers_notifications_while_waiting_for_responses() {
     assert!(event_types.iter().any(|event| event == "item.completed"));
     assert!(event_types.iter().any(|event| event == "usage.reported"));
     assert!(event_types.iter().any(|event| event == "turn.completed"));
+    provider.shutdown().expect("stop provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_dynamic_tool_round_trips_through_the_provider_boundary() {
+    let directory = temporary_directory("dynamic-tool");
+    let config = provider_config(&directory, &["--require-dynamic-tool", "--emit-tool-call"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Inspect the fake task.", &config.cwd)
+        .expect("start provider turn");
+
+    let mut delivered = false;
+    let mut completed = false;
+    for _ in 0..32 {
+        match provider.poll().expect("poll semantic tool event") {
+            Some(CodexProviderEvent::ToolCall {
+                call_id,
+                operation_id,
+                input,
+            }) => {
+                assert_eq!(call_id, "semantic-call-1");
+                assert_eq!(operation_id, "get_task_context");
+                assert_eq!(input, json!({}));
+                assert!(provider
+                    .deliver_tool_result(&ToolResult {
+                        call_id: call_id.clone(),
+                        operation_id: "another_operation".to_owned(),
+                        result: json!({"ok": true}),
+                        is_error: false,
+                    })
+                    .is_err());
+                assert!(provider
+                    .deliver_tool_result(&ToolResult {
+                        call_id: call_id.clone(),
+                        operation_id: operation_id.clone(),
+                        result: json!({"value": "x".repeat(1024 * 1024)}),
+                        is_error: false,
+                    })
+                    .is_err());
+                provider
+                    .deliver_tool_result(&ToolResult {
+                        call_id,
+                        operation_id,
+                        result: json!({"ok": true, "task": {"id": "task-1"}}),
+                        is_error: false,
+                    })
+                    .expect("deliver correlated semantic result");
+                delivered = true;
+            }
+            Some(CodexProviderEvent::Notification { method, .. }) if method == "turn/completed" => {
+                completed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(delivered, "Codex emitted its authorized tool call");
+    assert!(completed, "Codex completed after the semantic result");
+    provider.shutdown().expect("stop provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_rejects_a_tool_call_that_was_not_advertised() {
+    let directory = temporary_directory("unauthorized-tool");
+    let config = provider_config(&directory, &["--emit-tool-call"]);
+    let mut provider = CodexProvider::start(&config, None).expect("start Codex without tools");
+    provider
+        .start_turn("Attempt an unavailable tool.", &config.cwd)
+        .expect("start provider turn");
+    let error = (0..32)
+        .find_map(|_| provider.poll().err())
+        .expect("unauthorized provider tool call is rejected");
+    assert!(error.to_string().contains("unauthorized tool"));
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_resume_advertises_the_same_authorized_tools() {
+    let directory = temporary_directory("dynamic-tool-resume");
+    let config = provider_config(&directory, &["--require-dynamic-tool"]);
+    let mut provider =
+        CodexProvider::start_with_tools(&config, [task_context_tool()], Some("codex-thread-1"))
+            .expect("resume Codex with the run-scoped tool set");
+    assert_eq!(provider.thread_id(), "codex-thread-1");
     provider.shutdown().expect("stop provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

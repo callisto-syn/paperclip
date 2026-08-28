@@ -738,6 +738,15 @@ impl CodexCommandExecutor {
                 })?;
             let Some(event) = event else { break };
             match event {
+                CodexProviderEvent::ToolCall {
+                    call_id,
+                    operation_id,
+                    ..
+                } => {
+                    return Err(DurableRunnerError::invalid(format!(
+                        "Codex emitted semantic tool call {call_id} for {operation_id} before the durable tool bridge was attached"
+                    )));
+                }
                 CodexProviderEvent::Notification { method, params } => {
                     let normalized = normalize_codex_notification(&method, &params);
                     let terminal_event_type = normalized
