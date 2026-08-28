@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use paperclip_runner_core::acpx_provider_session::{
-    AcpxPermissionDecision, AcpxPermissionMode, AcpxProviderSession, AcpxProviderSessionConfig,
+    AcpxPermissionMode, AcpxProviderSession, AcpxProviderSessionConfig,
 };
 use paperclip_runner_core::acpx_sidecar_transport::AcpxSidecarTransportConfig;
 use paperclip_runner_core::provider_bridge::{
@@ -54,7 +54,7 @@ fn started(mode: &str) -> AcpxProviderSession {
     session
         .start_turn("turn-1", "Please help", &std::env::temp_dir())
         .unwrap();
-    for _ in 0..3 {
+    for _ in 0..2 {
         session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
     }
     session
@@ -88,16 +88,10 @@ fn commits_each_resolution_only_after_sidecar_acknowledgement() {
     session
         .resolve_input("input-1", "turn-1", &input_resolution("first"))
         .unwrap();
-    session
-        .resolve_permission("permission-1", "turn-1", AcpxPermissionDecision::AllowOnce)
-        .unwrap();
     assert!(session.state().pending_tool("call-1").is_none());
     assert!(session.state().pending_question_set("input-1").is_none());
     assert!(session
         .deliver_tool_result(&tool_result("issues.read"))
-        .is_err());
-    assert!(session
-        .resolve_permission("permission-1", "turn-1", AcpxPermissionDecision::RejectOnce,)
         .is_err());
     session.shutdown("test complete").unwrap();
 }
@@ -133,15 +127,22 @@ fn local_validation_preserves_pending_requests_for_a_correct_retry() {
         .resolve_input("input-1", "turn-1", &input_resolution("first"))
         .unwrap();
 
-    assert!(session
-        .resolve_permission("permission-1", "turn-2", AcpxPermissionDecision::Cancel,)
-        .unwrap_err()
-        .to_string()
-        .contains("stale or inactive turn"));
-    session
-        .resolve_permission("permission-1", "turn-1", AcpxPermissionDecision::RejectOnce)
-        .unwrap();
     session.shutdown("test complete").unwrap();
+}
+
+#[test]
+fn rejects_permission_requests_that_bypass_the_pinned_codex_policy() {
+    let mut session = AcpxProviderSession::start(&config("turns-permission")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+
+    let error = session
+        .poll_event(Duration::from_secs(1))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("pinned runner policy"), "{error}");
+    assert!(session.shutdown("already closed").is_ok());
 }
 
 #[test]

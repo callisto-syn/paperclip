@@ -31,27 +31,6 @@ pub enum AcpxPermissionMode {
     DenyAll,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AcpxPermissionDecision {
-    AllowOnce,
-    AllowAlways,
-    RejectOnce,
-    RejectAlways,
-    Cancel,
-}
-
-impl AcpxPermissionDecision {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::AllowOnce => "allow_once",
-            Self::AllowAlways => "allow_always",
-            Self::RejectOnce => "reject_once",
-            Self::RejectAlways => "reject_always",
-            Self::Cancel => "cancel",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpxProviderSessionIdentity {
@@ -467,6 +446,11 @@ impl AcpxProviderSession {
                             .map(AcpxProviderStateEvent::ToolResult),
                     );
                 }
+                AcpxProviderStateEvent::PermissionRequest { .. } => {
+                    return Err(self.fail_closed(LocalRunnerError::invalid(
+                        "ACPX Codex permission request violated the pinned runner policy",
+                    )));
+                }
                 _ => {}
             }
             if expose_event {
@@ -532,32 +516,6 @@ impl AcpxProviderSession {
             Err(error) => return Err(self.fail_closed(error)),
         };
         self.verify_resolution(&response, "input")?;
-        self.state = next_state;
-        Ok(())
-    }
-
-    pub fn resolve_permission(
-        &mut self,
-        request_id: &str,
-        turn_id: &str,
-        decision: AcpxPermissionDecision,
-    ) -> Result<(), LocalRunnerError> {
-        self.ensure_bound_turn(turn_id)?;
-        validate_text(request_id, 240, "ACPX permission request id")?;
-        let mut next_state = self.state.clone();
-        next_state.complete_permission(request_id)?;
-        let response = match self.transport.request(
-            GeneratedAcpxSidecarCommand::PermissionResolve,
-            json!({
-                "requestId":request_id,
-                "turnId":turn_id,
-                "decision":{"outcome":decision.as_str()},
-            }),
-        ) {
-            Ok(response) => response,
-            Err(error) => return Err(self.fail_closed(error)),
-        };
-        self.verify_resolution(&response, "permission")?;
         self.state = next_state;
         Ok(())
     }
