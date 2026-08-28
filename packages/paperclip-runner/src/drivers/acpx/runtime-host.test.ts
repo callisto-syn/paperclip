@@ -13,6 +13,7 @@ import {
   AcpxRuntimeHost,
   type AcpxRuntimeHostDependencies,
   type AcpxRuntimePort,
+  type AcpxRuntimeTurn,
 } from "./runtime-host.js";
 
 const temporaryDirectories: string[] = [];
@@ -228,12 +229,70 @@ describe("ACPX runtime host", () => {
       host.close({ reason: "retry close" }),
     ).resolves.toBeUndefined();
   });
+
+  it("admits one bounded turn and cancels it before shutdown", async () => {
+    const fixture = await hostFixture();
+    const turn = runtimeTurn();
+    const startTurn = vi.fn(() => turn);
+    const runtime = runtimePort({ startTurn });
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-reads",
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      },
+      fixture.dependencies({ openRuntime: async () => runtime }),
+    );
+
+    expect(host.startTurn({ text: "Complete the task.", requestId: "turn-1" })).toBe(turn);
+    expect(startTurn).toHaveBeenCalledWith({
+      text: "Complete the task.",
+      requestId: "turn-1",
+    });
+    expect(() =>
+      host.startTurn({ text: "Concurrent", requestId: "turn-2" }),
+    ).toThrow("already has an active turn");
+
+    await host.close({ reason: "shutdown" });
+    expect(turn.cancel).toHaveBeenCalledWith({ reason: "shutdown" });
+    expect(runtime.close).toHaveBeenCalledOnce();
+    expect(() =>
+      host.startTurn({ text: "Late", requestId: "turn-3" }),
+    ).toThrow("is closing");
+  });
+
+  it("rejects oversized turn inputs before calling the runtime", async () => {
+    const fixture = await hostFixture();
+    const runtime = runtimePort();
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-reads",
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      },
+      fixture.dependencies({ openRuntime: async () => runtime }),
+    );
+
+    expect(() => host.startTurn({ text: "ok", requestId: " " })).toThrow(
+      "request id",
+    );
+    expect(() =>
+      host.startTurn({ text: "x".repeat(1024 * 1024 + 1), requestId: "turn" }),
+    ).toThrow("turn text");
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    await host.close({ reason: "complete" });
+  });
 });
 
 function runtimePort(
   input: {
     getStatus?: AcpxRuntimePort["getStatus"];
     setModel?: NonNullable<AcpxRuntimePort["setModel"]>;
+    startTurn?: AcpxRuntimePort["startTurn"];
     onClose?: AcpxRuntimePort["close"];
   } = {},
 ): AcpxRuntimePort & { close: ReturnType<typeof vi.fn> } {
@@ -252,7 +311,25 @@ function runtimePort(
         },
       })),
     ...(input.setModel ? { setModel: input.setModel } : {}),
+    startTurn: vi.fn(input.startTurn ?? (() => runtimeTurn())),
     close: vi.fn(input.onClose ?? (async () => undefined)),
+  };
+}
+
+function runtimeTurn(): AcpxRuntimeTurn & {
+  cancel: ReturnType<typeof vi.fn>;
+} {
+  return {
+    requestId: "turn-1",
+    promptStarted: Promise.resolve(),
+    events: {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta" as const, text: "done" };
+      },
+    },
+    result: new Promise(() => undefined),
+    cancel: vi.fn(async () => undefined),
+    closeStream: vi.fn(async () => undefined),
   };
 }
 

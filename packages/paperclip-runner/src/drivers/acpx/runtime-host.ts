@@ -1,3 +1,8 @@
+import type {
+  AcpRuntimeEvent,
+  AcpRuntimeTurnResult,
+} from "acpx/runtime";
+
 import type { NativeAcpxPermissionMode } from "../../contracts/native-execution.js";
 import {
   stageManagedCodexCredential,
@@ -37,11 +42,27 @@ export interface AcpxRuntimePortIdentity {
   agentSessionId: string;
 }
 
+export interface AcpxRuntimeTurnInput {
+  text: string;
+  requestId: string;
+  signal?: AbortSignal;
+}
+
+export interface AcpxRuntimeTurn {
+  readonly requestId: string;
+  readonly promptStarted: Promise<void>;
+  readonly events: AsyncIterable<AcpRuntimeEvent>;
+  readonly result: Promise<AcpRuntimeTurnResult>;
+  cancel(input?: { reason?: string }): Promise<void>;
+  closeStream(input?: { reason?: string }): Promise<void>;
+}
+
 /** Minimal third-party ACP runtime surface admitted by the host boundary. */
 export interface AcpxRuntimePort {
   identity(): Promise<AcpxRuntimePortIdentity>;
   getStatus(): Promise<AcpxModelStatus>;
   setModel?(model: string): Promise<void>;
+  startTurn(input: AcpxRuntimeTurnInput): AcpxRuntimeTurn;
   close(input: { reason: string }): Promise<void>;
 }
 
@@ -84,6 +105,9 @@ export class AcpxRuntimeHost {
   readonly #sandbox: AcpxRuntimeSandbox;
   readonly #credential: ManagedCodexCredentialLease | null;
   readonly #command: VerifiedAcpxCommandLease;
+  #activeTurn: AcpxRuntimeTurn | null = null;
+  #closingStarted = false;
+  #closePromise: Promise<void> | null = null;
   #closed = false;
 
   private constructor(input: {
@@ -218,16 +242,62 @@ export class AcpxRuntimeHost {
     return Object.freeze({ ...this.#sandbox.persistedEnvironment });
   }
 
+  startTurn(input: AcpxRuntimeTurnInput): AcpxRuntimeTurn {
+    if (this.#closed || this.#closingStarted) {
+      throw new Error("ACPX runtime host is closing");
+    }
+    if (this.#activeTurn) {
+      throw new Error("ACPX runtime host already has an active turn");
+    }
+    const requestId = boundedRequestId(input.requestId);
+    const text = boundedTurnText(input.text);
+    const turn = this.#runtime.startTurn({
+      text,
+      requestId,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    this.#activeTurn = turn;
+    void turn.result
+      .finally(() => {
+        if (this.#activeTurn === turn) this.#activeTurn = null;
+      })
+      .catch(() => undefined);
+    return turn;
+  }
+
   async close(input: { reason: string }): Promise<void> {
     if (this.#closed) return;
-    const error = await cleanupRuntimeResources(
+    if (this.#closePromise) return await this.#closePromise;
+    this.#closingStarted = true;
+    const closePromise = this.#close(boundedReason(input.reason));
+    this.#closePromise = closePromise;
+    try {
+      await closePromise;
+      this.#closed = true;
+    } finally {
+      if (this.#closePromise === closePromise) this.#closePromise = null;
+    }
+  }
+
+  async #close(reason: string): Promise<void> {
+    const errors: unknown[] = [];
+    if (this.#activeTurn) {
+      try {
+        await this.#activeTurn.cancel({ reason });
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    const cleanupError = await cleanupRuntimeResources(
       this.#runtime,
       this.#credential,
       this.#command,
-      boundedReason(input.reason),
+      reason,
     );
-    if (error) throw error;
-    this.#closed = true;
+    if (cleanupError) errors.push(...cleanupError.errors);
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "ACPX runtime cleanup failed");
+    }
   }
 }
 
@@ -266,4 +336,23 @@ function boundedInstructions(value: string | undefined): string {
 function boundedReason(value: string): string {
   const reason = value.trim().slice(0, 1_000);
   return reason || "ACPX runtime closed";
+}
+
+function boundedRequestId(value: string): string {
+  const requestId = value.trim();
+  if (
+    requestId.length === 0 ||
+    requestId !== value ||
+    Buffer.byteLength(requestId) > 1_024
+  ) {
+    throw new Error("ACPX turn request id is outside its bounded size");
+  }
+  return requestId;
+}
+
+function boundedTurnText(value: string): string {
+  if (Buffer.byteLength(value) > 1024 * 1024) {
+    throw new Error("ACPX turn text exceeds its bounded size");
+  }
+  return value;
 }
