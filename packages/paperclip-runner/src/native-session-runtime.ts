@@ -447,9 +447,10 @@ async function replayCheckpointedTurnTerminal(input: {
   runId: string;
   sourceInstanceId: string;
   turnId: string;
-}): Promise<PrpEvent | null> {
+}): Promise<{ terminal: PrpEvent; hasPriorResultProposal: boolean } | null> {
   let afterSourceSeq = 0;
   let terminal: PrpEvent | null = null;
+  let latestResultProposalSequence = 0;
   while (true) {
     const replay = await input.controlPlane.replayEvents({
       runId: input.runId,
@@ -457,8 +458,26 @@ async function replayCheckpointedTurnTerminal(input: {
       afterSourceSeq,
       limit: 1_000,
     });
-    if (replay.events.length === 0) return terminal;
+    if (replay.events.length === 0) {
+      return terminal === null
+        ? null
+        : {
+            terminal,
+            hasPriorResultProposal:
+              latestResultProposalSequence > 0
+              && latestResultProposalSequence < terminal.sourceSeq,
+          };
+    }
     for (const event of replay.events) {
+      if (
+        event.turnId === input.turnId
+        && event.eventType === "run.result.proposed"
+      ) {
+        latestResultProposalSequence = Math.max(
+          latestResultProposalSequence,
+          event.sourceSeq,
+        );
+      }
       if (event.turnId === input.turnId && isTurnTerminal(event)) {
         terminal = structuredClone(event);
       }
@@ -703,7 +722,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         && recoveredTerminal.turnId === persistedTerminal.turnId
         && recoveredTerminal.fingerprint === persistedTerminal.fingerprint
       );
-      const replayedTerminal = checkpointedDispositionTerminal
+      const replayedDisposition = checkpointedDispositionTerminal
         ? await replayCheckpointedTurnTerminal({
             controlPlane: options.controlPlane,
             runId: input.binding.runId,
@@ -711,9 +730,16 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             turnId: recoveredTerminal!.turnId,
           })
         : null;
-      if (checkpointedDispositionTerminal && replayedTerminal === null) {
+      if (checkpointedDispositionTerminal && replayedDisposition === null) {
         throw new Error("native_recovery_checkpointed_terminal_missing");
       }
+      if (
+        checkpointedDispositionTerminal
+        && !replayedDisposition?.hasPriorResultProposal
+      ) {
+        throw new Error("native_recovery_checkpointed_disposition_proposal_missing");
+      }
+      const replayedTerminal = replayedDisposition?.terminal ?? null;
       const consumptionAbort = new AbortController();
       const consuming = replayedTerminal === null
         ? consumeTurn(

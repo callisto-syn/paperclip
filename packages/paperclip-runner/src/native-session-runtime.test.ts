@@ -1644,6 +1644,13 @@ describe("executeNativeSession recovery", () => {
       emittedAt: "2026-08-09T00:00:01.000Z",
       payload: {},
     };
+    const resultProposalEvent: PrpEvent = {
+      ...terminalEvent,
+      sourceEventId: "runner-recovery:run-native:1",
+      sourceSeq: 1,
+      eventType: "run.result.proposed",
+      payload: result,
+    };
     const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
     const session: NativeSession = {
       identity: () => identity,
@@ -1695,7 +1702,7 @@ describe("executeNativeSession recovery", () => {
       async completeRun() {},
     };
 
-    await expect(executeNativeSession({
+    const execute = () => executeNativeSession({
       input,
       backend,
       controlPlane: port,
@@ -1705,12 +1712,24 @@ describe("executeNativeSession recovery", () => {
         expect(replayed).toEqual(terminalEvent);
         return result;
       },
-    })).resolves.toMatchObject({
+    });
+    await expect(execute()).rejects.toThrow(
+      "native_recovery_checkpointed_disposition_proposal_missing",
+    );
+    bySource.set("runner-recovery", [
+      structuredClone(resultProposalEvent),
+      structuredClone(terminalEvent),
+    ]);
+
+    await expect(execute()).resolves.toMatchObject({
       result,
       turnId: "turn-disposition",
     });
     expect(startTurn).not.toHaveBeenCalled();
-    expect(bySource.get("runner-recovery")).toEqual([terminalEvent]);
+    expect(bySource.get("runner-recovery")).toEqual([
+      resultProposalEvent,
+      terminalEvent,
+    ]);
     expect(bySource.get("control-recovery")?.map((event) => event.eventType)).toEqual([
       "run.result.accepted",
       "run.terminal",
