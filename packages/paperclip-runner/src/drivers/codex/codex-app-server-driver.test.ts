@@ -3307,13 +3307,23 @@ describe("Codex app-server Codex driver", () => {
     const recovered = recovery?.session;
     expect(recovered).toBeDefined();
     await recovered!.reconcile?.();
+    const recoveryMessage = "Do not execute twice; report disposition only.";
     await expect(recovered!.startTurn({
-      message: { role: "user", text: "Do not execute twice." },
+      message: { role: "user", text: recoveryMessage },
     })).resolves.toMatchObject({ turnId: "turn-2" });
     await expect(recovered!.startTurn({
       message: { role: "user", text: "Do not start concurrently." },
     })).rejects.toThrow("session cannot start another turn");
-    expect(second.calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
+    const recoveryStarts = second.calls.filter(
+      (call) => call.method === "turn/start",
+    );
+    expect(recoveryStarts).toHaveLength(1);
+    expect(recoveryStarts[0]!.params.input).toEqual([
+      { type: "text", text: recoveryMessage, text_elements: [] },
+    ]);
+    expect(JSON.stringify(recoveryStarts[0]!.params.input)).not.toContain(
+      "Complete.",
+    );
     await recovered!.close({ reason: "test complete" });
   });
 

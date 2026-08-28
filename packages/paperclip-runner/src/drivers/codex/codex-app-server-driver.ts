@@ -926,6 +926,7 @@ class CodexHarnessSession implements HarnessSession {
   #protocolFailureCode: string | null = null;
   #protocolFailureMessage: string | null = null;
   #terminal = false;
+  #dispositionOnlyRecoveryAvailable = false;
   #turnStarted = false;
   readonly #terminalTurns = new Map<string, string>();
   readonly #workspaceChangesByTurn = new Map<string, Record<string, unknown>>();
@@ -1025,6 +1026,11 @@ class CodexHarnessSession implements HarnessSession {
       this.#conversationMode === "task"
       && this.#terminalTurns.size > 0
       && this.#result !== null;
+    this.#dispositionOnlyRecoveryAvailable =
+      input.resumed &&
+      this.#conversationMode === "task" &&
+      this.#terminalTurns.size > 0 &&
+      this.#result === null;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );
@@ -1129,9 +1135,12 @@ class CodexHarnessSession implements HarnessSession {
           : `session failed protocol validation: ${this.#protocolFailureCode} (${this.#protocolFailureMessage ?? "no detail"})`,
       );
     }
+    const dispositionOnlyRecovery = this.#dispositionOnlyRecoveryAvailable;
     const taskText =
       this.#conversationMode === "direct"
         ? input.message.text
+        : dispositionOnlyRecovery
+          ? input.message.text
         : JSON.stringify({
             task: this.#taskEnvelope,
             message: input.message.text,
@@ -1190,6 +1199,9 @@ class CodexHarnessSession implements HarnessSession {
       throw new Error("Codex turn identity changed during start");
     }
     this.#activeTurnId ??= turnId;
+    if (dispositionOnlyRecovery) {
+      this.#dispositionOnlyRecoveryAvailable = false;
+    }
     this.#emit("turn.accepted", { turnId }, { turnId });
     if (this.#interruptQueued) {
       this.#interruptQueued = false;
