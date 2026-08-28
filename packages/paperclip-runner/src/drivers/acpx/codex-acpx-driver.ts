@@ -1269,6 +1269,26 @@ function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
         "persisted Codex ACPX semantic result has no completed terminal turn",
       );
     }
+    if (
+      snapshot.activeTurnId !== undefined &&
+      snapshot.activeTurnId !== null
+    ) {
+      const activeTerminal = terminalTurns.find(
+        (terminal) => terminal.turnId === snapshot.activeTurnId,
+      );
+      if (
+        snapshot.activeTurnId !== semantic.turnId ||
+        !activeTerminal ||
+        !isCompletedSemanticTerminal(
+          activeTerminal.fingerprint,
+          semantic.fingerprint,
+        )
+      ) {
+        throw new Error(
+          "persisted Codex ACPX active turn is not the completed semantic settlement",
+        );
+      }
+    }
   } else if (terminalTurns.length > 0) {
     const settlementTurnId =
       snapshot.activeTurnId ?? terminalTurns.at(-1)!.turnId;

@@ -801,6 +801,14 @@ describe("Codex ACPX harness driver", () => {
     });
     await session.close({ reason: "simulate successful retry recovery" });
 
+    await expect(fixture.driver.recoverSession!({
+      ...snapshot,
+      activeTurnId: first.turnId,
+    })).resolves.toEqual({
+      recovered: false,
+      reason:
+        "persisted Codex ACPX active turn is not the completed semantic settlement",
+    });
     await expect(fixture.driver.recoverSession!(snapshot)).resolves.toMatchObject({
       recovered: true,
     });
