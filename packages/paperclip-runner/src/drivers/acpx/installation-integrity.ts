@@ -6,6 +6,7 @@ import {
 } from "node:child_process";
 import { constants } from "node:fs";
 import {
+  lstat,
   open,
   readFile,
   realpath,
@@ -194,6 +195,18 @@ async function inspectCommand(
   digest: string;
   identity: VerifiedAcpxCommandIdentity;
 }> {
+  const lexicalBefore = await lstat(commandPath, { bigint: true }).catch(
+    () => null,
+  );
+  if (
+    lexicalBefore === null ||
+    lexicalBefore.isSymbolicLink() ||
+    !lexicalBefore.isFile()
+  ) {
+    throw new Error(
+      `ACPX ${agent} executable must be a real regular file`,
+    );
+  }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(
@@ -218,11 +231,19 @@ async function inspectCommand(
     }
     const bytes = await readHandleAtStart(handle, Number(before.size));
     const after = await handle.stat({ bigint: true });
+    const lexicalAfter = await lstat(commandPath, { bigint: true }).catch(
+      () => null,
+    );
     const beforeIdentity = fileIdentity(before);
     const afterIdentity = fileIdentity(after);
     if (
       bytes.length < 1 ||
       bytes.length > MAX_AGENT_COMMAND_BYTES ||
+      lexicalAfter === null ||
+      lexicalAfter.isSymbolicLink() ||
+      !lexicalAfter.isFile() ||
+      !sameIdentity(fileIdentity(lexicalBefore), fileIdentity(lexicalAfter)) ||
+      !sameIdentity(fileIdentity(lexicalAfter), afterIdentity) ||
       !sameIdentity(beforeIdentity, afterIdentity) ||
       after.size !== BigInt(bytes.length)
     ) {
@@ -321,7 +342,10 @@ function snapshotBootstrap(format: AcpxCommandFormat): string {
     'const { pathToFileURL } = require("node:url");',
     "const target = pathToFileURL(process.argv[1]).href;",
     "const source = fs.readFileSync(3);",
-    "registerHooks({ load(url, context, nextLoad) {",
+    "registerHooks({ resolve(specifier, context, nextResolve) {",
+    "if (specifier === target) return { url: target, shortCircuit: true };",
+    "return nextResolve(specifier, context);",
+    "}, load(url, context, nextLoad) {",
     `if (url === target) return { format: ${JSON.stringify(format)}, source, shortCircuit: true };`,
     "return nextLoad(url, context);",
     "} });",

@@ -100,20 +100,17 @@ describe("ACPX installation integrity", () => {
     ).rejects.toThrow(/runtime version mismatch/);
   });
 
-  it.runIf(process.platform !== "win32")(
-    "rejects an executable symlink even when its target has the expected digest",
-    async () => {
-      const fixture = await installationFixture();
-      const target = join(fixture.root, "outside.js");
-      await writeFile(target, fixture.command);
-      await rm(fixture.commandPath);
-      await symlink(target, fixture.commandPath);
+  it("rejects an executable symlink even when its target has the expected digest", async () => {
+    const fixture = await installationFixture();
+    const target = join(fixture.root, "outside.js");
+    await writeFile(target, fixture.command);
+    await rm(fixture.commandPath);
+    await symlink(target, fixture.commandPath);
 
-      await expect(
-        verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve),
-      ).rejects.toThrow(/no-follow regular file/);
-    },
-  );
+    await expect(
+      verifyQualifiedAcpxInstallation(fixture.profile, fixture.resolve),
+    ).rejects.toThrow(/real regular file|no-follow regular file/);
+  });
 
   it("detects pathname replacement before opening a launch lease", async () => {
     const fixture = await installationFixture();
@@ -142,6 +139,24 @@ describe("ACPX installation integrity", () => {
     );
     await chmod(replacement, 0o755);
     await rename(replacement, fixture.commandPath);
+
+    await expectOutput(lease.spawn(), "verified");
+  });
+
+  it("launches the lexical verified snapshot after symlink replacement", async () => {
+    const fixture = await installationFixture();
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    const lease = await installation.openCommand();
+    const outside = join(fixture.root, "outside.js");
+    await writeFile(
+      outside,
+      '#!/usr/bin/env node\nprocess.stdout.write("symlink-target");\n',
+    );
+    await rm(fixture.commandPath);
+    await symlink(outside, fixture.commandPath);
 
     await expectOutput(lease.spawn(), "verified");
   });
