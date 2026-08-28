@@ -1613,6 +1613,110 @@ describe("executeNativeSession recovery", () => {
     ]);
   });
 
+  it("replays an already checkpointed disposition terminal without restarting the session", async () => {
+    const checkpoint: PersistedNativeSession = {
+      backendKind: "mock",
+      sessionId: "driver-recovery",
+      identity,
+      providerSessionId: "provider-recovery",
+      cursor: "2",
+      activeTurnId: null,
+      terminalTurns: [
+        { turnId: "turn-work", fingerprint: "work-terminal" },
+        { turnId: "turn-disposition", fingerprint: "disposition-terminal" },
+      ],
+      dispositionOnlyRecoveryConsumed: true,
+      pendingRuntimeRequests: [],
+      lineage: [],
+    };
+    const terminalEvent: PrpEvent = {
+      schema: "paperclip.prp.event.v1",
+      sourceEventId: "runner-recovery:run-native:2",
+      sourceSeq: 2,
+      sourceInstanceId: "runner-recovery",
+      sourceKind: "provider",
+      runId: identity.runId,
+      normalizedSessionId: identity.sessionId,
+      turnId: "turn-disposition",
+      eventType: "turn.completed",
+      schemaVersion: 1,
+      priority: 0,
+      emittedAt: "2026-08-09T00:00:01.000Z",
+      payload: {},
+    };
+    const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      async *events() { throw new Error("checkpointed terminal must not reopen event consumption"); },
+      startTurn,
+      async result() { return null; },
+      async snapshot() { return structuredClone(checkpoint); },
+      async close() {},
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { throw new Error("must recover the provider session"); },
+      async recoverSession() { return { recovered: true, session }; },
+    };
+    const bySource = new Map<string, PrpEvent[]>([
+      ["runner-recovery", [structuredClone(terminalEvent)]],
+    ]);
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async loadSessionCheckpoint() { return structuredClone(checkpoint); },
+      async checkpointSession() {},
+      async appendEvent(event) {
+        const list = bySource.get(event.sourceInstanceId) ?? [];
+        list.push(structuredClone(event));
+        bySource.set(event.sourceInstanceId, list);
+        return {
+          cursor: list.length,
+          highestContiguousSourceSeq: highestContiguous(list),
+          disposition: "committed",
+        };
+      },
+      async replayEvents(replay) {
+        const list = bySource.get(replay.sourceInstanceId) ?? [];
+        return {
+          events: structuredClone(list.filter((event) => event.sourceSeq > replay.afterSourceSeq)),
+          highestContiguousSourceSeq: highestContiguous(list),
+        };
+      },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      resolveMissingResult: async ({ terminalEvent: replayed }) => {
+        expect(replayed).toEqual(terminalEvent);
+        return result;
+      },
+    })).resolves.toMatchObject({
+      result,
+      turnId: "turn-disposition",
+    });
+    expect(startTurn).not.toHaveBeenCalled();
+    expect(bySource.get("runner-recovery")).toEqual([terminalEvent]);
+    expect(bySource.get("control-recovery")?.map((event) => event.eventType)).toEqual([
+      "run.result.accepted",
+      "run.terminal",
+    ]);
+  });
+
   it("recovers a completed checkpoint and appends only a missing control terminal fact", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",

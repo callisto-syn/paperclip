@@ -442,6 +442,38 @@ async function reconcileRecoveryCursor(input: {
   return { ...input.checkpoint, cursor: String(persistedHighWater) };
 }
 
+async function replayCheckpointedTurnTerminal(input: {
+  controlPlane: ControlPlanePort;
+  runId: string;
+  sourceInstanceId: string;
+  turnId: string;
+}): Promise<PrpEvent | null> {
+  let afterSourceSeq = 0;
+  let terminal: PrpEvent | null = null;
+  while (true) {
+    const replay = await input.controlPlane.replayEvents({
+      runId: input.runId,
+      sourceInstanceId: input.sourceInstanceId,
+      afterSourceSeq,
+      limit: 1_000,
+    });
+    if (replay.events.length === 0) return terminal;
+    for (const event of replay.events) {
+      if (event.turnId === input.turnId && isTurnTerminal(event)) {
+        terminal = structuredClone(event);
+      }
+    }
+    const pageHighWater = replay.events.reduce(
+      (highest, event) => Math.max(highest, event.sourceSeq),
+      afterSourceSeq,
+    );
+    if (pageHighWater <= afterSourceSeq) {
+      throw new Error("native_recovery_replay_did_not_advance");
+    }
+    afterSourceSeq = pageHighWater;
+  }
+}
+
 /**
  * Package-owned normalized session loop. Paperclip supplies persistence and
  * authority through ControlPlanePort; provider/session behavior stays here.
@@ -642,23 +674,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         }
       : null;
     if (!completed) {
-      const consumptionAbort = new AbortController();
-      const consuming = consumeTurn(
-        session,
-        options.controlPlane,
-        options.timeoutMs ?? 900_000,
-        options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
-        closeSession,
-        quarantineSession,
-        options.resolveGovernedWait,
-        consumptionAbort.signal,
-      );
-      // Event consumption must begin before startTurn so an eager provider cannot
-      // outrun us. Observe its rejection immediately, though: if startTurn or
-      // checkpointing fails first, the outer finally closes the session and the
-      // abandoned consumer will reject when its stream closes. Without a handler
-      // that later rejection becomes process-fatal under Node's strict policy.
-      void consuming.catch(() => undefined);
       // A recovered driver is authoritative about whether a provider turn is
       // still active. In particular, drivers normalize the checkpoint race
       // where a terminal fingerprint was persisted before activeTurnId was
@@ -675,8 +690,63 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         && (recoveredSnapshot.terminalTurns?.length ?? 0)
           > (persistedSession?.terminalTurns?.length ?? 0)
       );
+      const recoveredTerminal = recoveredSnapshot.terminalTurns?.at(-1);
+      const persistedTerminal = persistedSession?.terminalTurns?.at(-1);
+      const checkpointedDispositionTerminal = Boolean(
+        recovered
+        && recoveredSnapshot.dispositionOnlyRecoveryConsumed
+        && persistedSession?.dispositionOnlyRecoveryConsumed
+        && !recoveredSnapshot.semanticResult
+        && !recoveredActiveTurnId
+        && recoveredTerminal
+        && persistedTerminal
+        && recoveredTerminal.turnId === persistedTerminal.turnId
+        && recoveredTerminal.fingerprint === persistedTerminal.fingerprint
+      );
+      const replayedTerminal = checkpointedDispositionTerminal
+        ? await replayCheckpointedTurnTerminal({
+            controlPlane: options.controlPlane,
+            runId: input.binding.runId,
+            sourceInstanceId: options.runnerInstanceId,
+            turnId: recoveredTerminal!.turnId,
+          })
+        : null;
+      if (checkpointedDispositionTerminal && replayedTerminal === null) {
+        throw new Error("native_recovery_checkpointed_terminal_missing");
+      }
+      const consumptionAbort = new AbortController();
+      const consuming = replayedTerminal === null
+        ? consumeTurn(
+            session,
+            options.controlPlane,
+            options.timeoutMs ?? 900_000,
+            options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
+            closeSession,
+            quarantineSession,
+            options.resolveGovernedWait,
+            consumptionAbort.signal,
+          )
+        : Promise.resolve({
+            event: replayedTerminal,
+            eventCount: 0,
+            highestContiguousSourceSeq: replayedTerminal.sourceSeq,
+            governedResult: null,
+          });
+      // Event consumption must begin before startTurn so an eager provider cannot
+      // outrun us. Observe its rejection immediately, though: if startTurn or
+      // checkpointing fails first, the outer finally closes the session and the
+      // abandoned consumer will reject when its stream closes. Without a handler
+      // that later rejection becomes process-fatal under Node's strict policy.
+      void consuming.catch(() => undefined);
       try {
-        if (!recovered || (!recoveredActiveTurnId && !adoptedDispositionTerminal)) {
+        if (
+          !recovered
+          || (
+            !recoveredActiveTurnId
+            && !adoptedDispositionTerminal
+            && !checkpointedDispositionTerminal
+          )
+        ) {
           const modelEnvelope = buildNativeModelEnvelope(input);
           const dispositionOnlyRecovery = Boolean(
             recovered &&
