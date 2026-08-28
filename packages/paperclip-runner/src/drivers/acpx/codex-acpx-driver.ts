@@ -484,7 +484,12 @@ class CodexAcpxSession implements HarnessSession {
     const pump = this.#activePump;
     const hostClose =
       this.#hostClosePromise ?? this.#startHostClose({ reason });
-    await settleWithin(hostClose, this.#closeSettlementTimeoutMs);
+    let hostCloseError: unknown = null;
+    try {
+      await settleWithin(hostClose, this.#closeSettlementTimeoutMs);
+    } catch (error) {
+      hostCloseError = error;
+    }
     if (pump) {
       await settleWithin(
         pump.catch(() => undefined),
@@ -505,6 +510,7 @@ class CodexAcpxSession implements HarnessSession {
     }
     this.#eventStreamClosed = true;
     this.#events.close();
+    if (hostCloseError) throw hostCloseError;
   }
 
   #startHostClose(input: { reason: string }): Promise<void> {

@@ -204,6 +204,15 @@ describe("Codex ACPX harness driver", () => {
       session.close({ reason: "runtime close stalled" }),
     ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
     expect(fixture.host.close).toHaveBeenCalledOnce();
+    await expect(terminalEvents).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventType: "turn.interrupted" }),
+      ]),
+    );
+    await expect(session.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      terminalTurns: [expect.objectContaining({ turnId: expect.any(String) })],
+    });
 
     fixture.finishTurn({ status: "cancelled", stopReason: "session_closed" });
     hostClose.resolve();
@@ -211,11 +220,6 @@ describe("Codex ACPX harness driver", () => {
       session.close({ reason: "finish retained cleanup" }),
     ).resolves.toBeUndefined();
     expect(fixture.host.close).toHaveBeenCalledOnce();
-    await expect(terminalEvents).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ eventType: "turn.interrupted" }),
-      ]),
-    );
   });
 
   it("bounds lagging streams while preserving omission and terminal events", async () => {
