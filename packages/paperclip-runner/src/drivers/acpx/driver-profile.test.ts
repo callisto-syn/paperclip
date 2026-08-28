@@ -88,7 +88,7 @@ describe("ACPX driver profile", () => {
       ok: false,
       issues: [{ path: "permissionMode", code: "invalid_permission_mode" }],
     });
-    for (const permissionMode of ["", 42]) {
+    for (const permissionMode of ["", 42, undefined]) {
       expect(
         validateAcpxDriverConfig({
           agent: "claude",

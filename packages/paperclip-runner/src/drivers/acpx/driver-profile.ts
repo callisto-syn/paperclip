@@ -104,10 +104,12 @@ export function validateAcpxDriverConfig(
   } catch (error) {
     return invalid("model", "invalid_model", safeErrorMessage(error));
   }
-  const permissionMode =
-    config.permissionMode === undefined
-      ? "approve-all"
-      : text(config.permissionMode);
+  const permissionMode = Object.prototype.hasOwnProperty.call(
+    config,
+    "permissionMode",
+  )
+    ? text(config.permissionMode)
+    : "approve-all";
   if (!isPermissionMode(permissionMode)) {
     return invalid(
       "permissionMode",
