@@ -118,7 +118,7 @@ impl AcpxSuspensionCheckpointStore {
     }
 
     pub fn load(&self) -> Result<Option<AcpxSuspensionCheckpoint>, LocalRunnerError> {
-        let mut file = match open_private_regular_file(&self.path) {
+        let file = match open_private_regular_file(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
@@ -140,12 +140,7 @@ impl AcpxSuspensionCheckpointStore {
                 "ACPX suspension checkpoint exceeds its 1 MiB bound",
             ));
         }
-        let mut bytes = Vec::with_capacity(length as usize);
-        file.read_to_end(&mut bytes).map_err(|error| {
-            LocalRunnerError::invalid(format!(
-                "failed to read the ACPX suspension checkpoint: {error}"
-            ))
-        })?;
+        let bytes = read_checkpoint_bytes(file, length)?;
         let checkpoint: AcpxSuspensionCheckpoint =
             serde_json::from_slice(&bytes).map_err(|error| {
                 LocalRunnerError::invalid(format!(
@@ -197,6 +192,25 @@ impl AcpxSuspensionCheckpointStore {
     }
 }
 
+fn read_checkpoint_bytes(
+    reader: impl Read,
+    capacity_hint: u64,
+) -> Result<Vec<u8>, LocalRunnerError> {
+    let mut reader = reader.take(MAX_CHECKPOINT_BYTES + 1);
+    let mut bytes = Vec::with_capacity(capacity_hint.min(MAX_CHECKPOINT_BYTES) as usize);
+    reader.read_to_end(&mut bytes).map_err(|error| {
+        LocalRunnerError::invalid(format!(
+            "failed to read the ACPX suspension checkpoint: {error}"
+        ))
+    })?;
+    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+        return Err(LocalRunnerError::invalid(
+            "ACPX suspension checkpoint exceeds its 1 MiB bound",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn secure_directory(path: &Path, label: &str) -> Result<(), LocalRunnerError> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -235,4 +249,18 @@ fn is_sha256_digest(value: &str) -> bool {
         && value[7..]
             .chars()
             .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_checkpoint_bytes;
+
+    #[test]
+    fn bounded_checkpoint_reader_rejects_growth_beyond_the_metadata_hint() {
+        let error = read_checkpoint_bytes(std::io::repeat(b'x'), 0)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("1 MiB"), "{error}");
+    }
 }
