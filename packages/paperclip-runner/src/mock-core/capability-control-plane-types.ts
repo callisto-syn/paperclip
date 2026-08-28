@@ -258,16 +258,21 @@ export interface CapabilitySemanticToolRuntimeSnapshot {
   schema: "paperclip.capability.semantic-tool-runtime.v1";
   resultSequence: number;
   operationResults: Record<string, CapabilityJsonValue>;
-  extensions: Array<{
-    key: string;
-    input: string;
-    resultId: string;
-    execution: {
-      value: CapabilityJsonValue;
-      commandResult: CapabilityCommandResult | null;
-      entityRefs: string[];
-    };
-  }>;
+  extensions: Array<
+    | { key: string; input: string; status: "pending" }
+    | {
+        key: string;
+        input: string;
+        /** Absent only in snapshots written before pending markers existed. */
+        status?: "completed";
+        resultId: string;
+        execution: {
+          value: CapabilityJsonValue;
+          commandResult: CapabilityCommandResult | null;
+          entityRefs: string[];
+        };
+      }
+  >;
 }
 
 export interface CapabilityFixtureState {

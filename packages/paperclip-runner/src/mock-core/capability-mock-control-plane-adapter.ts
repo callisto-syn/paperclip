@@ -1765,7 +1765,17 @@ function isSemanticToolRuntimeSnapshot(
       typeof extension.key !== "string" ||
       extension.key.length === 0 ||
       keys.has(extension.key) ||
-      typeof extension.input !== "string" ||
+      typeof extension.input !== "string"
+    ) {
+      return false;
+    }
+    if (extension.status === "pending") {
+      if ("resultId" in extension || "execution" in extension) return false;
+      keys.add(extension.key);
+      return true;
+    }
+    if (
+      (extension.status !== undefined && extension.status !== "completed") ||
       typeof extension.resultId !== "string" ||
       extension.resultId.length === 0 ||
       !Object.prototype.hasOwnProperty.call(
@@ -1802,8 +1812,8 @@ function isSemanticToolRuntimeSnapshot(
   if (!validExtensions) return false;
   const generatedResultIds = [
     ...Object.keys(operationResults),
-    ...snapshot.extensions.map((candidate) =>
-      String((candidate as Record<string, unknown>).resultId),
+    ...snapshot.extensions.flatMap((candidate) =>
+      candidate.status === "pending" ? [] : [candidate.resultId],
     ),
   ];
   return generatedResultIds.every((resultId) => {

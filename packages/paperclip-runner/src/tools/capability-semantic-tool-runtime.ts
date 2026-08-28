@@ -39,7 +39,7 @@ interface ExtensionExecution {
 
 interface ExtensionIdempotencyRecord {
   input: string;
-  execution: Promise<{ resultId: string; value: ExtensionExecution }>;
+  execution: Promise<{ resultId: string; value: ExtensionExecution }> | null;
   completed?: { resultId: string; value: ExtensionExecution };
 }
 
@@ -203,6 +203,7 @@ export class CapabilitySemanticToolRuntime {
             extensionIdempotencyKey,
             newRecord,
           );
+          this.#persistState();
           executionPromise.then((completed) => {
             newRecord.completed = structuredClone(completed);
           }).catch(() => undefined);
@@ -215,6 +216,20 @@ export class CapabilitySemanticToolRuntime {
               this.#persistState();
             }
           });
+        }
+        if (idempotencyRecord.execution === null) {
+          const denied = this.#authorization.denyInvocation(
+            invocation.operationId,
+            context,
+            "idempotency_recovery_in_flight",
+          );
+          return {
+            observableResult: this.#denial(
+              invocation.operationId,
+              denied,
+              "operation_unsupported",
+            ),
+          };
         }
         const completed = await idempotencyRecord.execution;
         execution = structuredClone(completed.value);
@@ -282,6 +297,13 @@ export class CapabilitySemanticToolRuntime {
     }
     const extensionIdempotency = new Map<string, ExtensionIdempotencyRecord>();
     for (const extension of snapshot.extensions) {
+      if (extension.status === "pending") {
+        extensionIdempotency.set(extension.key, {
+          input: extension.input,
+          execution: null,
+        });
+        continue;
+      }
       const completed = {
         resultId: extension.resultId,
         value: structuredClone(extension.execution),
@@ -315,12 +337,17 @@ export class CapabilitySemanticToolRuntime {
         ]),
       ),
       extensions: [...this.#state.extensionIdempotency]
-        .flatMap(([key, record]) => record.completed === undefined ? [] : [{
-          key,
-          input: record.input,
-          resultId: record.completed.resultId,
-          execution: structuredClone(record.completed.value),
-        }]),
+        .map(([key, record]) =>
+          record.completed === undefined
+            ? { key, input: record.input, status: "pending" as const }
+            : {
+                key,
+                input: record.input,
+                status: "completed" as const,
+                resultId: record.completed.resultId,
+                execution: structuredClone(record.completed.value),
+              },
+        ),
     });
   }
 

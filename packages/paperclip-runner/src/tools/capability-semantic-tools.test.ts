@@ -408,12 +408,51 @@ describe("Capability exposure and authorization", () => {
     });
 
     expect(result).toMatchObject({ ok: true });
-    expect(saveRuntime).toHaveBeenCalledOnce();
-    const snapshot = saveRuntime.mock.calls[0]![1];
+    expect(saveRuntime).toHaveBeenCalledTimes(2);
+    expect(saveRuntime.mock.calls[0]![1].extensions).toEqual([
+      expect.objectContaining({ status: "pending" }),
+    ]);
+    const snapshot = saveRuntime.mock.calls[1]![1];
     expect(snapshot.extensions).toHaveLength(1);
-    expect(snapshot.operationResults[snapshot.extensions[0]!.resultId]).toEqual(
-      snapshot.extensions[0]!.execution.value,
+    const [extension] = snapshot.extensions;
+    expect(extension).toMatchObject({ status: "completed" });
+    if (extension?.status !== "completed") {
+      throw new Error("expected completed extension receipt");
+    }
+    expect(snapshot.operationResults[extension.resultId]).toEqual(
+      extension.execution.value,
     );
+  });
+
+  it("fails closed after restoring an in-flight extension marker", async () => {
+    const { adapter, runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+    });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-pending", body: "Case body" },
+      idempotencyKey: "upsert-case-pending",
+    } as const;
+
+    const inFlight = runtime.invoke(invocation);
+    const serializedWhileInFlight = adapter.serialize();
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      serializedWhileInFlight,
+    );
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["cases:write"],
+    });
+
+    await expect(restored.invoke(invocation)).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "operation_unsupported",
+        reason: "idempotency_recovery_in_flight",
+      },
+    });
+    await expect(inFlight).resolves.toMatchObject({ ok: true });
   });
 
   it("rejects incomplete or malformed restored extension executions", async () => {
