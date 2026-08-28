@@ -10,6 +10,7 @@ export async function verifyOpenedAcpxSidecarHost(
   host: OpenedAcpxSidecarHost,
   sanitizeStatus: (value: unknown) => Record<string, unknown>,
   closeTimeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+  retainCleanup: (cleanup: Promise<void>) => void = () => undefined,
 ): Promise<{ identity: unknown; status: Record<string, unknown> }> {
   try {
     const identity = host.identity();
@@ -18,8 +19,15 @@ export async function verifyOpenedAcpxSidecarHost(
     );
     return { identity, status };
   } catch (error) {
+    const cleanup = host.close({
+      reason: "ACPX session open verification failed",
+    });
+    // The admission timeout bounds the command response, not ownership. The
+    // sidecar retains this exact close operation so shutdown can still await
+    // provider termination after the bounded verification path returns.
+    retainCleanup(cleanup);
     const cleanupError = await boundedFailedAdmissionClose(
-      host.close({ reason: "ACPX session open verification failed" }),
+      cleanup,
       closeTimeoutMs,
     );
     if (cleanupError) {

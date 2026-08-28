@@ -35,7 +35,12 @@ describe("Codex ACPX runtime sidecar", () => {
   });
 
   it("bounds failed-admission cleanup when the host does not settle", async () => {
-    const close = vi.fn(() => new Promise<void>(() => undefined));
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const close = vi.fn(() => cleanup);
+    const retainCleanup = vi.fn();
     const host = {
       identity: () => ({ kind: "acpx" }),
       status: vi.fn().mockRejectedValue(new Error("status failed")),
@@ -43,9 +48,12 @@ describe("Codex ACPX runtime sidecar", () => {
     };
 
     await expect(
-      verifyOpenedAcpxSidecarHost(host, () => ({}), 1),
+      verifyOpenedAcpxSidecarHost(host, () => ({}), 1, retainCleanup),
     ).rejects.toThrow("verification and provider cleanup failed");
     expect(close).toHaveBeenCalledOnce();
+    expect(retainCleanup).toHaveBeenCalledWith(cleanup);
+    finishCleanup();
+    await cleanup;
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {

@@ -74,6 +74,7 @@ interface PendingInput {
 }
 
 let host: AcpxRuntimeHost | null = null;
+let failedAdmissionCleanup: Promise<void> | null = null;
 let openParams: AcpxSidecarOpenParams | null = null;
 let runId: string | null = null;
 let turnId: string | null = null;
@@ -168,7 +169,9 @@ async function dispatch(
     };
   }
   if (request.command === "session.open") {
-    if (host) throw new Error("ACPX sidecar already owns a session");
+    if (host || failedAdmissionCleanup) {
+      throw new Error("ACPX sidecar already owns a session or its cleanup");
+    }
     if (!initializedModel) throw new Error("initialize the ACPX sidecar first");
     const params = parseOpenParams(request.params);
     if (params.model !== initializedModel) {
@@ -195,6 +198,8 @@ async function dispatch(
     const opened = await verifyOpenedAcpxSidecarHost(
       openedHost,
       sanitizeRuntimeStatus,
+      undefined,
+      retainFailedAdmissionCleanup,
     );
     host = openedHost;
     openParams = params;
@@ -1000,9 +1005,20 @@ async function shutdown(reason: string): Promise<void> {
   closing = true;
   if (turnId) rejectTurnWaiters(turnId, reason);
   if (host) await host.close({ reason }).catch(() => undefined);
+  const retainedCleanup = failedAdmissionCleanup;
+  if (retainedCleanup) await retainedCleanup.catch(() => undefined);
   host = null;
+  failedAdmissionCleanup = null;
   openParams = null;
   runId = null;
   turnId = null;
   process.exitCode = 0;
+}
+
+function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {
+  const retained = cleanup.catch(() => undefined);
+  failedAdmissionCleanup = retained;
+  void retained.finally(() => {
+    if (failedAdmissionCleanup === retained) failedAdmissionCleanup = null;
+  });
 }
