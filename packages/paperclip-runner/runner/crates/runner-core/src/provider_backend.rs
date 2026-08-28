@@ -28,10 +28,11 @@ const PROVIDER_STATE_FILE: &str = "codex-provider-state.json";
 const MAX_PROVIDER_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 128;
 // One accepted semantic call can produce an input and a result event. Normal
-// traffic cannot consume the additional capacity required to settle every
-// retained call and record the provider plus run terminal events.
+// traffic cannot consume the additional capacity required to diagnose a
+// receipt-limit stop, settle every retained call, and record the provider plus
+// run terminal events.
 const MAX_REGULAR_QUEUED_PROVIDER_EVENTS: usize = 2 * MAX_PENDING_CALLS + 3;
-const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_PENDING_CALLS + 3;
+const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_PENDING_CALLS + 4;
 const MAX_QUEUED_PROVIDER_EVENTS: usize =
     MAX_REGULAR_QUEUED_PROVIDER_EVENTS + MAX_TERMINAL_SETTLEMENT_EVENTS;
 
@@ -1136,7 +1137,7 @@ impl CodexCommandExecutor {
         self.state
             .as_mut()
             .expect("Codex state remains available at its tool receipt limit")
-            .push_event(NormalizedProviderEvent {
+            .push_terminal_event(NormalizedProviderEvent {
                 event_type: "harness.diagnostic".to_owned(),
                 priority: EventPriority::P0,
                 payload: json!({
@@ -1720,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn regular_backlog_preserves_bounded_terminal_settlement_capacity() {
+    fn regular_backlog_preserves_receipt_limit_and_terminal_settlement_capacity() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
                 provider: "codex".to_owned(),
@@ -1774,7 +1775,12 @@ mod tests {
                 ))
                 .unwrap();
         }
-        for event_type in ["turn.completed", "run.result.proposed", "run.terminal"] {
+        for event_type in [
+            "harness.diagnostic",
+            "turn.completed",
+            "run.result.proposed",
+            "run.terminal",
+        ] {
             state
                 .push_terminal_event(NormalizedProviderEvent {
                     event_type: event_type.to_owned(),
