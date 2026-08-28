@@ -288,6 +288,51 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
+  it("detaches a provider that survives both shutdown signals", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      const child = stubbornChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const closing = expect(
+        port.close({ reason: "provider ignored shutdown" }),
+      ).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({
+            message: "ACPX provider did not exit after SIGKILL",
+          }),
+        ],
+      });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await closing;
+
+      expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+      expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+      expect(child.stdin?.destroy).toHaveBeenCalledOnce();
+      expect(child.stdout?.destroy).toHaveBeenCalledOnce();
+      expect(child.stderr?.destroy).toHaveBeenCalledOnce();
+      expect(child.unref).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps prompt turns to the admitted ACPX handle", async () => {
     const runtime = fakeRuntime();
     const turn = {
@@ -921,6 +966,20 @@ function failingSignalChild(): {
     return true;
   });
   return { child, errors };
+}
+
+function stubbornChild(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperties(child, {
+    exitCode: { value: null, writable: true },
+    signalCode: { value: null, writable: true },
+    stdin: { value: { destroy: vi.fn() } },
+    stdout: { value: { destroy: vi.fn() } },
+    stderr: { value: { destroy: vi.fn() } },
+  });
+  child.kill = vi.fn(() => true);
+  child.unref = vi.fn(() => child);
+  return child;
 }
 
 function registry(): AcpAgentRegistry {

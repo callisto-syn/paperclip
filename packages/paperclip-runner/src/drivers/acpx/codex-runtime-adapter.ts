@@ -576,7 +576,26 @@ async function terminateChild(child: ChildProcess): Promise<unknown[]> {
     }
     if (!killOutcome.exited && running(child)) {
       errors.push(new Error("ACPX provider did not exit after SIGKILL"));
+      errors.push(...detachUnresponsiveChild(child));
     }
+  }
+  return errors;
+}
+
+function detachUnresponsiveChild(child: ChildProcess): unknown[] {
+  const errors: unknown[] = [];
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    if (!stream) continue;
+    try {
+      stream.destroy();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    child.unref();
+  } catch (error) {
+    errors.push(error);
   }
   return errors;
 }
