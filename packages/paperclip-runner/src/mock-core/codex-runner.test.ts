@@ -333,4 +333,22 @@ describe("Codex trace conformance", () => {
       });
     expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
   });
+
+  it("does not report completed work when an accepted proposal is interrupted", async () => {
+    const trace = await runCodexCodexTracer({
+      driver: new TraceConformanceDriver(completedResult(), "turn.interrupted"),
+      taskEnvelope: envelope,
+      workingDirectory: "/trace-workspace",
+      timeoutMs: 1_000,
+    });
+
+    expect(trace.resultDecision.status).toBe("accepted");
+    expect(trace.events.find((event) => event.eventType === "run.terminal")?.payload)
+      .toMatchObject({
+        turnTerminalState: "interrupted",
+        runTerminalState: "cancelled",
+        reportedWorkDisposition: "yielded",
+      });
+    expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
+  });
 });

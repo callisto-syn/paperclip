@@ -473,7 +473,7 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
       schema: "paperclip.prp.terminal.v1",
       ...runtime,
       reportedWorkDisposition:
-        resultDecision.status === "accepted"
+        resultDecision.status === "accepted" && runtime.runTerminalState === "succeeded"
           ? resultDecision.result.reportedWorkDisposition
           : "yielded",
     }, providerTerminal.turnId ? { turnId: providerTerminal.turnId } : {}));
