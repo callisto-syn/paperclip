@@ -299,6 +299,52 @@ describe("HarnessDriverBackend", () => {
     expect(session.identity()).toEqual({ ...originalIdentity, runId: "run-2" });
   });
 
+  it("restores a persisted terminal before the recovered stream is consumed", async () => {
+    const recoveryDriver: HarnessDriver = {
+      ...driver,
+      async recoverSession() {
+        return { recovered: true, session: new FakeHarnessSession() };
+      },
+    };
+    const backend = new HarnessDriverBackend(recoveryDriver);
+    const terminal = {
+      schema: "paperclip.prp.terminal.v1" as const,
+      turnTerminalState: "completed" as const,
+      runTerminalState: "succeeded" as const,
+      reportedWorkDisposition: "done" as const,
+    };
+    const recovery = await backend.recoverSession({
+      backendKind: "runner",
+      driverKind: "fake",
+      sessionId: "driver-1",
+      providerSessionId: "provider-1",
+      identity: {
+        runId: "run-terminal-recovery",
+        sessionId: "session-1",
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+      },
+      semanticResult: result,
+      terminal,
+      activeTurnId: "turn-1",
+      terminalTurns: [
+        { turnId: "turn-1", fingerprint: "terminal-fingerprint" },
+      ],
+    });
+
+    expect(recovery).toMatchObject({ recovered: true });
+    await expect(recovery.session!.snapshot()).resolves.toMatchObject({
+      semanticResult: result,
+      terminal,
+    });
+    await expect(recovery.session!.result()).resolves.toEqual({
+      result,
+      terminal,
+      turnId: "turn-1",
+    });
+  });
+
   it("delegates native runtime-request resolutions to the harness session", async () => {
     runtimeResolutions.length = 0;
     const backend = new HarnessDriverBackend(driver);
