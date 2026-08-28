@@ -112,11 +112,18 @@ describe("ACPX recovery identity", () => {
       agentSessionId: fixture.expected.agentSessionId,
       requestedModel: fixture.expected.requestedModel,
       effectiveModel: fixture.expected.effectiveModel,
-      profileDigest: fixture.expected.profileDigest,
+      profileDigest: fixture.input.profile.commandDigest,
     };
     expect(() =>
       verifyExpectedAcpxIdentity(legacyExpected, fixture.binding, legacy),
     ).not.toThrow();
+
+    expect(() =>
+      verifyExpectedAcpxIdentity(legacyExpected, fixture.binding, {
+        ...legacy,
+        profileDigest: fixture.binding.profileDigest,
+      }),
+    ).toThrow(/persisted runtime record/);
 
     const permissive = {
       ...fixture.binding,

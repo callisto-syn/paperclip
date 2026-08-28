@@ -15,6 +15,7 @@ export interface AcpxRecoveryBinding {
   workspaceDigest: string;
   runtimeRoot: string;
   profileDigest: string;
+  legacyProfileDigest: string;
   requestedModel: string;
   effectiveModel: string;
   permissionMode: NativeAcpxPermissionMode;
@@ -45,6 +46,9 @@ export async function createAcpxRecoveryBinding(input: {
   validateIdentity(input.normalizedSessionId, "normalized session");
   if (input.requestedModel !== input.profile.qualificationModel) {
     throw new Error("ACPX recovery requested an unqualified model");
+  }
+  if (!isDigest(input.profile.commandDigest)) {
+    throw new Error("ACPX recovery profile command digest is invalid");
   }
   const workspacePath = await resolveWorkspace(input.workingDirectory);
   const workspaceDigest = digest(workspacePath);
@@ -85,6 +89,7 @@ export async function createAcpxRecoveryBinding(input: {
     workspaceDigest,
     runtimeRoot,
     profileDigest,
+    legacyProfileDigest: input.profile.commandDigest,
     requestedModel: input.requestedModel,
     effectiveModel: input.requestedModel,
     permissionMode: input.permissionMode,
@@ -137,13 +142,17 @@ export function verifyExpectedAcpxIdentity(
   }
   if (persisted === null) return;
 
-  const record = parsePersistedRecord(persisted, binding);
+  const parsed = parsePersistedRecord(persisted, binding);
+  const { record } = parsed;
+  const persistedProfileDigest = parsed.legacy
+    ? binding.legacyProfileDigest
+    : binding.profileDigest;
   if (
     record.acpxRecordId !== expected.acpxRecordId ||
     record.backendSessionId !== expected.backendSessionId ||
     record.agentSessionId !== expected.agentSessionId ||
     record.normalizedSessionId !== binding.normalizedSessionId ||
-    record.profileDigest !== binding.profileDigest ||
+    record.profileDigest !== persistedProfileDigest ||
     record.workspaceDigest !== binding.workspaceDigest ||
     record.requestedModel !== binding.requestedModel ||
     record.effectiveModel !== binding.effectiveModel ||
@@ -158,7 +167,7 @@ export function verifyExpectedAcpxIdentity(
 function parsePersistedRecord(
   value: unknown,
   binding: AcpxRecoveryBinding,
-): AcpxIdentityRecord {
+): { record: AcpxIdentityRecord; legacy: boolean } {
   const record = object(value);
   if (record.schema === undefined) {
     rejectUnknownKeys(record, [
@@ -170,13 +179,16 @@ function parsePersistedRecord(
       "permissionMode",
       "profileDigest",
     ]);
-    return validatedRecord({
-      ...record,
-      schema: ACPX_IDENTITY_RECORD_SCHEMA,
-      normalizedSessionId: binding.normalizedSessionId,
-      workspaceDigest: binding.workspaceDigest,
-      permissionMode: record.permissionMode ?? "approve-reads",
-    });
+    return {
+      record: validatedRecord({
+        ...record,
+        schema: ACPX_IDENTITY_RECORD_SCHEMA,
+        normalizedSessionId: binding.normalizedSessionId,
+        workspaceDigest: binding.workspaceDigest,
+        permissionMode: record.permissionMode ?? "approve-reads",
+      }),
+      legacy: true,
+    };
   }
   rejectUnknownKeys(record, [
     "schema",
@@ -190,7 +202,7 @@ function parsePersistedRecord(
     "effectiveModel",
     "permissionMode",
   ]);
-  return validatedRecord(record);
+  return { record: validatedRecord(record), legacy: false };
 }
 
 function validatedRecord(value: Record<string, unknown>): AcpxIdentityRecord {
