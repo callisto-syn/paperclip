@@ -179,7 +179,7 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
       ),
       ...(text(oneOf.description).length > 0
         ? {
-            description: exactQuestionText(
+            description: exactRedactedQuestionText(
               text(oneOf.description),
               "option description",
             ),
@@ -287,7 +287,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       prompt: exactQuestionText(text(property.title, id), "question prompt"),
       ...(text(property.description).length > 0
         ? {
-            helpText: exactQuestionText(
+            helpText: exactRedactedQuestionText(
               text(property.description),
               "question description",
             ),
@@ -312,7 +312,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
     title: "A tool needs your input",
     ...(text(params.message).length > 0
       ? {
-          description: exactQuestionText(
+          description: exactRedactedQuestionText(
             text(params.message),
             "form description",
           ),

@@ -262,4 +262,36 @@ describe("Codex structured question adapter", () => {
       _meta: null,
     });
   });
+
+  it("redacts credential text from MCP elicitation descriptions", () => {
+    const input = normalizeCodexQuestionSet("mcpServer/elicitation/request", {
+      message: "Authorization: Bearer message-secret",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          environment: {
+            type: "string",
+            title: "Environment",
+            description: "token=property-secret",
+            oneOf: [{
+              const: "staging",
+              title: "Staging",
+              description: "password=option-secret",
+            }],
+          },
+        },
+      },
+    });
+
+    expect(input).toMatchObject({
+      description: expect.stringContaining("[REDACTED]"),
+      questions: [{
+        helpText: expect.stringContaining("[REDACTED]"),
+        options: [{ description: expect.stringContaining("[REDACTED]") }],
+      }],
+    });
+    expect(JSON.stringify(input)).not.toMatch(
+      /message-secret|property-secret|option-secret/,
+    );
+  });
 });
