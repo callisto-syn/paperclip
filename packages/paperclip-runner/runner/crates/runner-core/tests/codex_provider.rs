@@ -1300,18 +1300,24 @@ fn durable_backend_rejects_a_runtime_response_after_terminal_settlement() {
         ))
         .expect("start provider turn");
 
-    let mut request_seen = false;
+    let mut request_id = None;
     let mut terminal_seen = false;
     for _ in 0..16 {
         for event in poll_and_ack(&mut executor).expect("poll question and terminal") {
-            request_seen |= event.event_type == "runtime_request.created";
+            if event.event_type == "runtime_request.created" {
+                request_id = event
+                    .payload
+                    .pointer("/request/requestId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
             terminal_seen |= event.event_type == "turn.failed";
         }
-        if request_seen && terminal_seen {
+        if request_id.is_some() && terminal_seen {
             break;
         }
     }
-    assert!(request_seen);
+    let request_id = request_id.expect("observe the durable runtime request id");
     assert!(terminal_seen);
     let error = executor
         .execute(&command(
@@ -1319,7 +1325,7 @@ fn durable_backend_rejects_a_runtime_response_after_terminal_settlement() {
             4,
             "request.resolve",
             json!({
-                "requestId": "runtime-request-1",
+                "requestId": request_id,
                 "response": {
                     "schema": "paperclip.question_response.v1",
                     "answers": {"environment": {"selectedOptionIds": ["option-1"]}}
@@ -1361,6 +1367,7 @@ fn structured_question_round_trips_through_the_normalized_backend() {
     assert_eq!(started.events[0].0, "turn.accepted");
 
     let mut question_set = None;
+    let mut request_id = None;
     let mut provider_started_events = 0;
     for _ in 0..16 {
         for event in poll_and_ack(&mut executor).expect("poll question") {
@@ -1371,6 +1378,11 @@ fn structured_question_round_trips_through_the_normalized_backend() {
                     "paperclip.runtime_request.v2"
                 );
                 question_set = event.payload.pointer("/request/input").cloned();
+                request_id = event
+                    .payload
+                    .pointer("/request/requestId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
         }
         if question_set.is_some() {
@@ -1378,6 +1390,7 @@ fn structured_question_round_trips_through_the_normalized_backend() {
         }
     }
     let question_set = question_set.expect("normalized question set is emitted");
+    let request_id = request_id.expect("normalized request id is emitted");
     assert_eq!(provider_started_events, 1);
     assert_eq!(question_set["schema"], "paperclip.question_set.v1");
     assert_eq!(
@@ -1391,7 +1404,7 @@ fn structured_question_round_trips_through_the_normalized_backend() {
             4,
             "request.resolve",
             json!({
-                "requestId": "runtime-request-1",
+                "requestId": request_id,
                 "response": {
                     "schema": "paperclip.question_response.v1",
                     "answers": {"environment": {"selectedOptionIds": ["option-1"]}}

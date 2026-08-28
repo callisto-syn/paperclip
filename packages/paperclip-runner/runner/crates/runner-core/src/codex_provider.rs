@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::durable::redact_text;
 use crate::local_runner::LocalRunnerError;
@@ -146,6 +147,7 @@ struct PendingToolRequest {
 #[derive(Clone, Debug, PartialEq)]
 struct PendingRuntimeRequest {
     rpc_id: Value,
+    turn_id: String,
     method: String,
     params: Value,
     question_set: Value,
@@ -414,6 +416,11 @@ impl CodexProvider {
             .ok_or_else(|| {
                 LocalRunnerError::invalid("runtime response has no pending Codex request")
             })?;
+        if self.active_provider_turn_id.as_deref() != Some(pending.turn_id.as_str()) {
+            return Err(LocalRunnerError::invalid(
+                "runtime response belongs to another Codex turn",
+            ));
+        }
         let result = codex_question_response(&pending, response)?;
         self.process
             .send(&json!({"id": pending.rpc_id, "result": result}))?;
@@ -580,20 +587,22 @@ impl CodexProvider {
                         "Codex runtime request named another thread",
                     ));
                 }
-                let active_turn_id = self.active_provider_turn_id.as_deref().ok_or_else(|| {
+                let active_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
                     LocalRunnerError::invalid(
                         "Codex runtime request arrived outside an active turn",
                     )
                 })?;
-                if params.get("turnId").and_then(Value::as_str) != Some(active_turn_id) {
+                if params.get("turnId").and_then(Value::as_str) != Some(active_turn_id.as_str()) {
                     return Err(LocalRunnerError::invalid(
                         "Codex runtime request named another turn",
                     ));
                 }
-                let (request_id, question_set, option_labels) =
+                let (provider_request_id, question_set, option_labels) =
                     codex_question_set(&rpc_id, &params)?;
+                let request_id = scoped_runtime_request_id(&active_turn_id, &provider_request_id);
                 let pending = PendingRuntimeRequest {
                     rpc_id,
+                    turn_id: active_turn_id,
                     method: method.to_owned(),
                     params,
                     question_set: question_set.clone(),
@@ -1085,6 +1094,14 @@ fn codex_question_set(
     ))
 }
 
+fn scoped_runtime_request_id(turn_id: &str, provider_request_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(turn_id.as_bytes());
+    digest.update([0]);
+    digest.update(provider_request_id.as_bytes());
+    format!("runtime-request-{:x}", digest.finalize())
+}
+
 fn codex_question_response(
     pending: &PendingRuntimeRequest,
     response: &Value,
@@ -1225,6 +1242,7 @@ mod tests {
         assert_eq!(question_set["schema"], "paperclip.question_set.v1");
         let pending = PendingRuntimeRequest {
             rpc_id: json!(41),
+            turn_id: "turn-1".to_owned(),
             method: "item/tool/requestUserInput".to_owned(),
             params: Value::Null,
             question_set,
@@ -1250,6 +1268,10 @@ mod tests {
             }),
         )
         .is_err());
+        assert_ne!(
+            scoped_runtime_request_id("turn-1", "41"),
+            scoped_runtime_request_id("turn-2", "41"),
+        );
         assert!(codex_question_response(
             &pending,
             &json!({
