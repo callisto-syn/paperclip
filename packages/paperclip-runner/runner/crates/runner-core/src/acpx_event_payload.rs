@@ -89,8 +89,10 @@ pub fn decode_acpx_event(
             Ok(AcpxEventPayload::PermissionRequested {
                 request_id: required_id(&event.payload, "requestId", "permission request")?,
                 kind: bounded_optional_text(&event.payload, "kind", 160, "permission kind")?
+                    .map(|value| redact_text(&value))
                     .unwrap_or_else(|| "permission".to_owned()),
                 title: bounded_optional_text(&event.payload, "title", 4_000, "permission title")?
+                    .map(|value| redact_text(&value))
                     .unwrap_or_else(|| "ACP permission request".to_owned()),
                 details: sanitize_value(&event.payload),
             })

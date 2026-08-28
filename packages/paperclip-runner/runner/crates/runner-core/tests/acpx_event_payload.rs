@@ -124,14 +124,22 @@ fn decodes_tool_and_permission_requests_after_scope_validation() {
         &scope,
         &event(
             GeneratedAcpxSidecarEventType::RuntimePermissionRequested,
-            json!({"requestId": "permission-1", "kind": "write", "title": "Edit file"}),
+            json!({
+                "requestId": "permission-1",
+                "kind": "write",
+                "title": "Authorization: Bearer permission-secret"
+            }),
         ),
     )
     .unwrap();
     assert!(matches!(
         permission,
-        AcpxEventPayload::PermissionRequested { request_id, kind, .. }
-            if request_id == "permission-1" && kind == "write"
+        AcpxEventPayload::PermissionRequested { request_id, kind, title, details }
+            if request_id == "permission-1"
+                && kind == "write"
+                && title.contains("REDACTED")
+                && !title.contains("permission-secret")
+                && details["title"].as_str().is_some_and(|value| value.contains("REDACTED"))
     ));
 }
 
