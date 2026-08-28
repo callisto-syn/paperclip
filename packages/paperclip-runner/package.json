@@ -7,6 +7,9 @@
     "node": ">=24.11.0"
   },
   "type": "module",
+  "bin": {
+    "paperclip-runner-acpx-sidecar": "./dist/cli/acpx-runtime-sidecar.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

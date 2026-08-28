@@ -1,0 +1,1019 @@
+#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { isAbsolute, relative, resolve } from "node:path";
+import { createInterface } from "node:readline";
+
+import type {
+  AcpElicitationContext,
+  AcpElicitationRequest,
+  AcpElicitationResponse,
+  AcpRuntimeEvent,
+} from "acpx/runtime";
+
+import {
+  PRP_BLOCK_TOOL_NAME,
+  PRP_COMPLETION_TOOL_NAME,
+} from "../contracts/completion-result.js";
+import {
+  parseHarnessRuntimeRequestResolution,
+  type HarnessRuntimeRequestResolution,
+} from "../contracts/harness-driver.js";
+import {
+  normalizeAcpFormElicitation,
+  type NormalizedAcpForm,
+} from "../drivers/acpx/acp-question-adapter.js";
+import { openCodexAcpxRuntime } from "../drivers/acpx/codex-runtime-adapter.js";
+import { resolveQualifiedAcpxProfile } from "../drivers/acpx/qualified-profiles.js";
+import {
+  AcpxRuntimeHost,
+  type AcpxRuntimeTurn,
+} from "../drivers/acpx/runtime-host.js";
+import {
+  ACPX_SIDECAR_MAX_FRAME_BYTES,
+  ACPX_SIDECAR_PROTOCOL_VERSION,
+  boundedSidecarValue,
+  parseAcpxSidecarRequest,
+  record,
+  sanitizeAcpxPlanEntries,
+  text,
+  type AcpxExpectedSessionIdentity,
+  type AcpxSidecarEvent,
+  type AcpxSidecarOpenParams,
+  type AcpxSidecarRequest,
+  type AcpxSidecarResponse,
+} from "../drivers/acpx/sidecar-protocol.js";
+import { validatePrpStructuredRunResult } from "../protocol/replay-contract.js";
+import type { RunnerToolCall } from "../drivers/runner-tool-bridge.js";
+import {
+  acpxBootstrapBlockedError,
+  enqueueAcpxSidecarInput,
+  recordAcpxBootstrapFailure,
+} from "./acpx-sidecar-input.js";
+
+const MAX_PENDING_TOOLS = 512;
+const MAX_PENDING_INPUTS = 16;
+
+interface PendingTool {
+  turnId: string;
+  settle(value: unknown): void;
+  reject(error: Error): void;
+  cleanup(): void;
+}
+
+interface PendingInput {
+  turnId: string;
+  normalized: NormalizedAcpForm;
+  settle(response: AcpElicitationResponse): void;
+  cleanup(): void;
+}
+
+let host: AcpxRuntimeHost | null = null;
+let openParams: AcpxSidecarOpenParams | null = null;
+let runId: string | null = null;
+let turnId: string | null = null;
+let sequence = 0;
+let requestSequence = 0;
+let closing = false;
+let pendingInput = Promise.resolve();
+let bootstrapFailure: Error | null = null;
+let initializedModel: string | null = null;
+const tools = new Map<string, PendingTool>();
+const inputs = new Map<string, PendingInput>();
+
+const lines = createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity,
+  terminal: false,
+});
+lines.on("line", (line) => {
+  pendingInput = enqueueAcpxSidecarInput(
+    pendingInput,
+    () => receiveLine(line),
+    (error) => diagnostic("sidecar_input_failed", safeMessage(error)),
+  );
+});
+lines.on("close", () => {
+  void pendingInput.then(() => shutdown("sidecar stdin closed"));
+});
+process.once("SIGTERM", () => {
+  void shutdown("sidecar received SIGTERM");
+});
+process.once("SIGINT", () => {
+  void shutdown("sidecar received SIGINT");
+});
+
+async function receiveLine(line: string): Promise<void> {
+  if (!line.trim()) return;
+  if (Buffer.byteLength(line) > ACPX_SIDECAR_MAX_FRAME_BYTES) {
+    diagnostic("oversized_frame", "Rejected an oversized sidecar request.");
+    return;
+  }
+  let request: AcpxSidecarRequest;
+  try {
+    request = parseAcpxSidecarRequest(JSON.parse(line));
+  } catch (error) {
+    diagnostic("malformed_frame", safeMessage(error));
+    return;
+  }
+  try {
+    const blocked = acpxBootstrapBlockedError(
+      bootstrapFailure,
+      request.command,
+    );
+    if (blocked) throw blocked;
+    response(request.id, true, await dispatch(request));
+  } catch (error) {
+    const normalized =
+      error instanceof Error ? error : new Error(String(error));
+    bootstrapFailure = recordAcpxBootstrapFailure(
+      bootstrapFailure,
+      request.command,
+      normalized,
+    );
+    response(request.id, false, undefined, {
+      code: safeCode(record(normalized).code, "acpx_sidecar_command_failed"),
+      message: safeMessage(normalized),
+      retryable: record(normalized).retryable === true,
+    });
+  }
+}
+
+async function dispatch(
+  request: AcpxSidecarRequest,
+): Promise<Record<string, unknown>> {
+  if (request.command === "initialize") {
+    if (initializedModel)
+      throw new Error("ACPX sidecar is already initialized");
+    requireCodexAgent(request.params.agent);
+    const model = requiredText(request.params.model, "model");
+    const profile = resolveQualifiedAcpxProfile("codex", model);
+    initializedModel = model;
+    return {
+      protocolVersion: ACPX_SIDECAR_PROTOCOL_VERSION,
+      sidecarPid: process.pid,
+      profile,
+      capabilities: {
+        persistentSessions: true,
+        exactModelVerification: true,
+        permissions: "runner_policy",
+        semanticTools: "runner_bridge",
+        structuredInput: "paperclip.question_set.v1",
+      },
+    };
+  }
+  if (request.command === "session.open") {
+    if (host) throw new Error("ACPX sidecar already owns a session");
+    if (!initializedModel) throw new Error("initialize the ACPX sidecar first");
+    const params = parseOpenParams(request.params);
+    if (params.model !== initializedModel) {
+      throw new Error("ACPX session model differs from its initialization");
+    }
+    openParams = params;
+    try {
+      host = await AcpxRuntimeHost.open(
+        {
+          runtimeDirectory: params.runtimeDirectory,
+          normalizedSessionId: params.normalizedSessionId,
+          workingDirectory: params.workingDirectory,
+          agent: "codex",
+          model: params.model,
+          permissionMode: params.permissionMode,
+          systemInstructions: params.systemInstructions,
+          environment: process.env,
+          expectedIdentity: params.expectedIdentity,
+          semanticTools: {
+            tools: params.tools,
+            handler: waitForTool,
+          },
+        },
+        { openRuntime: openCodexAcpxRuntime },
+      );
+    } catch (error) {
+      openParams = null;
+      throw error;
+    }
+    emit("runtime.process", {
+      role: "sidecar",
+      pid: process.pid,
+      processGroupId: null,
+      startedAt: new Date().toISOString(),
+    });
+    return {
+      identity: host.identity(),
+      sidecarPid: process.pid,
+      status: sanitizeRuntimeStatus(await host.status()),
+    };
+  }
+  if (request.command === "run.attach") {
+    requireHost();
+    if (turnId) throw new Error("cannot attach a run during an active turn");
+    const attachedTools = parseTools(request.params.tools);
+    if (
+      canonicalJson(attachedTools) !== canonicalJson(openParams?.tools ?? [])
+    ) {
+      throw new Error("ACPX run tool catalog differs from the opened session");
+    }
+    runId = boundedIdentity(request.params.runId, "runId");
+    return {
+      runId,
+      catalogRevision: positiveInteger(
+        request.params.catalogRevision,
+        "catalogRevision",
+      ),
+    };
+  }
+  if (request.command === "turn.start") {
+    const activeHost = requireHost();
+    if (!runId) throw new Error("attach a run before starting an ACPX turn");
+    if (turnId) throw new Error("ACPX sidecar already has an active turn");
+    const currentTurnId = boundedIdentity(request.params.turnId, "turnId");
+    turnId = currentTurnId;
+    let runtimeTurn: AcpxRuntimeTurn;
+    try {
+      runtimeTurn = activeHost.startTurn({
+        requestId: `${runId}:${currentTurnId}`,
+        text: boundedText(request.params.message, "message", 1024 * 1024),
+        onElicitation: (providerRequest, context) =>
+          waitForInput(currentTurnId, providerRequest, context),
+      });
+    } catch (error) {
+      turnId = null;
+      throw error;
+    }
+    void pumpTurn(currentTurnId, runtimeTurn);
+    return { turnId: currentTurnId };
+  }
+  if (request.command === "turn.cancel") {
+    const expected = boundedIdentity(request.params.turnId, "turnId");
+    if (expected !== turnId) throw new Error("cannot cancel a stale ACPX turn");
+    await requireHost().interruptActiveTurn(
+      boundedOptionalText(
+        request.params.reason,
+        "Paperclip cancellation",
+        4_000,
+      ),
+    );
+    return { cancelled: true };
+  }
+  if (request.command === "permission.resolve") {
+    throw new Error(
+      "Codex ACPX permissions are resolved by the admitted runner policy",
+    );
+  }
+  if (request.command === "input.resolve") {
+    const requestId = boundedIdentity(request.params.requestId, "requestId");
+    const expectedTurnId = boundedIdentity(request.params.turnId, "turnId");
+    const pending = inputs.get(requestId);
+    if (
+      !pending ||
+      pending.turnId !== expectedTurnId ||
+      turnId !== expectedTurnId
+    ) {
+      throw new Error("input request is stale or unknown");
+    }
+    const resolution = parseHarnessRuntimeRequestResolution(
+      "elicitation",
+      request.params.resolution,
+      pending.normalized.questionSet,
+    );
+    const providerResponse = elicitationResponse(
+      pending.normalized,
+      resolution,
+    );
+    if (!inputs.delete(requestId))
+      throw new Error("input request lost its settlement race");
+    pending.cleanup();
+    pending.settle(providerResponse);
+    return { resolved: true };
+  }
+  if (request.command === "tool.resolve") {
+    const callId = boundedIdentity(request.params.callId, "callId");
+    const expectedTurnId = boundedIdentity(request.params.turnId, "turnId");
+    const pending = tools.get(callId);
+    if (
+      !pending ||
+      pending.turnId !== expectedTurnId ||
+      turnId !== expectedTurnId
+    ) {
+      throw new Error("tool call is stale or unknown");
+    }
+    if (!tools.delete(callId))
+      throw new Error("tool call lost its settlement race");
+    pending.cleanup();
+    if (request.params.error) {
+      pending.reject(
+        new Error(
+          safeText(
+            text(record(request.params.error).message, "Paperclip tool failed"),
+          ),
+        ),
+      );
+    } else {
+      pending.settle(structuredClone(request.params.result));
+    }
+    return { resolved: true };
+  }
+  if (request.command === "session.read") {
+    const activeHost = requireHost();
+    return {
+      identity: activeHost.identity(),
+      status: sanitizeRuntimeStatus(await activeHost.status()),
+    };
+  }
+  if (request.command === "session.snapshot") {
+    const activeHost = requireHost();
+    return {
+      identity: activeHost.identity(),
+      status: sanitizeRuntimeStatus(await activeHost.status()),
+      runId,
+      turnId,
+      sequence,
+      pendingToolCount: tools.size,
+      pendingInputCount: inputs.size,
+    };
+  }
+  if (request.command === "session.suspend") {
+    if (turnId || tools.size > 0 || inputs.size > 0) {
+      throw new Error("ACPX session is not at a safe suspension point");
+    }
+    const activeHost = requireHost();
+    const identity = activeHost.identity();
+    await activeHost.close({
+      reason: boundedOptionalText(
+        request.params.reason,
+        "Paperclip suspension",
+        4_000,
+      ),
+    });
+    host = null;
+    openParams = null;
+    runId = null;
+    return { suspended: true, identity };
+  }
+  if (request.command === "session.close") {
+    if (request.params.discardPersistentState === true) {
+      throw new Error(
+        "Codex ACPX persistent state cannot be discarded by this sidecar",
+      );
+    }
+    const closingTurnId = turnId;
+    if (closingTurnId) rejectTurnWaiters(closingTurnId, "ACPX session closed");
+    if (host) {
+      await host.close({
+        reason: boundedOptionalText(
+          request.params.reason,
+          "Paperclip close",
+          4_000,
+        ),
+      });
+    }
+    host = null;
+    openParams = null;
+    runId = null;
+    turnId = null;
+    return { closed: true, discarded: false };
+  }
+  throw new Error("unreachable ACPX sidecar command");
+}
+
+async function pumpTurn(
+  currentTurnId: string,
+  runtimeTurn: AcpxRuntimeTurn,
+): Promise<void> {
+  try {
+    for await (const event of runtimeTurn.events) {
+      emit("runtime.event", sanitizeRuntimeEvent(event), currentTurnId);
+    }
+    const result = await runtimeTurn.result;
+    emit("runtime.turn_terminal", boundedSidecarValue(result), currentTurnId);
+  } catch (error) {
+    emit(
+      "runtime.turn_terminal",
+      {
+        status: "failed",
+        error: { message: safeMessage(error), retryable: false },
+      },
+      currentTurnId,
+    );
+  } finally {
+    rejectTurnWaiters(currentTurnId, "ACPX turn became terminal");
+    if (turnId === currentTurnId) turnId = null;
+  }
+}
+
+async function waitForTool(call: RunnerToolCall): Promise<unknown> {
+  const activeTurnId = turnId;
+  if (!activeTurnId || call.signal.aborted) {
+    throw new Error("ACPX tool call is not bound to an active turn");
+  }
+  const callId = boundedIdentity(call.callId, "callId");
+  if (tools.has(callId)) throw new Error("ACPX tool call is duplicated");
+  const operationId = boundedIdentity(call.tool, "operationId");
+  if (
+    operationId === PRP_COMPLETION_TOOL_NAME ||
+    operationId === PRP_BLOCK_TOOL_NAME
+  ) {
+    const validation = validatePrpStructuredRunResult(call.arguments);
+    if (!validation.ok) {
+      throw new Error("ACPX semantic result failed PRP schema validation");
+    }
+    const blocked = validation.result.reportedWorkDisposition === "blocked";
+    if (
+      (operationId === PRP_BLOCK_TOOL_NAME && !blocked) ||
+      (operationId === PRP_COMPLETION_TOOL_NAME && blocked)
+    ) {
+      throw new Error(
+        "ACPX semantic result disposition does not match its terminal operation",
+      );
+    }
+    emit("runtime.event", {
+      type: "semantic_result",
+      callId,
+      operationId,
+      result: validation.result,
+    });
+    return { accepted: true };
+  }
+  if (tools.size >= MAX_PENDING_TOOLS) {
+    throw new Error("ACPX pending tool limit reached");
+  }
+  emit("runtime.tool_called", {
+    callId,
+    operationId,
+    input: boundedSidecarValue(record(call.arguments)),
+  });
+  return await new Promise((settle, reject) => {
+    const abort = () => {
+      const pending = tools.get(callId);
+      if (!pending || !tools.delete(callId)) return;
+      pending.cleanup();
+      reject(new Error("ACPX tool call was cancelled"));
+    };
+    call.signal.addEventListener("abort", abort, { once: true });
+    tools.set(callId, {
+      turnId: activeTurnId,
+      settle,
+      reject,
+      cleanup: () => call.signal.removeEventListener("abort", abort),
+    });
+    if (call.signal.aborted) abort();
+  });
+}
+
+async function waitForInput(
+  activeTurnId: string,
+  request: AcpElicitationRequest,
+  context: AcpElicitationContext,
+): Promise<AcpElicitationResponse> {
+  if (turnId !== activeTurnId || context.signal.aborted) {
+    return { action: "cancel" };
+  }
+  if (inputs.size >= MAX_PENDING_INPUTS) {
+    diagnostic(
+      "runtime_input_limit_reached",
+      "The active ACPX turn has too many pending input requests.",
+    );
+    return { action: "cancel" };
+  }
+  let normalized: NormalizedAcpForm | null;
+  try {
+    normalized = normalizeAcpFormElicitation(request);
+  } catch (error) {
+    diagnostic("runtime_input_rejected", safeMessage(error));
+    return { action: "cancel" };
+  }
+  if (!normalized) {
+    diagnostic(
+      "runtime_input_unsupported",
+      "The Codex ACPX provider requested an unsupported input mode.",
+    );
+    return { action: "cancel" };
+  }
+  if (
+    normalized.questionSet.questions.some(
+      (question) => question.textValidation?.pattern !== undefined,
+    )
+  ) {
+    diagnostic(
+      "runtime_input_pattern_unsupported",
+      "ACPX form patterns require a bounded regular expression dialect.",
+    );
+    return { action: "cancel" };
+  }
+  const requestId = stableRequestId(
+    activeTurnId,
+    ++requestSequence,
+    context.requestId,
+  );
+  emit(
+    "runtime.input_requested",
+    {
+      requestId,
+      questionSet: normalized.questionSet,
+      origin: {
+        adapter: "acpx-runtime-sidecar",
+        provider: "codex",
+        method: "elicitation/create",
+      },
+    },
+    activeTurnId,
+  );
+  return await new Promise((settle) => {
+    const abort = () => {
+      const pending = inputs.get(requestId);
+      if (!pending || !inputs.delete(requestId)) return;
+      pending.cleanup();
+      settle({ action: "cancel" });
+    };
+    context.signal.addEventListener("abort", abort, { once: true });
+    inputs.set(requestId, {
+      turnId: activeTurnId,
+      normalized,
+      settle,
+      cleanup: () => context.signal.removeEventListener("abort", abort),
+    });
+    if (context.signal.aborted) abort();
+  });
+}
+
+function elicitationResponse(
+  normalized: NormalizedAcpForm,
+  resolution: HarnessRuntimeRequestResolution,
+): AcpElicitationResponse {
+  if (resolution.action === "submit") {
+    if (!("response" in resolution)) {
+      throw new Error("ACPX form submission requires a canonical response");
+    }
+    return normalized.accept(resolution.response);
+  }
+  if (resolution.action === "decline" || resolution.action === "cancel") {
+    return { action: resolution.action };
+  }
+  throw new Error("unsupported ACPX input resolution action");
+}
+
+function rejectTurnWaiters(terminalTurnId: string, message: string): void {
+  for (const [callId, pending] of tools) {
+    if (pending.turnId !== terminalTurnId || !tools.delete(callId)) continue;
+    pending.cleanup();
+    pending.reject(new Error(message));
+  }
+  for (const [requestId, pending] of inputs) {
+    if (pending.turnId !== terminalTurnId || !inputs.delete(requestId))
+      continue;
+    pending.cleanup();
+    pending.settle({ action: "cancel" });
+  }
+}
+
+function sanitizeRuntimeEvent(event: AcpRuntimeEvent): Record<string, unknown> {
+  const runtimeType = text(record(event).type);
+  if (runtimeType === "plan") {
+    return {
+      type: "plan",
+      entries: sanitizeAcpxPlanEntries(record(event).entries),
+    };
+  }
+  if (event.type === "text_delta") {
+    return {
+      type: event.stream === "thought" ? "thinking" : "text_delta",
+      text: boundedOptionalText(event.text, "", 64 * 1024),
+      stream: event.stream,
+      tag: event.tag ?? null,
+      messageId: event.messageId?.slice(0, 240) ?? null,
+    };
+  }
+  if (event.type === "status") {
+    return boundedSidecarValue({
+      type: "status",
+      text: boundedOptionalText(event.text, "", 4_000),
+      tag: event.tag ?? null,
+      used: safeNonNegativeNumber(event.used),
+      size: safeNonNegativeNumber(event.size),
+      ...safeUsage(event.cost, event.breakdown),
+    });
+  }
+  if (event.type === "tool_call") {
+    return boundedSidecarValue(
+      {
+        type: "tool_call",
+        toolCallId: event.toolCallId?.slice(0, 240) ?? null,
+        status: event.status?.slice(0, 100) ?? null,
+        title: event.title?.slice(0, 4_000) ?? null,
+        kind: event.kind ?? null,
+        locations: safeLocations(event.locations),
+        ...safeOutput(event.rawOutput),
+      },
+      128 * 1024,
+    );
+  }
+  if (event.type === "error") {
+    return {
+      type: "error",
+      code: event.code?.slice(0, 160) ?? null,
+      message: safeText(event.message),
+      retryable: event.retryable ?? false,
+    };
+  }
+  if (event.type === "done") {
+    return {
+      type: "done",
+      stopReason: event.stopReason?.slice(0, 160) ?? null,
+    };
+  }
+  return {
+    type: "provider_notice",
+    category: `unclassified_acp_${safeCode(record(event).type, "unknown")}`,
+    summary: "The qualified ACP agent emitted an unclassified runtime update.",
+  };
+}
+
+function sanitizeRuntimeStatus(value: unknown): Record<string, unknown> {
+  const status = record(value);
+  const models = record(status.models);
+  return boundedSidecarValue(
+    {
+      summary: safeText(text(status.summary)).slice(0, 4_000) || null,
+      agentSessionId:
+        safeText(text(status.agentSessionId)).slice(0, 240) || null,
+      models: {
+        currentModelId:
+          safeText(text(models.currentModelId)).slice(0, 240) || null,
+        availableModelCount: Array.isArray(models.availableModelIds)
+          ? Math.min(models.availableModelIds.length, 100_000)
+          : 0,
+      },
+    },
+    32 * 1024,
+  );
+}
+
+function safeUsage(cost: unknown, breakdown: unknown): Record<string, unknown> {
+  const nativeCost = record(cost);
+  const nativeBreakdown = record(breakdown);
+  return {
+    cost:
+      cost === undefined || cost === null
+        ? null
+        : {
+            amount: safeNonNegativeNumber(nativeCost.amount),
+            currency: safeText(text(nativeCost.currency)).slice(0, 16) || null,
+          },
+    breakdown:
+      breakdown === undefined || breakdown === null
+        ? null
+        : {
+            inputTokens: safeNonNegativeNumber(nativeBreakdown.inputTokens),
+            outputTokens: safeNonNegativeNumber(nativeBreakdown.outputTokens),
+            cachedReadTokens: safeNonNegativeNumber(
+              nativeBreakdown.cachedReadTokens,
+            ),
+            cachedWriteTokens: safeNonNegativeNumber(
+              nativeBreakdown.cachedWriteTokens,
+            ),
+            thoughtTokens: safeNonNegativeNumber(nativeBreakdown.thoughtTokens),
+            totalTokens: safeNonNegativeNumber(nativeBreakdown.totalTokens),
+          },
+  };
+}
+
+function safeNonNegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+function safeLocations(
+  locations: Extract<AcpRuntimeEvent, { type: "tool_call" }>["locations"],
+): Array<Record<string, unknown>> {
+  if (!openParams) return [];
+  const cwd = resolve(openParams.workingDirectory);
+  return (locations ?? []).slice(0, 2_000).flatMap((location) => {
+    const candidate = record(location);
+    const rawPath = text(candidate.path, text(candidate.uri));
+    if (!rawPath) return [];
+    const absolute = isAbsolute(rawPath)
+      ? resolve(rawPath)
+      : resolve(cwd, rawPath);
+    const local = relative(cwd, absolute).replaceAll("\\", "/");
+    if (!local || local === ".." || local.startsWith("../")) return [];
+    return [{ path: local.slice(0, 4_000), line: candidate.line ?? null }];
+  });
+}
+
+function safeOutput(value: unknown): Record<string, unknown> {
+  if (value === undefined || value === null) {
+    return {
+      output: null,
+      outputBytes: 0,
+      outputTruncated: false,
+      outputDigest: null,
+    };
+  }
+  let raw: string;
+  try {
+    raw = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    return {
+      output: null,
+      outputBytes: 0,
+      outputTruncated: false,
+      outputDigest: null,
+    };
+  }
+  if (!raw) {
+    return {
+      output: null,
+      outputBytes: 0,
+      outputTruncated: false,
+      outputDigest: null,
+    };
+  }
+  const redacted = redactSecrets(raw);
+  const bytes = Buffer.from(redacted);
+  return {
+    output: bytes
+      .subarray(Math.max(0, bytes.length - 64 * 1024))
+      .toString("utf8"),
+    outputBytes: bytes.length,
+    outputTruncated: bytes.length > 64 * 1024,
+    outputDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+  };
+}
+
+function parseOpenParams(
+  value: Record<string, unknown>,
+): AcpxSidecarOpenParams {
+  requireCodexAgent(value.agent);
+  const model = requiredText(value.model, "model");
+  resolveQualifiedAcpxProfile("codex", model);
+  if (value.runtimeContext !== undefined && value.runtimeContext !== null) {
+    throw new Error(
+      "Codex ACPX sidecar runtime context must be pre-materialized",
+    );
+  }
+  if (
+    value.providerSessionKey !== undefined &&
+    value.providerSessionKey !== null
+  ) {
+    throw new Error(
+      "Codex ACPX replacement provider sessions are not available in this release",
+    );
+  }
+  return {
+    runtimeDirectory: requiredText(value.runtimeDirectory, "runtimeDirectory"),
+    normalizedSessionId: boundedIdentity(
+      value.normalizedSessionId,
+      "normalizedSessionId",
+    ),
+    workingDirectory: requiredText(value.workingDirectory, "workingDirectory"),
+    agent: "codex",
+    model,
+    permissionMode: requiredPermissionMode(value.permissionMode),
+    permissionModePinned: value.permissionModePinned === true,
+    systemInstructions: boundedText(
+      value.systemInstructions,
+      "systemInstructions",
+      1024 * 1024,
+    ),
+    runtimeContext: null,
+    tools: parseTools(value.tools),
+    ...(value.expectedIdentity === undefined || value.expectedIdentity === null
+      ? {}
+      : { expectedIdentity: parseExpectedIdentity(value.expectedIdentity) }),
+  };
+}
+
+function parseTools(value: unknown): Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(value) || value.length > 512) {
+    throw new Error("tools must be an array with at most 512 entries");
+  }
+  return value.map((tool, index) => {
+    if (typeof tool !== "object" || tool === null || Array.isArray(tool)) {
+      throw new Error(`tool ${index + 1} must be an object`);
+    }
+    return structuredClone(tool as Record<string, unknown>);
+  });
+}
+
+function parseExpectedIdentity(value: unknown): AcpxExpectedSessionIdentity {
+  const input = record(value);
+  if (input.kind !== "acpx")
+    throw new Error("ACPX recovery identity kind is invalid");
+  return {
+    kind: "acpx",
+    normalizedSessionId: boundedIdentity(
+      input.normalizedSessionId,
+      "expected normalizedSessionId",
+    ),
+    acpxRecordId: boundedIdentity(input.acpxRecordId, "expected acpxRecordId"),
+    backendSessionId: boundedIdentity(
+      input.backendSessionId,
+      "expected backendSessionId",
+    ),
+    agentSessionId: boundedIdentity(
+      input.agentSessionId,
+      "expected agentSessionId",
+    ),
+    profileDigest: digest(input.profileDigest, "expected profileDigest"),
+    workspaceDigest: digest(input.workspaceDigest, "expected workspaceDigest"),
+    requestedModel: boundedIdentity(
+      input.requestedModel,
+      "expected requestedModel",
+    ),
+    effectiveModel: boundedIdentity(
+      input.effectiveModel,
+      "expected effectiveModel",
+    ),
+    ...(input.permissionMode === undefined
+      ? {}
+      : { permissionMode: requiredPermissionMode(input.permissionMode) }),
+  };
+}
+
+function requiredPermissionMode(
+  value: unknown,
+): AcpxSidecarOpenParams["permissionMode"] {
+  if (
+    value === "approve-all" ||
+    value === "approve-reads" ||
+    value === "deny-all"
+  ) {
+    return value;
+  }
+  throw new Error(
+    "permissionMode must be approve-all, approve-reads, or deny-all",
+  );
+}
+
+function emit(
+  eventType: AcpxSidecarEvent["eventType"],
+  payload: Record<string, unknown>,
+  eventTurnId: string | null = turnId,
+): void {
+  if (sequence >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("ACPX sidecar event sequence exhausted");
+  }
+  writeFrame({
+    protocolVersion: ACPX_SIDECAR_PROTOCOL_VERSION,
+    sequence: ++sequence,
+    eventType,
+    runId,
+    turnId: eventTurnId,
+    payload,
+  });
+}
+
+function diagnostic(code: string, message: string): void {
+  const safe = safeText(message);
+  process.stderr.write(`[paperclip-acpx-sidecar] ${code}: ${safe}\n`);
+  emit("runtime.diagnostic", { code: code.slice(0, 160), message: safe });
+}
+
+function response(
+  id: number,
+  ok: boolean,
+  result?: Record<string, unknown>,
+  error?: AcpxSidecarResponse["error"],
+): void {
+  writeFrame({
+    protocolVersion: ACPX_SIDECAR_PROTOCOL_VERSION,
+    id,
+    ok,
+    ...(result ? { result } : {}),
+    ...(error ? { error } : {}),
+  });
+}
+
+function writeFrame(value: AcpxSidecarEvent | AcpxSidecarResponse): void {
+  const line = JSON.stringify(value);
+  if (Buffer.byteLength(line) > ACPX_SIDECAR_MAX_FRAME_BYTES) {
+    process.stderr.write("[paperclip-acpx-sidecar] output_frame_too_large\n");
+    return;
+  }
+  process.stdout.write(`${line}\n`);
+}
+
+function requireHost(): AcpxRuntimeHost {
+  if (!host) throw new Error("ACPX session is not open");
+  return host;
+}
+
+function requireCodexAgent(value: unknown): void {
+  if (value !== "codex") {
+    throw new Error("This production ACPX sidecar supports Codex only");
+  }
+}
+
+function requiredText(value: unknown, field: string): string {
+  const result = text(value).trim();
+  if (!result) throw new Error(`${field} is required`);
+  return result;
+}
+
+function boundedText(value: unknown, field: string, maxBytes: number): string {
+  const result = requiredText(value, field);
+  if (Buffer.byteLength(result) > maxBytes) {
+    throw new Error(`${field} exceeds its byte limit`);
+  }
+  return result;
+}
+
+function boundedOptionalText(
+  value: unknown,
+  fallback: string,
+  maxBytes: number,
+): string {
+  const result = text(value, fallback);
+  const bytes = Buffer.from(result);
+  return bytes.length <= maxBytes
+    ? result
+    : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
+function boundedIdentity(value: unknown, field: string): string {
+  const result = requiredText(value, field);
+  if (result.length > 240 || /[\u0000-\u001f\u007f]/.test(result)) {
+    throw new Error(`${field} is invalid`);
+  }
+  return result;
+}
+
+function positiveInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return Number(value);
+}
+
+function safeCode(value: unknown, fallback: string): string {
+  const code = text(value, fallback)
+    .replace(/[^A-Za-z0-9._:-]+/g, "_")
+    .slice(0, 160);
+  return code || fallback;
+}
+
+function digest(value: unknown, field: string): string {
+  const result = requiredText(value, field);
+  if (!/^sha256:[a-f0-9]{64}$/.test(result)) {
+    throw new Error(`${field} is invalid`);
+  }
+  return result;
+}
+
+function stableRequestId(
+  activeTurnId: string,
+  index: number,
+  nativeRequestId: string | number | null,
+): string {
+  const digest = createHash("sha256")
+    .update(
+      `${activeTurnId}:${index}:${typeof nativeRequestId}:${String(nativeRequestId)}`,
+    )
+    .digest("hex")
+    .slice(0, 24);
+  return `acpx-input-${digest}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function safeText(value: unknown, maxBytes = 8_192): string {
+  const message = redactSecrets(text(value, String(value)));
+  const bytes = Buffer.from(message);
+  return bytes.length <= maxBytes
+    ? message
+    : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
+function redactSecrets(value: string): string {
+  return value.replace(
+    /(key|token|secret|password|authorization)\s*[:=]\s*[^\s,}\]]+/gi,
+    "$1=[REDACTED]",
+  );
+}
+
+function safeMessage(error: unknown): string {
+  return safeText(error instanceof Error ? error.message : error);
+}
+
+async function shutdown(reason: string): Promise<void> {
+  if (closing) return;
+  closing = true;
+  if (turnId) rejectTurnWaiters(turnId, reason);
+  if (host) await host.close({ reason }).catch(() => undefined);
+  host = null;
+  openParams = null;
+  runId = null;
+  turnId = null;
+  process.exitCode = 0;
+}
