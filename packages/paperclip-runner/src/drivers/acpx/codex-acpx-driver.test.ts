@@ -186,6 +186,31 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
+  it("bounds a non-settling host close before publishing interruption", async () => {
+    const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+    fixture.host.close.mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    const session = await fixture.driver.openSession({
+      runId: "run-close-timeout",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.interrupted");
+    await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+
+    await expect(
+      session.close({ reason: "runtime close stalled" }),
+    ).resolves.toBeUndefined();
+    await expect(terminalEvents).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventType: "turn.interrupted" }),
+      ]),
+    );
+  });
+
   it("bounds lagging streams while preserving omission and terminal events", async () => {
     const fixture = driverFixture(
       {},
@@ -208,6 +233,15 @@ describe("Codex ACPX harness driver", () => {
     fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
 
     await vi.waitFor(async () => {
+      const snapshot = await session.snapshot();
+      expect(snapshot.terminalTurns).toHaveLength(1);
+    });
+    await session.startTurn({
+      message: { role: "user", text: "Produce another large turn." },
+    });
+    await vi.waitFor(async () => {
+      const snapshot = await session.snapshot();
+      expect(snapshot.terminalTurns).toHaveLength(2);
       const transcript = await session.transcript!();
       expect(transcript.eventCount).toBeGreaterThan(1_024);
       expect(transcript.complete).toBe(false);
@@ -232,15 +266,20 @@ describe("Codex ACPX harness driver", () => {
             code: "event_stream_retention_limit",
           }),
         }),
-        expect.objectContaining({ eventType: "turn.completed" }),
       ]),
     );
+    expect(
+      retained.filter((event) => event.eventType === "turn.completed"),
+    ).toHaveLength(2);
   });
 });
 
 function driverFixture(
   overrides: Partial<CodexAcpxDriverOptions> = {},
-  fixtureOptions: { runtimeEvents?: readonly AcpRuntimeEvent[] } = {},
+  fixtureOptions: {
+    runtimeEvents?: readonly AcpRuntimeEvent[];
+    closeSettlementTimeoutMs?: number;
+  } = {},
 ): {
   driver: CodexAcpxDriver;
   host: ReturnType<typeof fakeHost>;
@@ -284,6 +323,7 @@ function driverFixture(
       hostOptions = options;
       return host;
     },
+    closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
   };
   const driver = new CodexAcpxDriver(
     {

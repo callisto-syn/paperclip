@@ -82,12 +82,15 @@ interface CodexAcpxHost {
 
 export interface CodexAcpxDriverDependencies {
   openHost?: (options: OpenAcpxRuntimeHostOptions) => Promise<CodexAcpxHost>;
+  /** Internal test seam; production uses the fixed close-settlement bound. */
+  closeSettlementTimeoutMs?: number;
 }
 
 /** Codex-only HarnessDriver backed by the admitted ACPX runtime host. */
 export class CodexAcpxDriver implements HarnessDriver {
   readonly #options: CodexAcpxDriverOptions;
   readonly #openHost: NonNullable<CodexAcpxDriverDependencies["openHost"]>;
+  readonly #closeSettlementTimeoutMs: number;
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -108,6 +111,9 @@ export class CodexAcpxDriver implements HarnessDriver {
         AcpxRuntimeHost.open(hostOptions, {
           openRuntime: openCodexAcpxRuntime,
         }));
+    this.#closeSettlementTimeoutMs =
+      dependencies.closeSettlementTimeoutMs ??
+      CLOSE_TURN_SETTLEMENT_TIMEOUT_MS;
   }
 
   async descriptor(): Promise<HarnessDriverDescriptor> {
@@ -183,6 +189,7 @@ export class CodexAcpxDriver implements HarnessDriver {
         input,
         dynamicToolHandler: this.#options.dynamicToolHandler,
         now: this.#options.now ?? (() => new Date()),
+        closeSettlementTimeoutMs: this.#closeSettlementTimeoutMs,
       });
       return session;
     } catch (error) {
@@ -199,7 +206,11 @@ class CodexAcpxSession implements HarnessSession {
   readonly #input: OpenHarnessSessionInput;
   readonly #dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
   readonly #now: () => Date;
-  readonly #events = new AsyncQueue<PrpEvent>(MAX_BUFFERED_EVENTS);
+  readonly #closeSettlementTimeoutMs: number;
+  readonly #events = new AsyncQueue<PrpEvent>(
+    MAX_BUFFERED_EVENTS,
+    isCriticalBufferedEvent,
+  );
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
@@ -225,6 +236,7 @@ class CodexAcpxSession implements HarnessSession {
     input: OpenHarnessSessionInput;
     dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
     now: () => Date;
+    closeSettlementTimeoutMs: number;
   }) {
     const identity = input.host.identity();
     if (identity.normalizedSessionId !== input.input.normalizedSessionId) {
@@ -234,6 +246,7 @@ class CodexAcpxSession implements HarnessSession {
     this.#input = structuredClone(input.input);
     this.#dynamicToolHandler = input.dynamicToolHandler;
     this.#now = input.now;
+    this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
     this.#sourceInstanceId = stableId(
       "paperclip-acpx",
       input.input.normalizedSessionId,
@@ -444,12 +457,15 @@ class CodexAcpxSession implements HarnessSession {
     const closingTurnId = this.#activeTurnId;
     const pump = this.#activePump;
     let closeError: unknown = null;
-    try {
-      await this.#host.close({ reason });
-    } catch (error) {
+    const hostClose = this.#host.close({ reason }).catch((error) => {
       closeError = error;
-    }
-    if (pump) await settleWithin(pump, CLOSE_TURN_SETTLEMENT_TIMEOUT_MS);
+    });
+    const settlement = pump
+      ? Promise.all([hostClose, pump.catch(() => undefined)]).then(
+          () => undefined,
+        )
+      : hostClose;
+    await settleWithin(settlement, this.#closeSettlementTimeoutMs);
     if (closingTurnId && !this.#terminalTurns.has(closingTurnId)) {
       if (this.#activeTurnId === closingTurnId) this.#activeTurnId = null;
       this.#terminalTurns.set(
@@ -737,14 +753,24 @@ function isTerminalEvent(eventType: PrpEvent["eventType"]): boolean {
   );
 }
 
+function isCriticalBufferedEvent(event: PrpEvent): boolean {
+  return (
+    event.priority === 0 ||
+    event.eventType === "harness.diagnostic" ||
+    isTerminalEvent(event.eventType)
+  );
+}
+
 class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #items: T[] = [];
   readonly #waiters: Array<(result: IteratorResult<T>) => void> = [];
   readonly #maxItems: number;
+  readonly #isCritical: (item: T) => boolean;
   #closed = false;
 
-  constructor(maxItems: number) {
+  constructor(maxItems: number, isCritical: (item: T) => boolean) {
     this.#maxItems = maxItems;
+    this.#isCritical = isCritical;
   }
 
   /** Returns true when the oldest buffered item had to be omitted. */
@@ -756,7 +782,14 @@ class AsyncQueue<T> implements AsyncIterable<T> {
       return false;
     }
     const omitted = this.#items.length >= this.#maxItems;
-    if (omitted) this.#items.shift();
+    if (omitted) {
+      const expendable = this.#items.findIndex(
+        (candidate) => !this.#isCritical(candidate),
+      );
+      if (expendable >= 0) this.#items.splice(expendable, 1);
+      else if (!this.#isCritical(item)) return true;
+      else this.#items.shift();
+    }
     this.#items.push(item);
     return omitted;
   }
