@@ -43,6 +43,11 @@ import {
   type OpenAcpxRuntimeHostOptions,
 } from "./runtime-host.js";
 
+const MAX_BUFFERED_EVENTS = 512;
+const MAX_TRANSCRIPT_EVENTS = 1_024;
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
+
 export interface CodexAcpxDynamicToolCall {
   tool: string;
   callId: string;
@@ -194,8 +199,8 @@ class CodexAcpxSession implements HarnessSession {
   readonly #input: OpenHarnessSessionInput;
   readonly #dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
   readonly #now: () => Date;
-  readonly #events = new AsyncQueue<PrpEvent>();
-  readonly #transcript: PrpEvent[] = [];
+  readonly #events = new AsyncQueue<PrpEvent>(MAX_BUFFERED_EVENTS);
+  readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
   #sourceSequence = 0;
@@ -207,6 +212,12 @@ class CodexAcpxSession implements HarnessSession {
   #usage: Record<string, unknown> | null = null;
   #assistantText = "";
   #closed = false;
+  #eventStreamClosed = false;
+  #activePump: Promise<void> | null = null;
+  #closePromise: Promise<void> | null = null;
+  #transcriptBytes = 0;
+  #transcriptEventCount = 0;
+  #transcriptOmitted = false;
 
   constructor(input: {
     host: CodexAcpxHost;
@@ -269,7 +280,13 @@ class CodexAcpxSession implements HarnessSession {
       );
       throw error;
     }
-    void this.#pumpTurn(turnId, turn);
+    const pump = this.#pumpTurn(turnId, turn);
+    this.#activePump = pump;
+    void pump
+      .finally(() => {
+        if (this.#activePump === pump) this.#activePump = null;
+      })
+      .catch(() => undefined);
     return { turnId };
   }
 
@@ -365,10 +382,10 @@ class CodexAcpxSession implements HarnessSession {
   async transcript(): Promise<HarnessTranscriptSnapshot> {
     return {
       schema: "paperclip-runner/harness-transcript/v1",
-      complete: true,
-      eventCount: this.#transcript.length,
-      events: structuredClone(this.#transcript),
-      omissionReason: null,
+      complete: !this.#transcriptOmitted,
+      eventCount: this.#transcriptEventCount,
+      events: structuredClone(this.#transcript.map(({ event }) => event)),
+      omissionReason: this.#transcriptOmitted ? "retention_limit" : null,
     };
   }
 
@@ -415,10 +432,38 @@ class CodexAcpxSession implements HarnessSession {
   }
 
   async close(input: { reason: string }): Promise<void> {
+    if (this.#closePromise) return await this.#closePromise;
     if (this.#closed) return;
     this.#closed = true;
+    this.#closePromise = this.#finishClose(input.reason);
+    return await this.#closePromise;
+  }
+
+  async #finishClose(reason: string): Promise<void> {
+    const closingTurnId = this.#activeTurnId;
+    const pump = this.#activePump;
+    let closeError: unknown = null;
+    try {
+      await this.#host.close({ reason });
+    } catch (error) {
+      closeError = error;
+    }
+    if (pump) await settleWithin(pump, CLOSE_TURN_SETTLEMENT_TIMEOUT_MS);
+    if (closingTurnId && !this.#terminalTurns.has(closingTurnId)) {
+      if (this.#activeTurnId === closingTurnId) this.#activeTurnId = null;
+      this.#terminalTurns.set(
+        closingTurnId,
+        canonicalJson({ status: "interrupted" }),
+      );
+      this.#emit(
+        "turn.interrupted",
+        { status: "interrupted", stopReason: "session_closed" },
+        { turnId: closingTurnId },
+      );
+    }
+    this.#eventStreamClosed = true;
     this.#events.close();
-    await this.#host.close({ reason: input.reason });
+    if (closeError) throw closeError;
   }
 
   async #pumpTurn(turnId: string, turn: AcpxRuntimeTurn): Promise<void> {
@@ -430,6 +475,7 @@ class CodexAcpxSession implements HarnessSession {
         this.#mapRuntimeEvent(normalizeToolEvent(event), turnId, ++index);
       }
       const result = await turn.result;
+      if (this.#terminalTurns.has(turnId)) return;
       if (this.#activeTurnId === turnId) this.#activeTurnId = null;
       if (result.status === "completed") {
         const finalText = this.#assistantText.trim();
@@ -494,13 +540,26 @@ class CodexAcpxSession implements HarnessSession {
         );
       }
     } catch (error) {
+      if (this.#terminalTurns.has(turnId)) return;
       if (this.#activeTurnId === turnId) this.#activeTurnId = null;
-      this.#terminalTurns.set(turnId, canonicalJson({ status: "failed" }));
-      this.#emit(
-        "turn.failed",
-        { status: "failed", error: { message: safeMessage(error) } },
-        { turnId },
-      );
+      if (this.#closed) {
+        this.#terminalTurns.set(
+          turnId,
+          canonicalJson({ status: "interrupted" }),
+        );
+        this.#emit(
+          "turn.interrupted",
+          { status: "interrupted", stopReason: "session_closed" },
+          { turnId },
+        );
+      } else {
+        this.#terminalTurns.set(turnId, canonicalJson({ status: "failed" }));
+        this.#emit(
+          "turn.failed",
+          { status: "failed", error: { message: safeMessage(error) } },
+          { turnId },
+        );
+      }
     }
   }
 
@@ -553,6 +612,7 @@ class CodexAcpxSession implements HarnessSession {
     payload: Record<string, unknown>,
     refs: { turnId?: string; itemId?: string } = {},
   ): void {
+    if (this.#eventStreamClosed) return;
     const sourceSeq = ++this.#sourceSequence;
     const event: PrpEvent = {
       schema: "paperclip.prp.event.v1",
@@ -570,8 +630,34 @@ class CodexAcpxSession implements HarnessSession {
       emittedAt: this.#now().toISOString(),
       payload: structuredClone(payload),
     };
-    this.#transcript.push(structuredClone(event));
+    this.#retainTranscriptEvent(event);
     this.#events.push(event);
+  }
+
+  #retainTranscriptEvent(event: PrpEvent): void {
+    this.#transcriptEventCount += 1;
+    const retained = structuredClone(event);
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(retained));
+    } catch {
+      this.#transcriptOmitted = true;
+      return;
+    }
+    if (bytes > MAX_TRANSCRIPT_BYTES) {
+      this.#transcriptOmitted = true;
+      return;
+    }
+    this.#transcript.push({ event: retained, bytes });
+    this.#transcriptBytes += bytes;
+    while (
+      this.#transcript.length > MAX_TRANSCRIPT_EVENTS ||
+      this.#transcriptBytes > MAX_TRANSCRIPT_BYTES
+    ) {
+      const omitted = this.#transcript.shift();
+      if (omitted) this.#transcriptBytes -= omitted.bytes;
+      this.#transcriptOmitted = true;
+    }
   }
 
   #assertOpen(): void {
@@ -633,13 +719,20 @@ function safeMessage(error: unknown): string {
 class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #items: T[] = [];
   readonly #waiters: Array<(result: IteratorResult<T>) => void> = [];
+  readonly #maxItems: number;
   #closed = false;
+  #failure: Error | null = null;
+
+  constructor(maxItems: number) {
+    this.#maxItems = maxItems;
+  }
 
   push(item: T): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#failure) return;
     const waiter = this.#waiters.shift();
     if (waiter) waiter({ done: false, value: item });
-    else this.#items.push(item);
+    else if (this.#items.length < this.#maxItems) this.#items.push(item);
+    else this.#failure = new Error("Codex ACPX event buffer limit exceeded");
   }
 
   close(): void {
@@ -658,10 +751,26 @@ class AsyncQueue<T> implements AsyncIterable<T> {
           return Promise.resolve({ done: false, value: item });
         }
         if (this.#closed) {
+          if (this.#failure) return Promise.reject(this.#failure);
           return Promise.resolve({ done: true, value: undefined });
         }
+        if (this.#failure) return Promise.reject(this.#failure);
         return new Promise((resolve) => this.#waiters.push(resolve));
       },
     };
   }
+}
+
+async function settleWithin(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    promise.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
 }

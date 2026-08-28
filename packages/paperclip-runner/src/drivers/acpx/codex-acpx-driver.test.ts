@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { AcpRuntimeEvent } from "acpx/runtime";
+
 import {
   PRP_BLOCK_TOOL_NAME,
   PRP_COMPLETION_TOOL_NAME,
@@ -154,9 +156,80 @@ describe("Codex ACPX harness driver", () => {
     );
     await session.close({ reason: "cancelled" });
   });
+
+  it("emits an interrupted terminal before closing an active stream", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-close",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.interrupted");
+    await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+
+    await Promise.all([
+      session.close({ reason: "operator shutdown" }),
+      session.close({ reason: "duplicate shutdown" }),
+    ]);
+
+    await expect(terminalEvents).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventType: "turn.interrupted" }),
+      ]),
+    );
+    await expect(session.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      terminalTurns: [expect.objectContaining({ turnId: expect.any(String) })],
+    });
+    expect(fixture.host.close).toHaveBeenCalledOnce();
+  });
+
+  it("bounds transcript retention and fails a lagging event stream closed", async () => {
+    const fixture = driverFixture(
+      {},
+      {
+        runtimeEvents: Array.from({ length: 1_100 }, (_, index) => ({
+          type: "text_delta" as const,
+          text: `chunk-${index}`,
+          stream: "output" as const,
+        })),
+      },
+    );
+    const session = await fixture.driver.openSession({
+      runId: "run-bounds",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    await session.startTurn({
+      message: { role: "user", text: "Produce many events." },
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+
+    await vi.waitFor(async () => {
+      const transcript = await session.transcript!();
+      expect(transcript.eventCount).toBeGreaterThan(1_024);
+      expect(transcript.complete).toBe(false);
+      expect(transcript.events.length).toBeLessThanOrEqual(1_024);
+      expect(transcript.omissionReason).toBe("retention_limit");
+    });
+
+    await session.close({ reason: "bounds verified" });
+    const iterator = session.events()[Symbol.asyncIterator]();
+    for (let index = 0; index < 512; index += 1) {
+      await expect(iterator.next()).resolves.toMatchObject({ done: false });
+    }
+    await expect(iterator.next()).rejects.toThrow(
+      "event buffer limit exceeded",
+    );
+  });
 });
 
-function driverFixture(overrides: Partial<CodexAcpxDriverOptions> = {}): {
+function driverFixture(
+  overrides: Partial<CodexAcpxDriverOptions> = {},
+  fixtureOptions: { runtimeEvents?: readonly AcpRuntimeEvent[] } = {},
+): {
   driver: CodexAcpxDriver;
   host: ReturnType<typeof fakeHost>;
   hostOptions: OpenAcpxRuntimeHostOptions | null;
@@ -168,27 +241,31 @@ function driverFixture(overrides: Partial<CodexAcpxDriverOptions> = {}): {
     promptStarted: Promise.resolve(),
     events: {
       async *[Symbol.asyncIterator]() {
-        yield {
-          type: "text_delta" as const,
-          text: "Task complete.",
-          stream: "output" as const,
-        };
-        yield {
-          type: "tool_call" as const,
-          toolCallId: "provider-tool-1",
-          title: "Read",
-          kind: "read" as const,
-          status: "pending",
-          tag: "tool_call",
-          text: "Reading",
-        };
+        yield* fixtureOptions.runtimeEvents ?? [
+          {
+            type: "text_delta" as const,
+            text: "Task complete.",
+            stream: "output" as const,
+          },
+          {
+            type: "tool_call" as const,
+            toolCallId: "provider-tool-1",
+            title: "Read",
+            kind: "read" as const,
+            status: "pending",
+            tag: "tool_call",
+            text: "Reading",
+          },
+        ];
       },
     },
     result: result.promise,
     cancel: vi.fn(async () => undefined),
     closeStream: vi.fn(async () => undefined),
   };
-  const host = fakeHost(turn);
+  const host = fakeHost(turn, () =>
+    result.resolve({ status: "cancelled", stopReason: "session_closed" }),
+  );
   let hostOptions: OpenAcpxRuntimeHostOptions | null = null;
   const dependencies: CodexAcpxDriverDependencies = {
     openHost: async (options) => {
@@ -222,7 +299,7 @@ function driverFixture(overrides: Partial<CodexAcpxDriverOptions> = {}): {
   };
 }
 
-function fakeHost(turn: AcpxRuntimeTurn) {
+function fakeHost(turn: AcpxRuntimeTurn, onClose: () => void) {
   return {
     identity: () => ({
       schema: "paperclip.runner.acpx-identity.v1" as const,
@@ -256,7 +333,9 @@ function fakeHost(turn: AcpxRuntimeTurn) {
     })),
     startTurn: vi.fn(() => turn),
     interruptActiveTurn: vi.fn(async () => undefined),
-    close: vi.fn(async () => undefined),
+    close: vi.fn(async () => {
+      onClose();
+    }),
   };
 }
 
