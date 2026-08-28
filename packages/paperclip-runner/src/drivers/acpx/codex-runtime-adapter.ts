@@ -47,6 +47,13 @@ class AcpxRuntimeCloseTimeoutError extends Error {
   }
 }
 
+class AcpxSessionHandshakeTimeoutError extends Error {
+  constructor() {
+    super("ACPX session handshake exceeded its admission deadline");
+    this.name = "AcpxSessionHandshakeTimeoutError";
+  }
+}
+
 export interface CodexAcpxRuntimeDependencies {
   createRuntime?: (options: AcpRuntimeOptions) => AcpRuntime;
   createRegistry?: (input: {
@@ -178,24 +185,35 @@ export async function openCodexAcpxRuntime(
       ),
   });
 
+  const handshake = Promise.resolve().then(() =>
+    runtime.ensureSession({
+      sessionKey: options.providerSessionKey,
+      agent: "codex",
+      mode: "persistent",
+      cwd: options.cwd,
+      sessionOptions: {
+        model: options.profile.qualificationModel,
+        ...(options.systemInstructions
+          ? { systemPrompt: { append: options.systemInstructions } }
+          : {}),
+      },
+    }),
+  );
   let handle: AcpRuntimeHandle;
   try {
     handle = await boundedSessionHandshake(
-      runtime.ensureSession({
-        sessionKey: options.providerSessionKey,
-        agent: "codex",
-        mode: "persistent",
-        cwd: options.cwd,
-        sessionOptions: {
-          model: options.profile.qualificationModel,
-          ...(options.systemInstructions
-            ? { systemPrompt: { append: options.systemInstructions } }
-            : {}),
-        },
-      }),
+      handshake,
       dependencies.sessionHandshakeTimeoutMs ?? SESSION_HANDSHAKE_TIMEOUT_MS,
     );
   } catch (error) {
+    if (error instanceof AcpxSessionHandshakeTimeoutError) {
+      retainLateHandshakeCleanup(
+        runtime,
+        handshake,
+        children,
+        runtimeCloseTimeoutMs,
+      );
+    }
     const cleanupErrors = await cleanupFailedRuntimeOpen(
       runtime,
       failedHandshakeHandle,
@@ -248,10 +266,7 @@ async function boundedSessionHandshake(
       handshake,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () =>
-            reject(
-              new Error("ACPX session handshake exceeded its admission deadline"),
-            ),
+          () => reject(new AcpxSessionHandshakeTimeoutError()),
           timeoutMs,
         );
         timer.unref();
@@ -260,6 +275,26 @@ async function boundedSessionHandshake(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function retainLateHandshakeCleanup(
+  runtime: AcpRuntime,
+  handshake: Promise<AcpRuntimeHandle>,
+  children: SpawnedChildSet,
+  runtimeCloseTimeoutMs: number,
+): void {
+  void handshake.then(
+    async (lateHandle) => {
+      await cleanupFailedRuntimeOpen(
+        runtime,
+        lateHandle,
+        children,
+        "ACPX session handshake completed after its admission deadline",
+        runtimeCloseTimeoutMs,
+      );
+    },
+    () => undefined,
+  );
 }
 
 async function cleanupFailedRuntimeOpen(
@@ -480,6 +515,7 @@ async function boundedCloseOutcome(
 class SpawnedChildSet {
   readonly #children = new Set<ChildProcess>();
   readonly #errors = new Set<unknown>();
+  #terminating = false;
 
   add(child: ChildProcess): ChildProcess {
     this.#children.add(child);
@@ -495,41 +531,19 @@ class SpawnedChildSet {
     child.on("error", onError);
     child.once("exit", forget);
     child.once("close", forgetAndDetach);
+    if (this.#terminating) {
+      void terminateChild(child).then(
+        (errors) => errors.forEach((error) => this.#errors.add(error)),
+        (error) => this.#errors.add(error),
+      );
+    }
     return child;
   }
 
   async terminate(): Promise<unknown[]> {
-    const errors: unknown[] = [];
+    this.#terminating = true;
     const children = [...this.#children];
-    await Promise.all(
-      children.map(async (child) => {
-        if (running(child)) {
-          const terminateOutcome = await signalAndWaitForExit(
-            child,
-            "SIGTERM",
-            PROVIDER_TERM_EXIT_TIMEOUT_MS,
-          );
-          if (terminateOutcome.error !== undefined) {
-            pushUnique(errors, terminateOutcome.error);
-          }
-          if (!terminateOutcome.exited && running(child)) {
-            const killOutcome = await signalAndWaitForExit(
-              child,
-              "SIGKILL",
-              PROVIDER_KILL_EXIT_TIMEOUT_MS,
-            );
-            if (killOutcome.error !== undefined) {
-              pushUnique(errors, killOutcome.error);
-            }
-            if (!killOutcome.exited && running(child)) {
-              errors.push(
-                new Error("ACPX provider did not exit after SIGKILL"),
-              );
-            }
-          }
-        }
-      }),
-    );
+    const errors = (await Promise.all(children.map(terminateChild))).flat();
     // A failed spawn or signal can emit `error` and then `close` before this
     // method snapshots the live children. Keep those errors independently of
     // child membership, report each object once, and drain them only after all
@@ -538,6 +552,33 @@ class SpawnedChildSet {
     this.#errors.clear();
     return errors;
   }
+}
+
+async function terminateChild(child: ChildProcess): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  if (!running(child)) return errors;
+  const terminateOutcome = await signalAndWaitForExit(
+    child,
+    "SIGTERM",
+    PROVIDER_TERM_EXIT_TIMEOUT_MS,
+  );
+  if (terminateOutcome.error !== undefined) {
+    pushUnique(errors, terminateOutcome.error);
+  }
+  if (!terminateOutcome.exited && running(child)) {
+    const killOutcome = await signalAndWaitForExit(
+      child,
+      "SIGKILL",
+      PROVIDER_KILL_EXIT_TIMEOUT_MS,
+    );
+    if (killOutcome.error !== undefined) {
+      pushUnique(errors, killOutcome.error);
+    }
+    if (!killOutcome.exited && running(child)) {
+      errors.push(new Error("ACPX provider did not exit after SIGKILL"));
+    }
+  }
+  return errors;
 }
 
 function running(child: ChildProcess): boolean {
