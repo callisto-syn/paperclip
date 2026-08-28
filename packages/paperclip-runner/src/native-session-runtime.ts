@@ -75,6 +75,7 @@ async function consumeTurn(
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
+  externalSignal?: AbortSignal,
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const appendAbort = new AbortController();
@@ -85,6 +86,23 @@ async function consumeTurn(
   const handoffFailure = new Promise<never>((_resolve, reject) => {
     rejectHandoff = reject;
   });
+  let removeExternalAbort = () => {};
+  const externalAbortFailure = externalSignal
+    ? new Promise<never>((_resolve, reject) => {
+        const abort = () => {
+          const reason = externalSignal.reason ?? new Error("native event consumption aborted");
+          stopConsumer = true;
+          appendAbort.abort(reason);
+          reject(reason);
+        };
+        if (externalSignal.aborted) {
+          abort();
+        } else {
+          externalSignal.addEventListener("abort", abort, { once: true });
+          removeExternalAbort = () => externalSignal.removeEventListener("abort", abort);
+        }
+      })
+    : new Promise<never>(() => undefined);
   const clearInputTimer = (requestId: string) => {
     const inputTimer = inputTimers.get(requestId);
     if (inputTimer !== undefined) clearTimeout(inputTimer);
@@ -173,6 +191,7 @@ async function consumeTurn(
         }, timeoutMs);
       }),
       handoffFailure,
+      externalAbortFailure,
     ]);
   } catch (error) {
     stopConsumer = true;
@@ -199,6 +218,7 @@ async function consumeTurn(
     await iteratorTeardown;
     await consumer.catch(() => undefined);
     if (timer !== undefined) clearTimeout(timer);
+    removeExternalAbort();
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
   }
@@ -390,12 +410,14 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         }
       : null;
     if (!completed) {
+      const consumptionAbort = new AbortController();
       const consuming = consumeTurn(
         session,
         options.controlPlane,
         options.timeoutMs ?? 900_000,
         options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
         options.resolveGovernedWait,
+        consumptionAbort.signal,
       );
       // Event consumption must begin before startTurn so an eager provider cannot
       // outrun us. Observe its rejection immediately, though: if startTurn or
@@ -437,10 +459,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         }
       } catch (error) {
         // Consumption starts before provider launch so eager events cannot be
-        // lost. If launch or its checkpoint fails, close the required session
-        // boundary and wait for every already-started durable append before
-        // reporting the failure.
-        await session.close({ reason: "Native session turn start failed." }).catch(() => undefined);
+        // lost. If launch or its checkpoint fails, abort any in-flight append
+        // before joining cleanup so the failed turn cannot commit late or
+        // strand execution on a never-settling durability call.
+        consumptionAbort.abort(error);
         await consuming.catch(() => undefined);
         throw error;
       }

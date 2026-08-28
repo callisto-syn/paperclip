@@ -230,6 +230,8 @@ describe("executeNativeSession recovery", () => {
     const appendStarted = new Promise<void>((resolve) => { markAppendStarted = resolve; });
     let releaseAppend = () => {};
     const appendReleased = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    let appendCommitted = false;
+    const close = vi.fn(async () => undefined);
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -253,7 +255,7 @@ describe("executeNativeSession recovery", () => {
           lineage: [],
         };
       },
-      async close() {},
+      close,
     };
     const backend: NativeSessionBackend = {
       async descriptor() {
@@ -269,9 +271,17 @@ describe("executeNativeSession recovery", () => {
     const port: ControlPlanePort = {
       async openRun() {},
       async checkpointSession() {},
-      async appendEvent() {
+      async appendEvent(_event, options) {
         markAppendStarted();
-        await appendReleased;
+        await Promise.race([
+          appendReleased,
+          new Promise<never>((_resolve, reject) => {
+            const rejectAbort = () => reject(options?.signal.reason ?? new Error("append aborted"));
+            if (options?.signal.aborted) rejectAbort();
+            else options?.signal.addEventListener("abort", rejectAbort, { once: true });
+          }),
+        ]);
+        appendCommitted = true;
         return {
           cursor: 1,
           highestContiguousSourceSeq: 1,
@@ -282,19 +292,20 @@ describe("executeNativeSession recovery", () => {
       async completeRun() {},
     };
 
-    let executionSettled = false;
     const execution = executeNativeSession({
       input,
       backend,
       controlPlane: port,
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
-    }).finally(() => { executionSettled = true; });
+    });
     await appendStarted;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(executionSettled).toBe(false);
-    releaseAppend();
     await expect(execution).rejects.toThrow("start turn failed");
+    expect(close).toHaveBeenCalled();
+    expect(appendCommitted).toBe(false);
+    releaseAppend();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(appendCommitted).toBe(false);
   });
 
   it("stops and closes a timed-out consumer even when the caller requested a warm session", async () => {
