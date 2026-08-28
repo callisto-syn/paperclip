@@ -116,6 +116,22 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     assert_eq!(completed[0].payload["target"], serde_json::Value::Null);
     assert_eq!(completed[0].payload["outputTruncated"], true);
     assert!(!completed[0].payload.to_string().contains("top-secret"));
+
+    let windows_absolute = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-2",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"C:\\Users\\alice\\repo\\src\\main.rs"}]
+        }),
+    );
+    assert_eq!(
+        windows_absolute[0].payload["target"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]

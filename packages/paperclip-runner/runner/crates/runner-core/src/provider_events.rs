@@ -676,6 +676,9 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .replace('\\', "/");
     if path.is_empty()
         || path.starts_with('/')
+        || path
+            .split_once(':')
+            .is_some_and(|(drive, rest)| drive.len() == 1 && rest.starts_with('/'))
         || path.split('/').any(|segment| segment == "..")
         || path.contains("://")
     {
