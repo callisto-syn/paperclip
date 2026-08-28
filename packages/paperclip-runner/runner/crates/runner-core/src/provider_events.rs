@@ -141,6 +141,8 @@ pub fn project_acpx_state_event(
                         "schema": "paperclip.runtime_request.v2",
                         "requestKind": "runtime",
                         "requestId": request_id,
+                        "turnId": context.turn_id,
+                        "itemId": context.item_id,
                         "type": "input",
                         "status": "pending",
                         "prompt": prompt,

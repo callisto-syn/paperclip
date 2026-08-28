@@ -62,6 +62,8 @@ fn projects_structured_input_and_semantic_results_without_provider_envelopes() {
     });
     assert_eq!(input[0].event_type, "runtime_request.created");
     assert_eq!(input[0].payload["request"]["requestId"], "request-1");
+    assert_eq!(input[0].payload["request"]["turnId"], "turn-1");
+    assert_eq!(input[0].payload["request"]["itemId"], "item-1");
     assert_eq!(input[0].payload["request"]["input"], question_set);
     assert_eq!(
         input[0].payload["request"]["origin"]["adapter"],
