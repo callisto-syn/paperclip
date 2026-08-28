@@ -49,6 +49,16 @@ export class CapabilityMockControlPlaneError extends Error {
     this.name = "CapabilityMockControlPlaneError";
   }
 }
+
+export interface CapabilitySemanticToolRuntimeStore {
+  load(runId: string): CapabilitySemanticToolRuntimeSnapshot | null;
+  save(runId: string, snapshot: CapabilitySemanticToolRuntimeSnapshot): void;
+}
+
+export interface CapabilityMockControlPlaneAdapterOptions {
+  /** Optional process-independent owner for durable semantic-tool receipts. */
+  semanticToolRuntimeStore?: CapabilitySemanticToolRuntimeStore;
+}
 /**
  * Deterministic, serializable control-plane authority for Capability scenarios.
  *
@@ -57,8 +67,15 @@ export class CapabilityMockControlPlaneError extends Error {
  */
 export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlPlanePort {
   #state: CapabilityFixtureState;
+  readonly #semanticToolRuntimeStore:
+    | CapabilitySemanticToolRuntimeStore
+    | undefined;
 
-  constructor(seed: CapabilityFixtureSeed | CapabilityFixtureState = {}) {
+  constructor(
+    seed: CapabilityFixtureSeed | CapabilityFixtureState = {},
+    options: CapabilityMockControlPlaneAdapterOptions = {},
+  ) {
+    this.#semanticToolRuntimeStore = options.semanticToolRuntimeStore;
     this.#state = isFixtureState(seed)
       ? clone(seed)
       : createCapabilityFixtureState(seed);
@@ -68,7 +85,10 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     this.#validateState();
   }
 
-  static restore(serialized: string): CapabilityMockControlPlaneAdapter {
+  static restore(
+    serialized: string,
+    options: CapabilityMockControlPlaneAdapterOptions = {},
+  ): CapabilityMockControlPlaneAdapter {
     let parsed: unknown;
     try {
       parsed = JSON.parse(serialized);
@@ -84,7 +104,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         "fixture state schema must be paperclip.capability.mock-state.v1",
       );
     }
-    return new CapabilityMockControlPlaneAdapter(parsed);
+    return new CapabilityMockControlPlaneAdapter(parsed, options);
   }
 
   async start(): Promise<void> {
@@ -589,6 +609,16 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     runId: string,
   ): CapabilitySemanticToolRuntimeSnapshot | null {
     this.#run(runId);
+    const durable = this.#semanticToolRuntimeStore?.load(runId) ?? null;
+    if (durable !== null) {
+      if (!isSemanticToolRuntimeSnapshot(durable)) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          "durable semantic tool runtime snapshot is invalid",
+        );
+      }
+      return clone(durable);
+    }
     const snapshot = this.#state.semanticToolRuntimes?.[runId];
     return snapshot === undefined ? null : clone(snapshot);
   }
@@ -604,7 +634,9 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         "semantic tool runtime snapshot is invalid",
       );
     }
-    this.#state.semanticToolRuntimes![runId] = clone(snapshot);
+    const durableSnapshot = clone(snapshot);
+    this.#semanticToolRuntimeStore?.save(runId, durableSnapshot);
+    this.#state.semanticToolRuntimes![runId] = clone(durableSnapshot);
   }
 
   decisionRecords(): readonly CapabilityDecisionRecord[] {

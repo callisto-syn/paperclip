@@ -4,8 +4,12 @@ import type {
   CapabilityFixtureApproval,
   CapabilityFixtureSeed,
   CapabilityJsonValue,
+  CapabilitySemanticToolRuntimeSnapshot,
 } from "../mock-core/capability-control-plane-types.js";
-import { CapabilityMockControlPlaneAdapter } from "../mock-core/capability-mock-control-plane-adapter.js";
+import {
+  CapabilityMockControlPlaneAdapter,
+  type CapabilitySemanticToolRuntimeStore,
+} from "../mock-core/capability-mock-control-plane-adapter.js";
 import {
   CAPABILITY_OPTIONAL_TOOL_CATALOGS,
   CAPABILITY_SEMANTIC_TOOL_CATALOG,
@@ -39,6 +43,7 @@ async function runtimeFor(options: {
   policy?: ConstructorParameters<typeof CapabilitySemanticToolRuntime>[0]["policy"];
   seed?: CapabilityFixtureSeed;
   resolveSecretValue?: (name: string) => string | null;
+  semanticToolRuntimeStore?: CapabilitySemanticToolRuntimeStore;
 } = {}) {
   const actor = {
     id: "actor-1",
@@ -49,26 +54,29 @@ async function runtimeFor(options: {
     budgetId: "budget-actor-1",
     capabilityGrants: options.actorGrants ?? [],
   };
-  const adapter = new CapabilityMockControlPlaneAdapter({
-    ...options.seed,
-    actors: [actor],
-    tasks: options.seed?.tasks ?? [{
-      id: "task-1",
-      companyId: "company-1",
-      identifier: "MCK-1",
-      title: "Tool boundary fixture",
-      description: "Protected task details",
-      status: "todo",
-      priority: "high",
-      workMode: options.workMode ?? "standard",
-      parentId: null,
-      assigneeActorId: "actor-1",
-      checkoutRunId: null,
-      executionRunId: null,
-      startedAt: null,
-      completedAt: null,
-    }],
-  });
+  const adapter = new CapabilityMockControlPlaneAdapter(
+    {
+      ...options.seed,
+      actors: [actor],
+      tasks: options.seed?.tasks ?? [{
+        id: "task-1",
+        companyId: "company-1",
+        identifier: "MCK-1",
+        title: "Tool boundary fixture",
+        description: "Protected task details",
+        status: "todo",
+        priority: "high",
+        workMode: options.workMode ?? "standard",
+        parentId: null,
+        assigneeActorId: "actor-1",
+        checkoutRunId: null,
+        executionRunId: null,
+        startedAt: null,
+        completedAt: null,
+      }],
+    },
+    { semanticToolRuntimeStore: options.semanticToolRuntimeStore },
+  );
   await adapter.start();
   await adapter.openFixtureRun(OPEN);
   return {
@@ -425,8 +433,17 @@ describe("Capability exposure and authorization", () => {
   });
 
   it("fails closed while a restored extension is in flight and reconciles its durable receipt", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () =>
+        durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+    };
     const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
     });
     const invocation = {
       operationId: "upsert_case",
@@ -438,6 +455,7 @@ describe("Capability exposure and authorization", () => {
     const serializedWhileInFlight = adapter.serialize();
     const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
       serializedWhileInFlight,
+      { semanticToolRuntimeStore: durableStore },
     );
     const restored = new CapabilitySemanticToolRuntime({
       adapter: restoredAdapter,
@@ -454,12 +472,6 @@ describe("Capability exposure and authorization", () => {
     });
     const completed = await inFlight;
     expect(completed).toMatchObject({ ok: true });
-    const durableCompletion = adapter.loadSemanticToolRuntime(OPEN.identity.runId);
-    if (durableCompletion === null) throw new Error("expected durable extension completion");
-    restoredAdapter.saveSemanticToolRuntime(
-      OPEN.identity.runId,
-      durableCompletion,
-    );
 
     const recovered = await restored.invoke(invocation);
     expect(recovered).toMatchObject({
