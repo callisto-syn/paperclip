@@ -714,26 +714,15 @@ fn has_scheme_qualified_path(path: &str) -> bool {
     path.split_once(':').is_some_and(|(scheme, suffix)| {
         // A one-letter prefix is ambiguous with a valid POSIX filename (and
         // is handled as a drive selector on Windows). Multi-letter URI
-        // schemes followed by either one or two normalized separators are
-        // never workspace-relative display paths.
+        // schemes followed by a normalized separator are rejected without an
+        // allowlist: URI schemes are extensible, and this display-only boundary
+        // must fail closed for unfamiliar or compound schemes.
         let valid_scheme = scheme.len() > 1
             && scheme.bytes().enumerate().all(|(index, byte)| {
                 byte.is_ascii_alphabetic()
                     || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
             });
-        if !valid_scheme || !suffix.starts_with('/') {
-            return false;
-        }
-        // `name:/child` is a valid relative POSIX path whose first directory
-        // contains a colon. Reject the unambiguous `://` form and the common
-        // external schemes whose backslashes normalize to a single slash.
-        // Windows filenames cannot contain this colon spelling at all.
-        cfg!(windows)
-            || suffix.starts_with("//")
-            || matches!(
-                scheme.to_ascii_lowercase().as_str(),
-                "file" | "ftp" | "ftps" | "git" | "http" | "https" | "s3" | "ssh" | "ws" | "wss"
-            )
+        valid_scheme && suffix.starts_with('/')
     })
 }
 
@@ -779,19 +768,19 @@ mod tests {
     }
 
     #[test]
-    fn classifies_single_separator_colon_components_for_the_runner_platform() {
-        for location in ["src:/main.rs", "foo:/bar"] {
-            let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            if cfg!(windows) {
-                assert_eq!(normalized, Value::Null);
-            } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
-            }
+    fn rejects_every_scheme_qualified_display_path() {
+        for location in [
+            "src:/main.rs",
+            "custom://host/path",
+            r"sftp:\host\secret",
+            "git+ssh:/host/repo",
+        ] {
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": location}))),
+                Value::Null,
+                "scheme-qualified provider path should be rejected: {location}",
+            );
         }
-        assert_eq!(
-            safe_acpx_location(Some(&json!({"path": "custom://host/path"}))),
-            Value::Null,
-        );
     }
 
     #[test]
