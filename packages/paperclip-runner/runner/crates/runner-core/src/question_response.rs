@@ -41,7 +41,7 @@ pub fn validate_question_response(
     let answers = response
         .get("answers")
         .and_then(Value::as_object)
-        .expect("schema-validated question response has answers");
+        .ok_or_else(|| LocalRunnerError::invalid("question response answers are malformed"))?;
     let question_ids = questions
         .iter()
         .filter_map(|question| question.get("id").and_then(Value::as_str))
@@ -58,7 +58,11 @@ pub fn validate_question_response(
     }
 
     for question in questions {
-        validate_answer(question, answers.get(question["id"].as_str().unwrap()))?;
+        let question_id = question
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| LocalRunnerError::invalid("persisted question id is malformed"))?;
+        validate_answer(question, answers.get(question_id))?;
     }
     Ok(())
 }
@@ -83,16 +87,21 @@ fn validate_answer(question: &Value, answer: Option<&Value>) -> Result<(), Local
     };
     let answer = answer
         .as_object()
-        .expect("schema-validated question answer is an object");
+        .ok_or_else(|| LocalRunnerError::invalid("question response answer is malformed"))?;
     let selected = answer
         .get("selectedOptionIds")
         .and_then(Value::as_array)
         .map(|values| {
             values
                 .iter()
-                .map(|value| value.as_str().expect("schema-validated option id"))
-                .collect::<Vec<_>>()
-        });
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        LocalRunnerError::invalid("question response option id is malformed")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let text = answer.get("text").and_then(Value::as_str);
     let custom = answer.get("customText").and_then(Value::as_str);
     let has_value = selected.as_ref().is_some_and(|values| !values.is_empty())
