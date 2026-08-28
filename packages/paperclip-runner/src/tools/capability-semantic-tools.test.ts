@@ -498,6 +498,68 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("renews a live extension lease before another runtime can reclaim it", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () =>
+          durableSnapshot === null ? null : structuredClone(durableSnapshot),
+        save: (_runId, snapshot) => {
+          durableSnapshot = structuredClone(snapshot);
+        },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+            return false;
+          }
+          durableSnapshot = structuredClone(snapshot);
+          return true;
+        },
+      };
+      const { adapter, runtime } = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+      });
+      const invocation = {
+        operationId: "upsert_case",
+        input: { key: "case-live", body: "Case body" },
+        idempotencyKey: "live-case",
+      } as const;
+
+      const inFlight = runtime.invoke(invocation);
+      expect(durableSnapshot?.extensions[0]).toMatchObject({
+        status: "pending",
+        leaseExpiresAtMs: 30_000,
+      });
+      vi.advanceTimersByTime(10_000);
+      expect(durableSnapshot?.extensions[0]).toMatchObject({
+        status: "pending",
+        leaseExpiresAtMs: 40_000,
+      });
+
+      const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+        adapter.serialize(),
+        { semanticToolRuntimeStore: durableStore },
+      );
+      const restored = new CapabilitySemanticToolRuntime({
+        adapter: restoredAdapter,
+        runId: OPEN.identity.runId,
+        scenarioGrants: ["cases:write"],
+        now: () => 30_001,
+      });
+      await expect(restored.invoke(invocation)).resolves.toMatchObject({
+        ok: false,
+        error: {
+          code: "operation_unsupported",
+          reason: "idempotency_recovery_in_flight",
+        },
+      });
+      await expect(inFlight).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reclaims an expired durable extension lease after executor loss", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",

@@ -59,6 +59,9 @@ const RUNTIME_STATE_BY_ADAPTER = new WeakMap<
   Map<string, CapabilitySemanticRuntimeState>
 >();
 const EXTENSION_EXECUTION_LEASE_MS = 30_000;
+const EXTENSION_EXECUTION_HEARTBEAT_MS = Math.floor(
+  EXTENSION_EXECUTION_LEASE_MS / 3,
+);
 const RUNTIME_PERSIST_CAS_ATTEMPTS = 8;
 
 export class CapabilitySemanticToolRuntime {
@@ -446,6 +449,14 @@ export class CapabilitySemanticToolRuntime {
       value,
     }));
     record.execution = execution;
+    const leaseHeartbeat = setInterval(() => {
+      this.#renewExtensionExecutionLease(key, record);
+    }, EXTENSION_EXECUTION_HEARTBEAT_MS);
+    leaseHeartbeat.unref();
+    void execution.then(
+      () => clearInterval(leaseHeartbeat),
+      () => clearInterval(leaseHeartbeat),
+    );
     void execution.catch(() => {
       const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
       const currentExtension = current?.extensions.find(
@@ -466,6 +477,34 @@ export class CapabilitySemanticToolRuntime {
       }
     });
     return true;
+  }
+
+  #renewExtensionExecutionLease(
+    key: string,
+    record: ExtensionIdempotencyRecord,
+  ): boolean {
+    if (record.ownerId === null) return false;
+    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const extension = durable?.extensions.find((candidate) => candidate.key === key);
+      if (durable === null || extension?.status !== "pending" ||
+        extension.ownerId !== record.ownerId) return false;
+      const replacement = structuredClone(durable);
+      const leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
+      replacement.extensions = replacement.extensions.map((candidate) =>
+        candidate.key === key
+          ? { ...candidate, leaseExpiresAtMs }
+          : candidate,
+      );
+      if (!this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) continue;
+      record.leaseExpiresAtMs = leaseExpiresAtMs;
+      return true;
+    }
+    return false;
   }
 
   #completeExtensionExecution(
