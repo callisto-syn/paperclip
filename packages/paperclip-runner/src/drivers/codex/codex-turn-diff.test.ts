@@ -64,6 +64,15 @@ describe("Codex turn diff parser", () => {
       "-old",
       "+new",
     ].join("\n"))).toEqual([]);
+
+    expect(parseCodexTurnDiff([
+      String.raw`diff --git a/C:\Windows\secret.txt b/C:\Windows\secret.txt`,
+      String.raw`--- a/C:\Windows\secret.txt`,
+      String.raw`+++ b/C:\Windows\secret.txt`,
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n"))).toEqual([]);
   });
 
   it("keeps file headers distinct from hunk content with marker prefixes", () => {

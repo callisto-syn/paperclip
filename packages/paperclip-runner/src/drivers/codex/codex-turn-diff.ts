@@ -21,6 +21,10 @@ function gitDiffPath(value: string): string | null {
       return null;
     }
   }
+  if (candidate.startsWith("a/") || candidate.startsWith("b/")) candidate = candidate.slice(2);
+  // Reject a native Windows drive path before slash normalization so the
+  // workspace boundary is explicit for either separator spelling.
+  if (/^[A-Za-z]:[\\/]/u.test(candidate)) return null;
   candidate = candidate.replaceAll("\\", "/");
   if (candidate.startsWith("a/") || candidate.startsWith("b/")) candidate = candidate.slice(2);
   if (
