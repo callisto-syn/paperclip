@@ -71,8 +71,7 @@ export class HarnessDriverBackend implements NativeSessionBackend {
       snapshot.terminalTurns?.at(-1)?.turnId ??
       null;
     const recoveredTerminal =
-      snapshot.terminal ??
-      (recoveredSemanticTurn && snapshot.semanticResult
+      recoveredSemanticTurn && snapshot.semanticResult
         ? {
             schema: "paperclip.prp.terminal.v1" as const,
             turnTerminalState: "completed" as const,
@@ -80,7 +79,7 @@ export class HarnessDriverBackend implements NativeSessionBackend {
             reportedWorkDisposition:
               snapshot.semanticResult.reportedWorkDisposition,
           }
-        : null);
+        : snapshot.terminal ?? null;
     const persisted: PersistedHarnessSession = {
       driverKind: snapshot.driverKind ?? snapshot.backendKind,
       driverSessionId: snapshot.sessionId,

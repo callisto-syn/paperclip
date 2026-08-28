@@ -393,6 +393,71 @@ describe("HarnessDriverBackend", () => {
     });
   });
 
+  it("does not pair a recovered semantic result with another turn's terminal", async () => {
+    let recoveredPersisted: PersistedHarnessSession | null = null;
+    class RecoveredHarnessSession extends FakeHarnessSession {
+      override async snapshot(): Promise<PersistedHarnessSession> {
+        if (recoveredPersisted === null) throw new Error("missing recovered snapshot");
+        return structuredClone(recoveredPersisted);
+      }
+    }
+    const recoveryDriver: HarnessDriver = {
+      ...driver,
+      async recoverSession(snapshot) {
+        recoveredPersisted = snapshot;
+        return { recovered: true, session: new RecoveredHarnessSession() };
+      },
+    };
+    const backend = new HarnessDriverBackend(recoveryDriver);
+    const semanticFingerprint = canonicalTestJson(result);
+    const recovery = await backend.recoverSession({
+      backendKind: "runner",
+      driverKind: "fake",
+      sessionId: "driver-1",
+      providerSessionId: "provider-1",
+      identity: {
+        runId: "run-cross-turn-terminal",
+        sessionId: "session-1",
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+      },
+      semanticResult: result,
+      terminal: {
+        schema: "paperclip.prp.terminal.v1",
+        turnTerminalState: "cancelled",
+        runTerminalState: "cancelled",
+        reportedWorkDisposition: "yielded",
+      },
+      activeTurnId: null,
+      terminalTurns: [
+        {
+          turnId: "turn-with-result",
+          fingerprint: JSON.stringify({
+            status: "completed",
+            semanticResult: semanticFingerprint,
+          }),
+        },
+        {
+          turnId: "later-cancelled-turn",
+          fingerprint: JSON.stringify({ status: "cancelled" }),
+        },
+      ],
+    });
+
+    expect(recovery).toMatchObject({ recovered: true });
+    await expect(recovery.session!.result()).resolves.toEqual({
+      result,
+      terminal: {
+        schema: "paperclip.prp.terminal.v1",
+        turnTerminalState: "completed",
+        runTerminalState: "succeeded",
+        reportedWorkDisposition: "done",
+      },
+      turnId: "turn-with-result",
+    });
+  });
+
   it("delegates native runtime-request resolutions to the harness session", async () => {
     runtimeResolutions.length = 0;
     const backend = new HarnessDriverBackend(driver);
