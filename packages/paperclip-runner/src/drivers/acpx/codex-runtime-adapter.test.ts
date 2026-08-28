@@ -132,16 +132,16 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("retains a stalled close while allowing a fresh cleanup attempt", async () => {
+  it("reconciles a stalled close before releasing cleanup ownership", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
-      let resolveStalledClose: (() => void) | undefined;
+      let rejectStalledClose: ((error: Error) => void) | undefined;
       vi.mocked(runtime.close)
         .mockImplementationOnce(
           () =>
-            new Promise<void>((resolve) => {
-              resolveStalledClose = resolve;
+            new Promise<void>((_resolve, reject) => {
+              rejectStalledClose = reject;
             }),
         )
         .mockResolvedValueOnce(undefined);
@@ -179,13 +179,28 @@ describe("Codex ACPX runtime adapter", () => {
 
       const retry = port.close({ reason: "cleanup ownership retried" });
       await Promise.resolve();
-      await expect(retry).resolves.toBeUndefined();
       expect(runtime.close).toHaveBeenCalledTimes(2);
+      const retryRejection = expect(retry).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({
+            message: "ACPX runtime close exceeded its shutdown timeout",
+          }),
+        ],
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await retryRejection;
 
-      // The original protocol attempt is still observed and may settle after
-      // the fresh attempt establishes that runtime cleanup has completed.
-      resolveStalledClose?.();
+      // The fresh attempt established that the runtime closed, but ownership
+      // is retained until the earlier attempt's failure is reported once.
+      rejectStalledClose?.(new Error("original close failed"));
       await Promise.resolve();
+      await expect(port.close({ reason: "reconcile original close" }))
+        .rejects.toMatchObject({
+          errors: [expect.objectContaining({ message: "original close failed" })],
+        });
+      await expect(port.close({ reason: "cleanup ownership released" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

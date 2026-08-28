@@ -236,13 +236,16 @@ function runtimePort(
   runtimeCloseTimeoutMs: number,
 ): AcpxRuntimePort {
   let runtimeClosed = false;
+  let runtimeCloseSucceeded = false;
   let runtimeCloseAttempt: Promise<unknown | null> | undefined;
   const ownedRuntimeCloseAttempts = new Set<Promise<unknown | null>>();
 
   function startRuntimeCloseAttempt(reason: string): Promise<unknown | null> {
-    const attempt = runtimeCloseOutcome(runtime, handle, reason);
+    const attempt = runtimeCloseOutcome(runtime, handle, reason).then((error) => {
+      if (error === null) runtimeCloseSucceeded = true;
+      return error;
+    });
     ownedRuntimeCloseAttempts.add(attempt);
-    void attempt.then(() => ownedRuntimeCloseAttempts.delete(attempt));
     return attempt;
   }
 
@@ -277,20 +280,24 @@ function runtimePort(
       });
     },
     async close(input) {
+      if (runtimeCloseSucceeded) runtimeClosed = true;
       if (!runtimeClosed && !runtimeCloseAttempt) {
         runtimeCloseAttempt = startRuntimeCloseAttempt(input.reason);
       }
-      const attempt = runtimeCloseAttempt;
-      const closeError = runtimeClosed
+      const attempts = [...ownedRuntimeCloseAttempts];
+      const closeError = attempts.length === 0
         ? null
         : await boundedCloseOutcome(
-            attempt ?? startRuntimeCloseAttempt(input.reason),
+            runtimeCloseBarrier(attempts),
             runtimeCloseTimeoutMs,
           );
-      if (closeError === null) {
-        runtimeClosed = true;
+      if (runtimeCloseSucceeded) runtimeClosed = true;
+      if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
+        // A settled error is retained until this call reports it. Only then
+        // may a later close relinquish ownership based on a successful retry.
+        ownedRuntimeCloseAttempts.clear();
         runtimeCloseAttempt = undefined;
-      } else if (runtimeCloseAttempt === attempt) {
+      } else {
         // Retain and observe a timed-out attempt until it settles, but do not
         // let it permanently prevent a bounded recovery attempt from invoking
         // the protocol close again. Settled failures are retried the same way.
@@ -307,6 +314,18 @@ function runtimePort(
       }
     },
   };
+}
+
+async function runtimeCloseBarrier(
+  attempts: readonly Promise<unknown | null>[],
+): Promise<unknown | null> {
+  const errors = (await Promise.all(attempts)).filter(
+    (error): error is Exclude<unknown, null> => error !== null,
+  );
+  if (errors.length === 0) return null;
+  return errors.length === 1
+    ? errors[0]
+    : new AggregateError(errors, "ACPX runtime close attempts failed");
 }
 
 async function boundedRuntimeClose(
