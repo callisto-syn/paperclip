@@ -13,6 +13,16 @@ import {
 } from "../../contracts/harness-driver.js";
 import { redactCodexDiagnostic } from "./app-server-transport.js";
 
+const NATIVE_OPTION_VALUES = new WeakMap<
+  PaperclipQuestionSet,
+  ReadonlyMap<string, ReadonlyMap<string, unknown>>
+>();
+
+interface NormalizedQuestionOptions {
+  options: NonNullable<PaperclipQuestion["options"]>;
+  nativeValues: ReadonlyMap<string, unknown>;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -139,18 +149,21 @@ function exactRedactedQuestionText(
   );
 }
 
-function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
+function codexOptions(value: unknown): NormalizedQuestionOptions | undefined {
   if (!Array.isArray(value)) return undefined;
   if (value.length > 128) throw new Error("Codex question exceeds 128 options");
-  return value.map((rawOption, index) => {
+  const nativeValues = new Map<string, unknown>();
+  const options = value.map((rawOption, index) => {
     const option = record(rawOption);
-    const label = exactOptionLabel(
-      text(option.label, text(option.value, text(rawOption))),
-      index,
+    const nativeLabel = text(
+      option.label,
+      text(option.value, text(rawOption, `Option ${index + 1}`)),
     );
+    const id = stableQuestionId(option.id, index).replace(/^question-/, "option-");
+    nativeValues.set(id, nativeLabel);
     return {
-      id: stableQuestionId(option.id, index).replace(/^question-/, "option-"),
-      label,
+      id,
+      label: exactOptionLabel(nativeLabel, index),
       ...(text(option.description).length > 0
         ? {
             description: exactRedactedQuestionText(
@@ -161,19 +174,23 @@ function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]>
         : {}),
     };
   });
+  return { options, nativeValues };
 }
 
-function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<PaperclipQuestion["options"]> {
+function jsonSchemaOptions(schema: Record<string, unknown>): NormalizedQuestionOptions {
   const values = Array.isArray(schema.enum)
     ? schema.enum
     : Array.isArray(schema.oneOf)
       ? schema.oneOf.map((entry) => record(entry).const)
       : [];
   if (values.length > 128) throw new Error("Codex question exceeds 128 options");
-  return values.map((value, index) => {
+  const nativeValues = new Map<string, unknown>();
+  const options = values.map((value, index) => {
     const oneOf = Array.isArray(schema.oneOf) ? record(schema.oneOf[index]) : {};
+    const id = `option-${index + 1}`;
+    nativeValues.set(id, structuredClone(value));
     return {
-      id: `option-${index + 1}`,
+      id,
       label: exactOptionLabel(
         text(
           oneOf.title,
@@ -191,6 +208,15 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
         : {}),
     };
   });
+  return { options, nativeValues };
+}
+
+function retainNativeOptionValues(
+  questionSet: PaperclipQuestionSet,
+  nativeValues: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
+): PaperclipQuestionSet {
+  NATIVE_OPTION_VALUES.set(questionSet, nativeValues);
+  return questionSet;
 }
 
 /** Codex-native requests are converted once, before they enter PRP. */
@@ -198,11 +224,16 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
   if (method === "item/tool/requestUserInput" || method === "tool/requestUserInput") {
     if (!Array.isArray(params.questions) || params.questions.length === 0) return null;
     if (params.questions.length > 64) throw new Error("Codex question form exceeds 64 questions");
+    const nativeValues = new Map<string, ReadonlyMap<string, unknown>>();
     const questions = params.questions.map((rawQuestion, index): PaperclipQuestion => {
       const question = record(rawQuestion);
-      const options = codexOptions(question.options);
+      const normalizedOptions = codexOptions(question.options);
+      const questionId = stableQuestionId(question.id, index);
+      if (normalizedOptions !== undefined) {
+        nativeValues.set(questionId, normalizedOptions.nativeValues);
+      }
       return {
-        id: stableQuestionId(question.id, index),
+        id: questionId,
         ...(text(question.header).length > 0
           ? {
               header: exactRedactedQuestionText(
@@ -227,14 +258,16 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         // Codex requestUserInput questions do not normally declare requiredness.
         // Do not invent a required constraint when the provider omitted one.
         required: question.required === true,
-        answerMode: options && options.length > 0
+        answerMode: normalizedOptions && normalizedOptions.options.length > 0
           ? question.multiSelect === true || question.multiple === true ? "multi_select" : "single_select"
           : "text",
-        ...(options && options.length > 0 ? { options } : {}),
+        ...(normalizedOptions && normalizedOptions.options.length > 0
+          ? { options: normalizedOptions.options }
+          : {}),
         ...(question.isOther === true || question.allowOther === true
           ? { customAnswer: { enabled: true, label: "Other", placeholder: "Enter another answer" } }
           : {}),
-        ...(!(options && options.length > 0) && (typeof question.minLength === "number" || typeof question.maxLength === "number")
+        ...(!(normalizedOptions && normalizedOptions.options.length > 0) && (typeof question.minLength === "number" || typeof question.maxLength === "number")
           ? { textValidation: {
               ...(typeof question.minLength === "number" ? { minLength: question.minLength } : {}),
               ...(typeof question.maxLength === "number" ? { maxLength: question.maxLength } : {}),
@@ -242,7 +275,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
           : {}),
       };
     });
-    return parsePaperclipQuestionSet({
+    return retainNativeOptionValues(parsePaperclipQuestionSet({
       schema: PAPERCLIP_QUESTION_SET_SCHEMA,
       title: exactRedactedQuestionText(
         text(params.title, "Codex needs your input"),
@@ -263,7 +296,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         1_000,
       ),
       questions,
-    });
+    }), nativeValues);
   }
   if (method !== "mcpServer/elicitation/request") return null;
   const requestedSchema = record(params.requestedSchema ?? params.schema);
@@ -271,17 +304,24 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
   const required = new Set(Array.isArray(requestedSchema.required) ? requestedSchema.required.filter((entry): entry is string => typeof entry === "string") : []);
   const propertyEntries = Object.entries(properties);
   if (propertyEntries.length > 64) throw new Error("Codex question form exceeds 64 questions");
+  const nativeValues = new Map<string, ReadonlyMap<string, unknown>>();
   const questions = propertyEntries.map(([id, rawProperty]): PaperclipQuestion => {
     const property = record(rawProperty);
     const propertyType = text(property.type);
     const itemSchema = record(property.items);
     const selectSchema = propertyType === "array" ? itemSchema : property;
-    const options = propertyType === "boolean"
-      ? [{ id: "true", label: "Yes" }, { id: "false", label: "No" }]
+    const normalizedOptions = propertyType === "boolean"
+      ? {
+          options: [{ id: "true", label: "Yes" }, { id: "false", label: "No" }],
+          nativeValues: new Map<string, unknown>([["true", true], ["false", false]]),
+        }
       : jsonSchemaOptions(selectSchema);
-    const answerMode: PaperclipQuestion["answerMode"] = propertyType === "array" && options.length > 0
+    if (normalizedOptions.options.length > 0) {
+      nativeValues.set(id, normalizedOptions.nativeValues);
+    }
+    const answerMode: PaperclipQuestion["answerMode"] = propertyType === "array" && normalizedOptions.options.length > 0
       ? "multi_select"
-      : options.length > 0
+      : normalizedOptions.options.length > 0
         ? "single_select"
         : "text";
     const inputType = propertyType === "integer" ? "integer" : propertyType === "number" ? "number" : "text";
@@ -310,7 +350,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         : {}),
       required: required.has(id),
       answerMode,
-      ...(options.length > 0 ? { options } : {}),
+      ...(normalizedOptions.options.length > 0 ? { options: normalizedOptions.options } : {}),
       ...(answerMode === "text" ? { textValidation: {
         inputType,
         ...(typeof property.minLength === "number" ? { minLength: property.minLength } : {}),
@@ -322,7 +362,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
     };
   });
   if (questions.length === 0) return null;
-  return parsePaperclipQuestionSet({
+  return retainNativeOptionValues(parsePaperclipQuestionSet({
     schema: PAPERCLIP_QUESTION_SET_SCHEMA,
     title: "A tool needs your input",
     ...(text(params.message).length > 0
@@ -335,7 +375,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       : {}),
     submitLabel: "Submit",
     questions,
-  });
+  }), nativeValues);
 }
 
 export function runtimeRequestProtocolPayload(request: HarnessRuntimeRequest): Record<string, unknown> {
@@ -364,8 +404,12 @@ function canonicalCodexAnswers(
   for (const question of request.input?.questions ?? []) {
     const answer = response.answers[question.id];
     if (answer === undefined) continue;
+    const nativeValues = request.input === undefined
+      ? undefined
+      : NATIVE_OPTION_VALUES.get(request.input)?.get(question.id);
     const labels = (answer.selectedOptionIds ?? []).map((optionId) =>
-      question.options?.find((option) => option.id === optionId)?.label,
+      nativeValues?.get(optionId) ??
+        question.options?.find((option) => option.id === optionId)?.label,
     ).filter((label): label is string => typeof label === "string");
     if (answer.text !== undefined) labels.push(answer.text);
     if (answer.customText !== undefined) labels.push(answer.customText);
@@ -374,7 +418,12 @@ function canonicalCodexAnswers(
   return result;
 }
 
-function jsonSchemaOptionValue(schema: Record<string, unknown>, optionId: string): unknown {
+function jsonSchemaOptionValue(
+  schema: Record<string, unknown>,
+  optionId: string,
+  nativeValues: ReadonlyMap<string, unknown> | undefined,
+): unknown {
+  if (nativeValues?.has(optionId)) return structuredClone(nativeValues.get(optionId));
   if (optionId === "true") return true;
   if (optionId === "false") return false;
   const index = Number(optionId.match(/^option-(\d+)$/)?.[1] ?? "0") - 1;
@@ -396,14 +445,20 @@ function canonicalElicitationContent(
     if (answer === undefined) continue;
     const property = record(properties[question.id]);
     const itemSchema = record(property.items);
+    const nativeValues = request.input === undefined
+      ? undefined
+      : NATIVE_OPTION_VALUES.get(request.input)?.get(question.id);
     if (question.answerMode === "text") {
       const value = answer.text ?? "";
       content[question.id] = property.type === "integer" || property.type === "number" ? Number(value) : value;
     } else if (question.answerMode === "multi_select") {
-      content[question.id] = (answer.selectedOptionIds ?? []).map((optionId) => jsonSchemaOptionValue(itemSchema, optionId));
+      content[question.id] = (answer.selectedOptionIds ?? []).map((optionId) =>
+        jsonSchemaOptionValue(itemSchema, optionId, nativeValues));
     } else {
       const optionId = answer.selectedOptionIds?.[0];
-      if (optionId !== undefined) content[question.id] = jsonSchemaOptionValue(property, optionId);
+      if (optionId !== undefined) {
+        content[question.id] = jsonSchemaOptionValue(property, optionId, nativeValues);
+      }
       else if (answer.customText !== undefined) content[question.id] = answer.customText;
     }
   }

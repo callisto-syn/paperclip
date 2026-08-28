@@ -263,6 +263,40 @@ describe("Codex structured question adapter", () => {
     });
   });
 
+  it("keeps native option answers private while redacting their display labels", () => {
+    const input = normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{
+        id: "credential",
+        question: "Choose the configured credential.",
+        options: [{ id: "configured", label: "token=native-option-secret" }],
+      }],
+    })!;
+    const request: HarnessRuntimeRequest = {
+      requestId: "request-private-option",
+      requestKind: "user_input",
+      method: "tool/requestUserInput",
+      turnId: "turn-1",
+      itemId: "item-1",
+      status: "pending",
+      prompt: "Codex requests user input.",
+      details: {},
+      input,
+      origin: { adapter: "codex", method: "tool/requestUserInput" },
+    };
+
+    expect(JSON.stringify(input)).not.toContain("native-option-secret");
+    expect(input.questions[0]?.options?.[0]?.label).toContain("[REDACTED]");
+    expect(runtimeRequestResponse(request, {
+      action: "submit",
+      response: {
+        schema: "paperclip.question_response.v1",
+        answers: { credential: { selectedOptionIds: ["configured"] } },
+      },
+    })).toEqual({
+      answers: { credential: { answers: ["token=native-option-secret"] } },
+    });
+  });
+
   it("redacts credential text from every MCP elicitation display field", () => {
     const input = normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       message: "Authorization: Bearer message-secret",
@@ -304,5 +338,28 @@ describe("Codex structured question adapter", () => {
     expect(JSON.stringify(input)).not.toMatch(
       /message-secret|property-title-secret|property-secret|option-title-secret|option-value-secret|option-secret/,
     );
+    const request: HarnessRuntimeRequest = {
+      requestId: "request-private-elicitation-option",
+      requestKind: "elicitation",
+      method: "mcpServer/elicitation/request",
+      turnId: "turn-1",
+      itemId: "item-1",
+      status: "pending",
+      prompt: "A tool requests structured user input.",
+      details: {},
+      input: input!,
+      origin: { adapter: "codex", method: "mcpServer/elicitation/request" },
+    };
+    expect(runtimeRequestResponse(request, {
+      action: "submit",
+      response: {
+        schema: "paperclip.question_response.v1",
+        answers: { environment: { selectedOptionIds: ["option-2"] } },
+      },
+    })).toEqual({
+      action: "accept",
+      content: { environment: "password=option-value-secret" },
+      _meta: null,
+    });
   });
 });
