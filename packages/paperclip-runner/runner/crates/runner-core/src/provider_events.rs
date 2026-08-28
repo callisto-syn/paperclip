@@ -676,9 +676,7 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .replace('\\', "/");
     if path.is_empty()
         || path.starts_with('/')
-        || path
-            .split_once(':')
-            .is_some_and(|(drive, _)| drive.len() == 1)
+        || is_windows_drive_path(&path)
         || path.split('/').any(|segment| segment == "..")
         || path.contains("://")
     {
@@ -688,9 +686,47 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     }
 }
 
+fn is_windows_drive_path(path: &str) -> bool {
+    path.split_once(':').is_some_and(|(drive, suffix)| {
+        drive.len() == 1
+            && drive.as_bytes()[0].is_ascii_alphabetic()
+            // `C:/...` is unambiguously absolute, and uppercase drive-relative
+            // paths are the portable provider spelling. On Windows every
+            // single-letter prefix is drive-relative; on POSIX, lowercase
+            // `a:b/file` is an ordinary workspace-relative name.
+            && (suffix.starts_with('/')
+                || cfg!(windows)
+                || drive.as_bytes()[0].is_ascii_uppercase())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinguishes_windows_drive_paths_from_posix_colon_names() {
+        assert_eq!(
+            safe_acpx_location(Some(&json!({"path": "C:\\Users\\alice\\file.txt"}))),
+            Value::Null,
+        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": "a:b/file.txt"}))),
+                Value::String("a:b/file.txt".to_owned()),
+            );
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
+                Value::Null,
+            );
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
+            Value::Null,
+        );
+    }
 
     #[test]
     fn maps_codex_plan_without_retaining_native_envelope() {
