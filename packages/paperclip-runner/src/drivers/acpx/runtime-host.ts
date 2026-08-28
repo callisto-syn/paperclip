@@ -1,7 +1,4 @@
-import type {
-  AcpRuntimeEvent,
-  AcpRuntimeTurnResult,
-} from "acpx/runtime";
+import type { AcpRuntimeEvent, AcpRuntimeTurnResult } from "acpx/runtime";
 
 import type { NativeAcpxPermissionMode } from "../../contracts/native-execution.js";
 import {
@@ -35,6 +32,8 @@ import {
   type AcpxRuntimeSandbox,
 } from "./runtime-sandbox.js";
 import type { AcpxExpectedSessionIdentity } from "./sidecar-protocol.js";
+
+const TURN_CANCELLATION_TIMEOUT_MS = 2_000;
 
 export interface AcpxRuntimePortIdentity {
   acpxRecordId: string;
@@ -283,7 +282,10 @@ export class AcpxRuntimeHost {
     const errors: unknown[] = [];
     if (this.#activeTurn) {
       try {
-        await this.#activeTurn.cancel({ reason });
+        const cancellationError = await boundedCancellation(
+          this.#activeTurn.cancel({ reason }),
+        );
+        if (cancellationError) errors.push(cancellationError);
       } catch (error) {
         errors.push(error);
       }
@@ -299,6 +301,32 @@ export class AcpxRuntimeHost {
       throw new AggregateError(errors, "ACPX runtime cleanup failed");
     }
   }
+}
+
+async function boundedCancellation(
+  cancellation: Promise<void>,
+): Promise<unknown | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    cancellation.then(
+      () => ({ error: null }),
+      (error: unknown) => ({ error }),
+    ),
+    new Promise<{ error: unknown }>((resolve) => {
+      timer = setTimeout(
+        () =>
+          resolve({
+            error: new Error(
+              "ACPX turn cancellation exceeded its shutdown timeout",
+            ),
+          }),
+        TURN_CANCELLATION_TIMEOUT_MS,
+      );
+      timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return outcome.error;
 }
 
 async function cleanupRuntimeResources(

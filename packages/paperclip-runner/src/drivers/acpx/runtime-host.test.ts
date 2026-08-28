@@ -246,7 +246,9 @@ describe("ACPX runtime host", () => {
       fixture.dependencies({ openRuntime: async () => runtime }),
     );
 
-    expect(host.startTurn({ text: "Complete the task.", requestId: "turn-1" })).toBe(turn);
+    expect(
+      host.startTurn({ text: "Complete the task.", requestId: "turn-1" }),
+    ).toBe(turn);
     expect(startTurn).toHaveBeenCalledWith({
       text: "Complete the task.",
       requestId: "turn-1",
@@ -258,9 +260,9 @@ describe("ACPX runtime host", () => {
     await host.close({ reason: "shutdown" });
     expect(turn.cancel).toHaveBeenCalledWith({ reason: "shutdown" });
     expect(runtime.close).toHaveBeenCalledOnce();
-    expect(() =>
-      host.startTurn({ text: "Late", requestId: "turn-3" }),
-    ).toThrow("is closing");
+    expect(() => host.startTurn({ text: "Late", requestId: "turn-3" })).toThrow(
+      "is closing",
+    );
   });
 
   it("rejects oversized turn inputs before calling the runtime", async () => {
@@ -285,6 +287,35 @@ describe("ACPX runtime host", () => {
     ).toThrow("turn text");
     expect(runtime.startTurn).not.toHaveBeenCalled();
     await host.close({ reason: "complete" });
+  });
+
+  it("continues resource cleanup when turn cancellation never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = await hostFixture();
+      const turn = runtimeTurn();
+      turn.cancel.mockImplementation(() => new Promise(() => undefined));
+      const runtime = runtimePort({ startTurn: () => turn });
+      const host = await AcpxRuntimeHost.open(
+        {
+          ...fixture.options,
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "approve-reads",
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        },
+        fixture.dependencies({ openRuntime: async () => runtime }),
+      );
+      host.startTurn({ text: "Complete the task.", requestId: "turn-1" });
+
+      const closing = host.close({ reason: "shutdown" });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(closing).rejects.toThrow(/cleanup failed/);
+      expect(runtime.close).toHaveBeenCalledOnce();
+      expect(fixture.commandClose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
