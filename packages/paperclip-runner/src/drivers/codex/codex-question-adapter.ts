@@ -126,9 +126,16 @@ function exactRedactedQuestionText(
   field: string,
   maxCharacters = 4_000,
 ): string {
-  return redactCodexDiagnostic(
+  const redacted = redactCodexDiagnostic(
     exactQuestionText(value, field, maxCharacters),
   );
+  if (redacted.length <= maxCharacters) return redacted;
+
+  // Redaction markers can be longer than a short credential (for example,
+  // `Bearer a`). Bound the already-redacted value so an otherwise valid
+  // provider form cannot fail canonical validation after sanitization.
+  const suffix = "...[truncated]";
+  return `${redacted.slice(0, maxCharacters - suffix.length)}${suffix}`;
 }
 
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {

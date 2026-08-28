@@ -146,6 +146,16 @@ describe("Codex structured question adapter", () => {
         .toThrow("exceeds 4000 characters");
     }
 
+    const boundaryPrefix = "Bearer a ";
+    const boundaryDescription = `${boundaryPrefix}${"x".repeat(4_000 - boundaryPrefix.length)}`;
+    const boundaryForm = normalizeCodexQuestionSet("tool/requestUserInput", {
+      description: boundaryDescription,
+      questions: [{ id: "form", question: "Choose one" }],
+    });
+    expect(boundaryForm?.description).toHaveLength(4_000);
+    expect(boundaryForm?.description).toContain("Bearer [REDACTED]");
+    expect(boundaryForm?.description).not.toContain("Bearer a");
+
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
         type: "object",
