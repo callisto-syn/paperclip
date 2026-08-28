@@ -793,9 +793,11 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         approval.status = command.decision;
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();
-        if (task.assigneeActorId !== null) {
+        const wakeActorId =
+          approval.requestedByActorId ?? task.assigneeActorId;
+        if (wakeActorId !== null) {
           const wakeId = this.#scheduleWake(
-            task.assigneeActorId,
+            wakeActorId,
             task.id,
             "approval_resolved",
             { approvalId: approval.id, decision: command.decision },
@@ -1229,15 +1231,6 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         throw new CapabilityMockControlPlaneError(
           "approval_scope_violation",
           "the approval is not linked to the active fixture task",
-        );
-      }
-      if (approval.taskIds.length !== 1) {
-        this.#deny(run.id, command.kind, "shared_approval_requires_control_plane", [
-          `approval:${approval.id}`,
-        ]);
-        throw new CapabilityMockControlPlaneError(
-          "approval_scope_violation",
-          "shared approvals cannot be decided by a task-scoped fixture run",
         );
       }
       if (approval?.requestedByActorId === actor.id) {

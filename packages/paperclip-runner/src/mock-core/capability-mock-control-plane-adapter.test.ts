@@ -551,7 +551,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
-  it("allows shared approval comments but keeps decisions inside the active task boundary", async () => {
+  it("resolves linked shared approvals and wakes their requester", async () => {
     const adapter = seeded({
       actors: [
         {
@@ -676,7 +676,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "Shared approval is in scope.",
       },
-    })).rejects.toMatchObject({ code: "approval_scope_violation" });
+    })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
       idempotencyKey: "active-approval-decision",
@@ -705,7 +705,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         },
         {
           id: "approval-other-task",
-          status: "pending",
+          status: "approved",
           comments: [{ body: "Scoped from the active task." }],
         },
         { id: "approval-unlinked", status: "pending" },
@@ -713,9 +713,16 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     });
     expect(adapter.snapshot().wakes).toEqual([
       expect.objectContaining({
-        actorId: "actor-1",
+        actorId: "actor-2",
         taskId: "task-1",
         reason: "approval_resolved",
+        payload: { approvalId: "approval-other-task", decision: "approved" },
+      }),
+      expect.objectContaining({
+        actorId: "actor-2",
+        taskId: "task-1",
+        reason: "approval_resolved",
+        payload: { approvalId: "approval-active-task", decision: "approved" },
       }),
     ]);
   });
