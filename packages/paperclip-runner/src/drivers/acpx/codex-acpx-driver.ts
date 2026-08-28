@@ -44,6 +44,7 @@ import {
 } from "./runtime-host.js";
 
 const MAX_BUFFERED_EVENTS = 512;
+const TERMINAL_EVENT_RESERVE = 3;
 const MAX_TRANSCRIPT_EVENTS = 1_024;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
@@ -117,7 +118,7 @@ export class CodexAcpxDriver implements HarnessDriver {
     this.#closeSettlementTimeoutMs =
       dependencies.closeSettlementTimeoutMs ?? CLOSE_TURN_SETTLEMENT_TIMEOUT_MS;
     this.#maxBufferedEvents = Math.max(
-      1,
+      TERMINAL_EVENT_RESERVE,
       Math.floor(dependencies.maxBufferedEvents ?? MAX_BUFFERED_EVENTS),
     );
   }
@@ -256,11 +257,7 @@ class CodexAcpxSession implements HarnessSession {
     this.#now = input.now;
     this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
     this.#maxBufferedEvents = input.maxBufferedEvents;
-    this.#events = new AsyncQueue<PrpEvent>(
-      input.maxBufferedEvents,
-      isCriticalBufferedEvent,
-      (event) => isTerminalEvent(event.eventType),
-    );
+    this.#events = new AsyncQueue<PrpEvent>(input.maxBufferedEvents);
     this.#sourceInstanceId = stableId(
       "paperclip-acpx",
       input.input.normalizedSessionId,
@@ -286,6 +283,12 @@ class CodexAcpxSession implements HarnessSession {
     this.#assertOpen();
     if (this.#activeTurnId) {
       throw new Error("Codex ACPX session already has an active turn");
+    }
+    if (!this.#events.hasCapacity(TERMINAL_EVENT_RESERVE)) {
+      throw new HarnessCapabilityUnavailableError(
+        "turn.start",
+        "the event consumer must drain the previous turn before another turn can start",
+      );
     }
     if (this.#terminalTurns.size >= this.#maxBufferedEvents) {
       throw new HarnessCapabilityUnavailableError(
@@ -669,11 +672,16 @@ class CodexAcpxSession implements HarnessSession {
     eventType: PrpEvent["eventType"],
     payload: Record<string, unknown>,
     refs: { turnId?: string; itemId?: string } = {},
-  ): void {
-    if (this.#eventStreamClosed) return;
+    reservedAfter = isTerminalEvent(eventType)
+      ? 0
+      : eventType === "run.result.proposed"
+        ? 2
+        : TERMINAL_EVENT_RESERVE,
+  ): boolean {
+    if (this.#eventStreamClosed) return false;
     if (this.#eventStreamOmitted && isTerminalEvent(eventType)) {
       this.#eventStreamOmitted = false;
-      this.#emit(
+      const recordedOmission = this.#emit(
         "harness.diagnostic",
         {
           code: "event_stream_retention_limit",
@@ -681,7 +689,15 @@ class CodexAcpxSession implements HarnessSession {
             "Earlier provider events were omitted because the consumer exceeded the bounded event buffer.",
         },
         refs,
+        1,
       );
+      if (!recordedOmission) this.#eventStreamOmitted = true;
+    }
+    if (!this.#events.hasCapacity(1 + reservedAfter)) {
+      this.#eventStreamOmitted = true;
+      this.#transcriptEventCount += 1;
+      this.#transcriptOmitted = true;
+      return false;
     }
     const sourceSeq = ++this.#sourceSequence;
     const event: PrpEvent = {
@@ -701,7 +717,10 @@ class CodexAcpxSession implements HarnessSession {
       payload: structuredClone(payload),
     };
     this.#retainTranscriptEvent(event);
-    if (this.#events.push(event)) this.#eventStreamOmitted = true;
+    if (!this.#events.push(event)) {
+      throw new Error("Codex ACPX event queue violated its reserved capacity");
+    }
+    return true;
   }
 
   #retainTranscriptEvent(event: PrpEvent): void {
@@ -796,56 +815,33 @@ function isTerminalEvent(eventType: PrpEvent["eventType"]): boolean {
   );
 }
 
-function isCriticalBufferedEvent(event: PrpEvent): boolean {
-  return (
-    event.priority === 0 ||
-    event.eventType === "harness.diagnostic" ||
-    isTerminalEvent(event.eventType)
-  );
-}
-
 class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #items: T[] = [];
   readonly #waiters: Array<(result: IteratorResult<T>) => void> = [];
   readonly #maxItems: number;
-  readonly #isCritical: (item: T) => boolean;
-  readonly #isProtected: (item: T) => boolean;
   #closed = false;
 
-  constructor(
-    maxItems: number,
-    isCritical: (item: T) => boolean,
-    isProtected: (item: T) => boolean,
-  ) {
+  constructor(maxItems: number) {
     this.#maxItems = maxItems;
-    this.#isCritical = isCritical;
-    this.#isProtected = isProtected;
   }
 
-  /** Returns true when an event had to be omitted. */
+  hasCapacity(requiredItems: number): boolean {
+    return (
+      requiredItems <=
+      this.#waiters.length + this.#maxItems - this.#items.length
+    );
+  }
+
   push(item: T): boolean {
     if (this.#closed) return false;
     const waiter = this.#waiters.shift();
     if (waiter) {
       waiter({ done: false, value: item });
-      return false;
+      return true;
     }
-    const omitted = this.#items.length >= this.#maxItems;
-    if (omitted) {
-      const expendable = this.#items.findIndex(
-        (candidate) => !this.#isCritical(candidate),
-      );
-      if (expendable >= 0) this.#items.splice(expendable, 1);
-      else if (this.#isProtected(item)) {
-        const unprotected = this.#items.findIndex(
-          (candidate) => !this.#isProtected(candidate),
-        );
-        if (unprotected >= 0) this.#items.splice(unprotected, 1);
-        else return true;
-      } else return true;
-    }
+    if (this.#items.length >= this.#maxItems) return false;
     this.#items.push(item);
-    return omitted;
+    return true;
   }
 
   close(): void {

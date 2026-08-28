@@ -222,7 +222,7 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("bounds lagging streams while preserving omission and terminal events", async () => {
+  it("bounds lagging streams without introducing source sequence gaps", async () => {
     const fixture = driverFixture(
       {},
       {
@@ -247,18 +247,20 @@ describe("Codex ACPX harness driver", () => {
       const snapshot = await session.snapshot();
       expect(snapshot.terminalTurns).toHaveLength(1);
     });
-    await session.startTurn({
-      message: { role: "user", text: "Produce another large turn." },
-    });
     await vi.waitFor(async () => {
       const snapshot = await session.snapshot();
-      expect(snapshot.terminalTurns).toHaveLength(2);
+      expect(snapshot.terminalTurns).toHaveLength(1);
       const transcript = await session.transcript!();
       expect(transcript.eventCount).toBeGreaterThan(1_024);
       expect(transcript.complete).toBe(false);
       expect(transcript.events.length).toBeLessThanOrEqual(1_024);
       expect(transcript.omissionReason).toBe("retention_limit");
     });
+    await expect(
+      session.startTurn({
+        message: { role: "user", text: "Do not overtake the lagging consumer." },
+      }),
+    ).rejects.toThrow("event consumer must drain");
 
     await session.close({ reason: "bounds verified" });
     const iterator = session.events()[Symbol.asyncIterator]();
@@ -268,7 +270,7 @@ describe("Codex ACPX harness driver", () => {
       if (next.done) break;
       retained.push(next.value);
     }
-    expect(retained).toHaveLength(512);
+    expect(retained.length).toBeLessThanOrEqual(512);
     expect(retained).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -281,10 +283,13 @@ describe("Codex ACPX harness driver", () => {
     );
     expect(
       retained.filter((event) => event.eventType === "turn.completed"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(retained.map((event) => event.sourceSeq)).toEqual(
+      Array.from({ length: retained.length }, (_, index) => index + 1),
+    );
   });
 
-  it("preserves every terminal when the bounded queue is all critical", async () => {
+  it("preserves every terminal when the bounded consumer keeps draining", async () => {
     const fixture = driverFixture({}, { maxBufferedEvents: 4 });
     const session = await fixture.driver.openSession({
       runId: "run-critical-bounds",
@@ -293,15 +298,16 @@ describe("Codex ACPX harness driver", () => {
     });
     const terminalTurnIds: string[] = [];
     for (let index = 0; index < 4; index += 1) {
+      const terminalEvents = collectUntil(session.events(), "turn.completed");
       const { turnId } = await session.startTurn({
         message: { role: "user", text: `Complete turn ${index}.` },
       });
       terminalTurnIds.push(turnId);
       fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
-      await vi.waitFor(async () => {
-        await expect(session.snapshot()).resolves.toMatchObject({
-          activeTurnId: null,
-        });
+      const emitted = await terminalEvents;
+      expect(emitted.at(-1)).toMatchObject({
+        eventType: "turn.completed",
+        turnId,
       });
     }
     await expect(
@@ -311,13 +317,11 @@ describe("Codex ACPX harness driver", () => {
     ).rejects.toThrow("bounded session turn limit");
 
     await session.close({ reason: "critical bounds verified" });
-    const retained: PrpEvent[] = [];
-    for await (const event of session.events()) retained.push(event);
-    expect(
-      retained
-        .filter((event) => event.eventType === "turn.completed")
-        .map((event) => event.turnId),
-    ).toEqual(terminalTurnIds);
+    await expect(session.snapshot()).resolves.toMatchObject({
+      terminalTurns: terminalTurnIds.map((turnId) =>
+        expect.objectContaining({ turnId }),
+      ),
+    });
   });
 });
 
