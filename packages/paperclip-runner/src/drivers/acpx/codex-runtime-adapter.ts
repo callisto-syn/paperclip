@@ -237,16 +237,28 @@ function runtimePort(
 ): AcpxRuntimePort {
   let runtimeClosed = false;
   let runtimeCloseSucceeded = false;
-  let runtimeCloseAttempt: Promise<unknown | null> | undefined;
-  const ownedRuntimeCloseAttempts = new Set<Promise<unknown | null>>();
+  let runtimeCloseAttempt: RuntimeCloseAttempt | undefined;
+  const ownedRuntimeCloseAttempts = new Set<RuntimeCloseAttempt>();
 
-  function startRuntimeCloseAttempt(reason: string): Promise<unknown | null> {
-    const attempt = runtimeCloseOutcome(runtime, handle, reason).then((error) => {
-      if (error === null) runtimeCloseSucceeded = true;
-      return error;
-    });
+  function startRuntimeCloseAttempt(reason: string): RuntimeCloseAttempt {
+    const attempt = new RuntimeCloseAttempt(
+      runtimeCloseOutcome(runtime, handle, reason),
+      () => {
+        runtimeCloseSucceeded = true;
+      },
+    );
     ownedRuntimeCloseAttempts.add(attempt);
     return attempt;
+  }
+
+  function takeSettledRuntimeCloseErrors(): unknown[] {
+    const errors: unknown[] = [];
+    for (const attempt of ownedRuntimeCloseAttempts) {
+      if (!attempt.settled) continue;
+      ownedRuntimeCloseAttempts.delete(attempt);
+      if (attempt.outcome !== null) errors.push(attempt.outcome);
+    }
+    return errors;
   }
 
   return {
@@ -284,29 +296,30 @@ function runtimePort(
       if (!runtimeClosed && !runtimeCloseAttempt) {
         runtimeCloseAttempt = startRuntimeCloseAttempt(input.reason);
       }
-      const attempts = [...ownedRuntimeCloseAttempts];
-      const closeError = attempts.length === 0
+      const observedAttempt = runtimeCloseAttempt;
+      const closeError = !observedAttempt
         ? null
         : await boundedCloseOutcome(
-            runtimeCloseBarrier(attempts),
+            observedAttempt.promise,
             runtimeCloseTimeoutMs,
           );
       if (runtimeCloseSucceeded) runtimeClosed = true;
-      if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
-        // A settled error is retained until this call reports it. Only then
-        // may a later close relinquish ownership based on a successful retry.
-        ownedRuntimeCloseAttempts.clear();
-        runtimeCloseAttempt = undefined;
-      } else {
-        // Retain and observe a timed-out attempt until it settles, but do not
-        // let it permanently prevent a bounded recovery attempt from invoking
-        // the protocol close again. Settled failures are retried the same way.
+      if (
+        observedAttempt?.settled ||
+        closeError instanceof AcpxRuntimeCloseTimeoutError
+      ) {
+        // A timed-out attempt stays owned and observed, but it does not block
+        // a fresh bounded attempt. Its eventual failure is reported once by a
+        // later close; its eventual success marks the runtime closed.
         runtimeCloseAttempt = undefined;
       }
       const processErrors = await children.terminate();
-      if (closeError !== null || processErrors.length > 0) {
-        const errors = [...processErrors];
-        if (closeError !== null) errors.unshift(closeError);
+      const runtimeErrors = takeSettledRuntimeCloseErrors();
+      if (closeError instanceof AcpxRuntimeCloseTimeoutError) {
+        runtimeErrors.unshift(closeError);
+      }
+      if (runtimeErrors.length > 0 || processErrors.length > 0) {
+        const errors = [...runtimeErrors, ...processErrors];
         throw new AggregateError(
           errors,
           "ACPX runtime and provider cleanup failed",
@@ -316,16 +329,19 @@ function runtimePort(
   };
 }
 
-async function runtimeCloseBarrier(
-  attempts: readonly Promise<unknown | null>[],
-): Promise<unknown | null> {
-  const errors = (await Promise.all(attempts)).filter(
-    (error): error is Exclude<unknown, null> => error !== null,
-  );
-  if (errors.length === 0) return null;
-  return errors.length === 1
-    ? errors[0]
-    : new AggregateError(errors, "ACPX runtime close attempts failed");
+class RuntimeCloseAttempt {
+  readonly promise: Promise<unknown | null>;
+  settled = false;
+  outcome: unknown | null | undefined;
+
+  constructor(outcome: Promise<unknown | null>, onSuccess: () => void) {
+    this.promise = outcome.then((error) => {
+      this.settled = true;
+      this.outcome = error;
+      if (error === null) onSuccess();
+      return error;
+    });
+  }
 }
 
 async function boundedRuntimeClose(
