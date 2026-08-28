@@ -1087,6 +1087,9 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     payload: CapabilityJsonValue,
     delayTicks: number,
   ): string {
+    const actor = this.#actor(actorId);
+    const task = this.#task(taskId);
+    this.#assertCompany(this.#state.company.id, actor.companyId, task.companyId);
     const createdAt = this.#now();
     const dueAt = new Date(
       Date.parse(createdAt) + delayTicks * 1_000,
@@ -1494,8 +1497,50 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         ids.add(scoped);
       }
     }
-    for (const actor of this.#state.actors) this.#assertCompany(this.#state.company.id, actor.companyId);
-    for (const task of this.#state.tasks) this.#assertCompany(this.#state.company.id, task.companyId);
+    const actorsById = new Map(
+      this.#state.actors.map((actor) => [actor.id, actor]),
+    );
+    const tasksById = new Map(
+      this.#state.tasks.map((task) => [task.id, task]),
+    );
+    for (const actor of this.#state.actors) {
+      this.#assertCompany(this.#state.company.id, actor.companyId);
+    }
+    for (const task of this.#state.tasks) {
+      this.#assertCompany(this.#state.company.id, task.companyId);
+      if (
+        task.assigneeActorId !== null &&
+        actorsById.get(task.assigneeActorId)?.companyId !== task.companyId
+      ) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          `fixture task ${task.id} has an invalid assignee actor`,
+        );
+      }
+    }
+    for (const approval of this.#state.approvals) {
+      this.#assertCompany(this.#state.company.id, approval.companyId);
+      if (
+        approval.taskIds.length === 0 ||
+        approval.taskIds.some((taskId) =>
+          tasksById.get(taskId)?.companyId !== approval.companyId
+        )
+      ) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          `fixture approval ${approval.id} has an invalid linked task`,
+        );
+      }
+      if (
+        approval.requestedByActorId !== null &&
+        actorsById.get(approval.requestedByActorId)?.companyId !== approval.companyId
+      ) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          `fixture approval ${approval.id} has an invalid requester actor`,
+        );
+      }
+    }
   }
 }
 

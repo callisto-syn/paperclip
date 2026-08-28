@@ -733,6 +733,47 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
+  it("rejects fixture wake references outside the company actor scope", () => {
+    expect(() => seeded({
+      tasks: [
+        {
+          id: "task-1",
+          companyId: "company-1",
+          identifier: "MCK-1",
+          title: "Invalid assignee",
+          description: null,
+          status: "todo",
+          priority: "high",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "missing-actor",
+          checkoutRunId: null,
+          executionRunId: null,
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
+    })).toThrow(/invalid assignee actor/);
+
+    expect(() => seeded({
+      approvals: [
+        {
+          id: "approval-invalid-requester",
+          companyId: "company-1",
+          taskIds: ["task-1"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "missing-actor",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+      ],
+    })).toThrow(/invalid requester actor/);
+  });
+
   it("rejects stale interaction targets and invalid interaction outcomes", async () => {
     const adapter = seeded();
     await adapter.start();
