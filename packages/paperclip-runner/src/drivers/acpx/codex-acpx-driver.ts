@@ -705,9 +705,7 @@ class CodexAcpxSession implements HarnessSession {
     refs: { turnId?: string; itemId?: string } = {},
     reservedAfter = isTerminalEvent(eventType)
       ? 0
-      : eventType === "run.result.proposed"
-        ? 2
-        : TERMINAL_EVENT_RESERVE,
+      : TERMINAL_EVENT_RESERVE,
   ): boolean {
     if (this.#eventStreamClosed) return false;
     if (this.#eventStreamOmitted && isTerminalEvent(eventType)) {
