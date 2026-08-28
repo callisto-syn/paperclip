@@ -79,8 +79,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("authorization=super-secret-value");
                 std::process::exit(9);
             }
-            "bootstrap" | "bootstrap-wrong-model" | "bootstrap-wrong-run" => {
+            "bootstrap"
+            | "bootstrap-wrong-model"
+            | "bootstrap-wrong-run"
+            | "turns"
+            | "turns-wrong-turn"
+            | "turns-wrong-cancel"
+            | "turns-wrong-scope" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
+                let params = request.get("params").unwrap_or(&Value::Null);
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("missing");
+                if command == "turn.start" && matches!(mode, "turns" | "turns-wrong-scope") {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.event",
+                        if mode == "turns-wrong-scope" {
+                            "wrong-run"
+                        } else {
+                            "run-1"
+                        },
+                        turn_id,
+                        json!({"type":"text_delta","text":"hello"}),
+                    )?;
+                    next_sequence += 1;
+                }
+                if command == "turn.cancel" && mode == "turns" {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.turn_terminal",
+                        "run-1",
+                        turn_id,
+                        json!({"status":"interrupted"}),
+                    )?;
+                    next_sequence += 1;
+                }
             }
             "happy" => {
                 write_event(&mut stdout, next_sequence)?;
@@ -134,6 +171,10 @@ fn bootstrap_success(id: u64, command: &str, request: &Value, mode: &str) -> Val
             "runId": if mode == "bootstrap-wrong-run" { "wrong-run" } else { params.get("runId").and_then(Value::as_str).unwrap_or("missing") },
             "catalogRevision": params.get("catalogRevision"),
         }),
+        "turn.start" => json!({
+            "turnId": if mode == "turns-wrong-turn" { "wrong-turn" } else { params.get("turnId").and_then(Value::as_str).unwrap_or("missing") },
+        }),
+        "turn.cancel" => json!({"cancelled":mode != "turns-wrong-cancel"}),
         "session.close" => json!({"closed":true}),
         _ => json!({"command":command,"params":params}),
     };
@@ -143,6 +184,27 @@ fn bootstrap_success(id: u64, command: &str, request: &Value, mode: &str) -> Val
         "ok": true,
         "result": result,
     })
+}
+
+fn write_turn_event(
+    output: &mut impl Write,
+    sequence: u64,
+    event_type: &str,
+    run_id: &str,
+    turn_id: &str,
+    payload: Value,
+) -> io::Result<()> {
+    write_json(
+        output,
+        &json!({
+            "protocolVersion": GENERATED_ACPX_SIDECAR_PROTOCOL_VERSION,
+            "sequence": sequence,
+            "eventType": event_type,
+            "runId": run_id,
+            "turnId": turn_id,
+            "payload": payload,
+        }),
+    )
 }
 
 fn success(id: u64, command: &str, request: &Value) -> Value {

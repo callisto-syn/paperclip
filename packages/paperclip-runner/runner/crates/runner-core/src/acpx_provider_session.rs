@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::acpx_provider_state::AcpxProviderState;
+use crate::acpx_provider_state::{AcpxProviderState, AcpxProviderStateEvent};
 use crate::acpx_sidecar_transport::{AcpxSidecarTransport, AcpxSidecarTransportConfig};
 use crate::generated_acpx_sidecar_contract::{
     GeneratedAcpxSidecarCommand, GENERATED_ACPX_SIDECAR_PROTOCOL_VERSION,
@@ -165,6 +166,7 @@ pub struct AcpxProviderSession {
     state: AcpxProviderState,
     identity: AcpxProviderSessionIdentity,
     catalog_revision: u64,
+    working_directory: PathBuf,
     closed: bool,
 }
 
@@ -185,6 +187,7 @@ impl AcpxProviderSession {
             state,
             identity,
             catalog_revision: config.catalog_revision,
+            working_directory: config.working_directory.clone(),
             closed: false,
         })
     }
@@ -205,6 +208,88 @@ impl AcpxProviderSession {
         self.catalog_revision
     }
 
+    pub fn start_turn(
+        &mut self,
+        turn_id: &str,
+        message: &str,
+        working_directory: &Path,
+    ) -> Result<Value, LocalRunnerError> {
+        self.ensure_open()?;
+        validate_text(turn_id, 160, "ACPX turn id")?;
+        validate_turn_message(message)?;
+        if working_directory != self.working_directory {
+            return Err(LocalRunnerError::invalid(
+                "ACPX turn working directory differs from its immutable session workspace",
+            ));
+        }
+        if self.state.active_turn_id().is_some() {
+            return Err(LocalRunnerError::invalid(
+                "ACPX provider session already has an active turn",
+            ));
+        }
+        let response = match self.transport.request(
+            GeneratedAcpxSidecarCommand::TurnStart,
+            json!({"turnId":turn_id,"message":message}),
+        ) {
+            Ok(response) => response,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        if response.get("turnId").and_then(Value::as_str) != Some(turn_id) {
+            return Err(self.fail_closed(LocalRunnerError::invalid(
+                "ACPX sidecar did not confirm the requested turn",
+            )));
+        }
+        if let Err(error) = self.state.begin_turn(turn_id) {
+            return Err(self.fail_closed(error));
+        }
+        Ok(response)
+    }
+
+    pub fn interrupt_turn(
+        &mut self,
+        turn_id: &str,
+        reason: &str,
+    ) -> Result<Value, LocalRunnerError> {
+        self.ensure_open()?;
+        validate_text(turn_id, 160, "ACPX turn id")?;
+        if self.state.active_turn_id() != Some(turn_id) {
+            return Err(LocalRunnerError::invalid(
+                "ACPX interruption named a stale or inactive turn",
+            ));
+        }
+        let response = match self.transport.request(
+            GeneratedAcpxSidecarCommand::TurnCancel,
+            json!({"turnId":turn_id,"reason":bounded_reason(reason)}),
+        ) {
+            Ok(response) => response,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        if response.get("cancelled").and_then(Value::as_bool) != Some(true) {
+            return Err(self.fail_closed(LocalRunnerError::invalid(
+                "ACPX sidecar did not confirm turn cancellation",
+            )));
+        }
+        Ok(response)
+    }
+
+    pub fn poll_event(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Vec<AcpxProviderStateEvent>>, LocalRunnerError> {
+        self.ensure_open()?;
+        let event = match self.transport.poll_event(timeout) {
+            Ok(event) => event,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        let Some(event) = event else {
+            return Ok(None);
+        };
+        match self.state.accept_event(&event) {
+            Ok(events) => Ok(Some(events)),
+            Err(error) => Err(self.fail_closed(error)),
+        }
+    }
+
     pub fn shutdown(&mut self, reason: &str) -> Result<(), LocalRunnerError> {
         if self.closed {
             return Ok(());
@@ -223,6 +308,18 @@ impl AcpxProviderSession {
             (Err(error), cleanup) => Err(with_cleanup_error(error, cleanup)),
             (Ok(_), Err(error)) => Err(error),
         }
+    }
+
+    fn ensure_open(&self) -> Result<(), LocalRunnerError> {
+        if self.closed {
+            return Err(LocalRunnerError::invalid("ACPX provider session is closed"));
+        }
+        Ok(())
+    }
+
+    fn fail_closed(&mut self, error: LocalRunnerError) -> LocalRunnerError {
+        self.closed = true;
+        with_cleanup_error(error, self.transport.shutdown())
     }
 }
 
@@ -372,6 +469,18 @@ fn is_sha256_digest(value: &str) -> bool {
 
 fn bounded_reason(value: &str) -> String {
     value.chars().take(4_000).collect()
+}
+
+fn validate_turn_message(value: &str) -> Result<(), LocalRunnerError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_SYSTEM_INSTRUCTIONS_BYTES
+        || value.contains('\0')
+    {
+        return Err(LocalRunnerError::invalid(
+            "ACPX turn message exceeds its bounded contract",
+        ));
+    }
+    Ok(())
 }
 
 fn with_cleanup_error(
