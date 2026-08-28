@@ -27,9 +27,13 @@ describe("workspace file references", () => {
         displayName: "the guide",
         presentation: "document",
         line: 2,
-        preview: "# Guide\n\nSafe content.\n",
+        preview: process.platform === "linux" ? "# Guide\n\nSafe content.\n" : null,
       });
-      expect(references[0]?.contentDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+      if (process.platform === "linux") {
+        expect(references[0]?.contentDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+      } else {
+        expect(references[0]?.contentDigest).toBeNull();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

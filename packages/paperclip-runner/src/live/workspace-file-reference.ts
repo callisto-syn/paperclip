@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const PAPERCLIP_WORKSPACE_FILE_REFERENCE_SCHEMA = "paperclip.workspace.file_reference.v1" as const;
@@ -81,6 +81,17 @@ function workspaceRelativePath(root: string, target: string): string | null {
   return candidate.split(sep).join("/");
 }
 
+async function canonicalOpenedDescriptorPath(fd: number): Promise<string | null> {
+  try {
+    return await realpath(`/proc/self/fd/${fd}`);
+  } catch {
+    // Node does not expose openat(2) or F_GETPATH portably. Hosts without a
+    // descriptor-backed canonical path retain reference metadata but must not
+    // expose file bytes based on a mutable pathname check.
+    return null;
+  }
+}
+
 export function paperclipWorkspaceFileReferencesFromText(
   workspace: string,
   assistantText: string,
@@ -139,13 +150,12 @@ export async function discoverPaperclipWorkspaceFileReferences(
       try {
         const openedInfo = await handle.stat();
         if (!openedInfo.isFile()) continue;
-        const verifiedPath = await realpath(canonicalPath);
-        if (workspaceRelativePath(canonicalRoot, verifiedPath) === null) continue;
-        const currentInfo = await stat(verifiedPath);
-        if (
-          currentInfo.dev !== openedInfo.dev ||
-          currentInfo.ino !== openedInfo.ino
-        ) continue;
+        const openedPath = await canonicalOpenedDescriptorPath(handle.fd);
+        if (openedPath === null) {
+          verified.push(reference);
+          continue;
+        }
+        if (workspaceRelativePath(canonicalRoot, openedPath) === null) continue;
         if (openedInfo.size > MAX_READ_BYTES) {
           verified.push({ ...reference, previewTruncated: true });
           continue;
