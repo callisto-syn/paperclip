@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub const TOOL_SET_SCHEMA: &str = "paperclip.runner.authorized-tools.v1";
 pub const TOOL_CALL_SCHEMA: &str = "paperclip.prp.semantic_tool.v1";
@@ -100,7 +101,6 @@ impl ProviderToolBridge {
                 "cannot attach a new run while provider tool calls are pending",
             ));
         }
-        self.completed.clear();
         Ok(())
     }
 
@@ -177,6 +177,12 @@ impl ProviderToolBridge {
                     "authorized tool names must be unique",
                 ));
             }
+        }
+        let computed_digest = authorized_tool_catalog_digest(&tool_set.operations)?;
+        if tool_set.catalog_digest != computed_digest {
+            return Err(ProviderBridgeError::invalid(
+                "authorized tool catalog digest does not match its operations",
+            ));
         }
         if !allow_catalog_change {
             if let Some(existing) = &self.catalog_digest {
@@ -319,6 +325,52 @@ impl ProviderToolBridge {
 
     pub fn pending_calls(&self) -> impl Iterator<Item = &PendingToolCall> {
         self.pending.values()
+    }
+}
+
+pub fn authorized_tool_catalog_digest(
+    operations: &[AuthorizedTool],
+) -> Result<String, ProviderBridgeError> {
+    let value = serde_json::to_value(operations)
+        .map_err(|_| ProviderBridgeError::invalid("authorized tool catalog is not serializable"))?;
+    let canonical = canonical_json(&value);
+    let digest = Sha256::digest(canonical.as_bytes());
+    Ok(format!("sha256:{digest:x}"))
+}
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => {
+            serde_json::to_string(value).expect("serializing an in-memory JSON string cannot fail")
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            format!(
+                "{{{}}}",
+                entries
+                    .into_iter()
+                    .map(|(key, value)| format!(
+                        "{}:{}",
+                        serde_json::to_string(key)
+                            .expect("serializing an in-memory JSON key cannot fail"),
+                        canonical_json(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
     }
 }
 

@@ -1,10 +1,11 @@
 use paperclip_runner_core::provider_bridge::{
-    AuthorizedTool, AuthorizedToolSet, ProviderToolBridge, ToolResult, TOOL_SET_SCHEMA,
+    authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ProviderToolBridge,
+    ToolResult, TOOL_SET_SCHEMA,
 };
 use serde_json::json;
 
 fn tools(digest: &str) -> AuthorizedToolSet {
-    AuthorizedToolSet {
+    let mut tool_set = AuthorizedToolSet {
         schema: TOOL_SET_SCHEMA.to_owned(),
         schema_version: 1,
         catalog_digest: digest.to_owned(),
@@ -15,7 +16,11 @@ fn tools(digest: &str) -> AuthorizedToolSet {
             input_schema: json!({"type": "object"}),
             response_schema: json!({"type": "object"}),
         }],
+    };
+    if digest == "computed" {
+        tool_set.catalog_digest = authorized_tool_catalog_digest(&tool_set.operations).unwrap();
     }
+    tool_set
 }
 
 fn digest(suffix: char) -> String {
@@ -25,7 +30,7 @@ fn digest(suffix: char) -> String {
 #[test]
 fn forwards_only_authorized_calls_and_correlates_results() {
     let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(tools(&digest('a'))).unwrap();
+    bridge.prepare(tools("computed")).unwrap();
     let call = bridge
         .begin_call(
             "call-1".to_owned(),
@@ -49,7 +54,7 @@ fn forwards_only_authorized_calls_and_correlates_results() {
 #[test]
 fn rejects_unknown_tools_and_conflicting_duplicate_results() {
     let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(tools(&digest('a'))).unwrap();
+    bridge.prepare(tools("computed")).unwrap();
     assert!(bridge
         .begin_call("call-x".to_owned(), "not_authorized".to_owned(), json!({}))
         .is_err());
@@ -81,11 +86,26 @@ fn rejects_unknown_tools_and_conflicting_duplicate_results() {
 #[test]
 fn durable_session_refuses_catalog_drift() {
     let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(tools(&digest('a'))).unwrap();
-    assert!(bridge.prepare(tools(&digest('b'))).is_err());
+    let first = tools("computed");
+    bridge.prepare(first.clone()).unwrap();
+    let mut changed = first.clone();
+    changed.operations[0].description = "Changed without changing the supplied digest.".to_owned();
+    assert!(bridge.prepare(changed).is_err());
+    let mut changed = first;
+    changed.operations[0].description = "Changed with a new digest.".to_owned();
+    changed.catalog_digest = authorized_tool_catalog_digest(&changed.operations).unwrap();
+    assert!(bridge.prepare(changed).is_err());
     let encoded = serde_json::to_string(&bridge).unwrap();
     let recovered: ProviderToolBridge = serde_json::from_str(&encoded).unwrap();
     assert_eq!(recovered, bridge);
+}
+
+#[test]
+fn catalog_digest_matches_the_typescript_canonical_json_contract() {
+    assert_eq!(
+        authorized_tool_catalog_digest(&tools("computed").operations).unwrap(),
+        "sha256:4e0332535c9e2ff1f5e43089517ee1b46654bfc9cb2ed51efbea4be50db21009"
+    );
 }
 
 #[test]
@@ -99,6 +119,7 @@ fn validates_the_operation_value_inside_a_semantic_dispatch_envelope() {
     });
     let mut bridge = ProviderToolBridge::default();
     set.catalog_digest = digest('a');
+    set.catalog_digest = authorized_tool_catalog_digest(&set.operations).unwrap();
     bridge.prepare(set).unwrap();
     bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
@@ -130,7 +151,7 @@ fn rejects_noncanonical_digests_and_oversized_contract_values() {
     assert!(bridge.prepare(set).is_err());
 
     let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(tools(&digest('a'))).unwrap();
+    bridge.prepare(tools("computed")).unwrap();
     assert!(bridge
         .begin_call(
             "call-large".into(),
@@ -143,7 +164,7 @@ fn rejects_noncanonical_digests_and_oversized_contract_values() {
 #[test]
 fn keeps_pending_calls_when_a_result_envelope_has_wrong_identity() {
     let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(tools(&digest('a'))).unwrap();
+    bridge.prepare(tools("computed")).unwrap();
     bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .unwrap();
@@ -162,4 +183,28 @@ fn keeps_pending_calls_when_a_result_envelope_has_wrong_identity() {
         })
         .is_err());
     assert_eq!(bridge.pending_calls().count(), 1);
+}
+
+#[test]
+fn recovery_preserves_completed_call_replay_identities() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+    bridge
+        .apply_result(ToolResult {
+            call_id: "call-1".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .unwrap();
+
+    let encoded = serde_json::to_string(&bridge).unwrap();
+    let mut recovered: ProviderToolBridge = serde_json::from_str(&encoded).unwrap();
+    recovered.attach_existing_run().unwrap();
+    assert!(recovered
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .is_err());
 }
