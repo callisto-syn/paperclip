@@ -2,6 +2,11 @@ import type { AcpRuntimeEvent, AcpRuntimeTurnResult } from "acpx/runtime";
 
 import type { NativeAcpxPermissionMode } from "../../contracts/native-execution.js";
 import {
+  startRunnerToolBridge,
+  type RunnerToolBridge,
+  type RunnerToolBridgeOptions,
+} from "../runner-tool-bridge.js";
+import {
   stageManagedCodexCredential,
   type ManagedCodexCredentialLease,
 } from "./codex-credentials.js";
@@ -75,7 +80,17 @@ export interface AcpxRuntimePortOpenOptions {
   permissionPolicy: ReturnType<typeof acpxRuntimePermissionPolicy>;
   launchEnvironment: Readonly<NodeJS.ProcessEnv>;
   systemInstructions: string;
+  mcpServers: readonly AcpxMcpServerBinding[];
 }
+
+export interface AcpxMcpServerBinding {
+  name: string;
+  url: string;
+  bearerToken: string;
+  runnerOwned: boolean;
+}
+
+export type AcpxSemanticToolSession = Omit<RunnerToolBridgeOptions, "secret">;
 
 export interface AcpxRuntimeHostDependencies {
   verifyInstallation?: (
@@ -95,6 +110,7 @@ export interface OpenAcpxRuntimeHostOptions {
   environment?: NodeJS.ProcessEnv;
   managedCodexCredentialSourcePath?: string;
   expectedIdentity?: AcpxExpectedSessionIdentity;
+  semanticTools?: AcpxSemanticToolSession;
 }
 
 export class AcpxRuntimeHost {
@@ -104,6 +120,7 @@ export class AcpxRuntimeHost {
   readonly #sandbox: AcpxRuntimeSandbox;
   readonly #credential: ManagedCodexCredentialLease | null;
   readonly #command: VerifiedAcpxCommandLease;
+  readonly #toolBridge: RunnerToolBridge | null;
   #activeTurn: AcpxRuntimeTurn | null = null;
   #closingStarted = false;
   #closePromise: Promise<void> | null = null;
@@ -116,6 +133,7 @@ export class AcpxRuntimeHost {
     sandbox: AcpxRuntimeSandbox;
     credential: ManagedCodexCredentialLease | null;
     command: VerifiedAcpxCommandLease;
+    toolBridge: RunnerToolBridge | null;
   }) {
     this.#runtime = input.runtime;
     this.#binding = input.binding;
@@ -123,6 +141,7 @@ export class AcpxRuntimeHost {
     this.#sandbox = input.sandbox;
     this.#credential = input.credential;
     this.#command = input.command;
+    this.#toolBridge = input.toolBridge;
   }
 
   static async open(
@@ -158,6 +177,7 @@ export class AcpxRuntimeHost {
     }
     let command: VerifiedAcpxCommandLease | null = null;
     let credential: ManagedCodexCredentialLease | null = null;
+    let toolBridge: RunnerToolBridge | null = null;
     let runtime: AcpxRuntimePort | null = null;
     try {
       const sandbox = await prepareAcpxRuntimeSandbox({
@@ -173,6 +193,9 @@ export class AcpxRuntimeHost {
         });
       }
       command = await installation.openCommand();
+      toolBridge = options.semanticTools
+        ? await startRunnerToolBridge(options.semanticTools)
+        : null;
       runtime = await dependencies.openRuntime({
         command,
         profile,
@@ -183,6 +206,16 @@ export class AcpxRuntimeHost {
         permissionPolicy: acpxRuntimePermissionPolicy(binding.permissionMode),
         launchEnvironment: sandbox.launchEnvironment,
         systemInstructions: boundedInstructions(options.systemInstructions),
+        mcpServers: toolBridge
+          ? [
+              {
+                name: "paperclip",
+                url: toolBridge.url,
+                bearerToken: toolBridge.secret,
+                runnerOwned: true,
+              },
+            ]
+          : [],
       });
       await requireVerifiedAcpxModel(runtime, profile);
       const runtimeIdentity = await runtime.identity();
@@ -207,10 +240,12 @@ export class AcpxRuntimeHost {
         sandbox,
         credential,
         command,
+        toolBridge,
       });
     } catch (error) {
       const cleanupError = await cleanupRuntimeResources(
         runtime,
+        toolBridge,
         credential,
         command,
         "ACPX runtime initialization failed",
@@ -298,6 +333,7 @@ export class AcpxRuntimeHost {
     }
     const cleanupError = await cleanupRuntimeResources(
       this.#runtime,
+      this.#toolBridge,
       this.#credential,
       this.#command,
       reason,
@@ -345,6 +381,7 @@ async function boundedCancellation(
 
 async function cleanupRuntimeResources(
   runtime: AcpxRuntimePort | null,
+  toolBridge: RunnerToolBridge | null,
   credential: ManagedCodexCredentialLease | null,
   command: VerifiedAcpxCommandLease | null,
   reason: string,
@@ -352,6 +389,7 @@ async function cleanupRuntimeResources(
   const errors: unknown[] = [];
   for (const close of [
     runtime ? () => runtime.close({ reason }) : null,
+    toolBridge ? () => toolBridge.close() : null,
     credential ? () => credential.close() : null,
     command ? () => command.close() : null,
   ]) {
