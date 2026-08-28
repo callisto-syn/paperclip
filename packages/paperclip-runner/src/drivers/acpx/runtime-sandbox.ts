@@ -155,8 +155,10 @@ async function ensurePrivateDirectory(
   directory: string,
   physicalParent: string,
 ): Promise<string> {
+  let created = false;
   try {
     await mkdir(directory, { mode: PRIVATE_DIRECTORY_MODE });
+    created = true;
   } catch (error) {
     if (errorCode(error) !== "EEXIST") throw error;
   }
@@ -169,6 +171,11 @@ async function ensurePrivateDirectory(
   if (!isInside(physicalParent, physical)) {
     throw new Error("ACPX sandbox directory escaped its private parent");
   }
+  // Persist the child inode before the directory entry that names it. This is
+  // required for a successfully prepared recovery root to survive a crash;
+  // syncing only files inside the new directory does not make mkdir durable.
+  await syncDirectory(physical);
+  if (created) await syncDirectory(physicalParent);
   return physical;
 }
 
