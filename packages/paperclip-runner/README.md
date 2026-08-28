@@ -100,6 +100,9 @@ they can be returned to a caller.
 The Rust question-response validator checks the versioned response envelope
 against the exact persisted question IDs, answer modes, options, required
 answers, custom-answer policy, and text constraints before provider delivery.
+Tool results, structured question responses, and permission decisions then use
+two-phase resolution: validate retained identity and schema, require the exact
+sidecar acknowledgement, and only then clear pending local state.
 
 Run the complete contract gate with:
 

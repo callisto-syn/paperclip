@@ -12,8 +12,9 @@ use crate::generated_acpx_sidecar_contract::{
 use crate::local_runner::LocalRunnerError;
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ProviderToolBridge,
-    TOOL_SET_SCHEMA,
+    ToolResult, TOOL_SET_SCHEMA,
 };
+use crate::question_response::validate_question_response;
 
 const MAX_ID_CHARS: usize = 240;
 const MAX_MODEL_CHARS: usize = 240;
@@ -28,6 +29,27 @@ pub enum AcpxPermissionMode {
     ApproveAll,
     ApproveReads,
     DenyAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcpxPermissionDecision {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+    Cancel,
+}
+
+impl AcpxPermissionDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowAlways => "allow_always",
+            Self::RejectOnce => "reject_once",
+            Self::RejectAlways => "reject_always",
+            Self::Cancel => "cancel",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -457,6 +479,89 @@ impl AcpxProviderSession {
         Ok(Some(reconciled_events))
     }
 
+    pub fn deliver_tool_result(&mut self, result: &ToolResult) -> Result<(), LocalRunnerError> {
+        self.ensure_active_turn()?;
+        let mut next_state = self.state.clone();
+        next_state.complete_tool(&result.call_id, &result.operation_id)?;
+        let mut next_bridge = self.tool_bridge.clone();
+        next_bridge.apply_result(result.clone()).map_err(|error| {
+            LocalRunnerError::invalid(format!("ACPX tool result is invalid: {error}"))
+        })?;
+        let response = match self.transport.request(
+            GeneratedAcpxSidecarCommand::ToolResolve,
+            json!({
+                "callId":result.call_id,
+                "turnId":self.state.active_turn_id(),
+                "result":result.result,
+                "error":if result.is_error {
+                    json!({"message":"Paperclip semantic operation failed"})
+                } else {
+                    Value::Null
+                },
+            }),
+        ) {
+            Ok(response) => response,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        self.verify_resolution(&response, "tool")?;
+        self.state = next_state;
+        self.tool_bridge = next_bridge;
+        Ok(())
+    }
+
+    pub fn resolve_input(
+        &mut self,
+        request_id: &str,
+        turn_id: &str,
+        resolution: &Value,
+    ) -> Result<(), LocalRunnerError> {
+        self.ensure_bound_turn(turn_id)?;
+        validate_text(request_id, 240, "ACPX input request id")?;
+        let question_set = self
+            .state
+            .pending_question_set(request_id)
+            .ok_or_else(|| LocalRunnerError::invalid("ACPX input request is stale or unknown"))?;
+        validate_input_resolution(question_set, resolution)?;
+        let mut next_state = self.state.clone();
+        next_state.complete_input(request_id)?;
+        let response = match self.transport.request(
+            GeneratedAcpxSidecarCommand::InputResolve,
+            json!({"requestId":request_id,"turnId":turn_id,"resolution":resolution}),
+        ) {
+            Ok(response) => response,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        self.verify_resolution(&response, "input")?;
+        self.state = next_state;
+        Ok(())
+    }
+
+    pub fn resolve_permission(
+        &mut self,
+        request_id: &str,
+        turn_id: &str,
+        decision: AcpxPermissionDecision,
+    ) -> Result<(), LocalRunnerError> {
+        self.ensure_bound_turn(turn_id)?;
+        validate_text(request_id, 240, "ACPX permission request id")?;
+        let mut next_state = self.state.clone();
+        next_state.complete_permission(request_id)?;
+        let response = match self.transport.request(
+            GeneratedAcpxSidecarCommand::PermissionResolve,
+            json!({
+                "requestId":request_id,
+                "turnId":turn_id,
+                "decision":{"outcome":decision.as_str()},
+            }),
+        ) {
+            Ok(response) => response,
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        self.verify_resolution(&response, "permission")?;
+        self.state = next_state;
+        Ok(())
+    }
+
     pub fn shutdown(&mut self, reason: &str) -> Result<(), LocalRunnerError> {
         if self.closed {
             return Ok(());
@@ -480,6 +585,32 @@ impl AcpxProviderSession {
     fn ensure_open(&self) -> Result<(), LocalRunnerError> {
         if self.closed {
             return Err(LocalRunnerError::invalid("ACPX provider session is closed"));
+        }
+        Ok(())
+    }
+
+    fn ensure_active_turn(&self) -> Result<&str, LocalRunnerError> {
+        self.ensure_open()?;
+        self.state
+            .active_turn_id()
+            .ok_or_else(|| LocalRunnerError::invalid("ACPX provider session has no active turn"))
+    }
+
+    fn ensure_bound_turn(&self, turn_id: &str) -> Result<(), LocalRunnerError> {
+        validate_text(turn_id, 160, "ACPX turn id")?;
+        if self.ensure_active_turn()? != turn_id {
+            return Err(LocalRunnerError::invalid(
+                "ACPX resolution named a stale or inactive turn",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_resolution(&mut self, response: &Value, kind: &str) -> Result<(), LocalRunnerError> {
+        if response.get("resolved").and_then(Value::as_bool) != Some(true) {
+            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                "ACPX sidecar did not confirm {kind} resolution"
+            ))));
         }
         Ok(())
     }
@@ -753,6 +884,42 @@ fn validate_turn_message(value: &str) -> Result<(), LocalRunnerError> {
         ));
     }
     Ok(())
+}
+
+fn validate_input_resolution(
+    question_set: &Value,
+    resolution: &Value,
+) -> Result<(), LocalRunnerError> {
+    let object = resolution
+        .as_object()
+        .ok_or_else(|| LocalRunnerError::invalid("ACPX input resolution must be an object"))?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "action" | "response"))
+    {
+        return Err(LocalRunnerError::invalid(
+            "ACPX input resolution contains an unknown field",
+        ));
+    }
+    let action = resolution
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LocalRunnerError::invalid("ACPX input resolution requires an action"))?;
+    match action {
+        "submit" => validate_question_response(
+            question_set,
+            resolution.get("response").ok_or_else(|| {
+                LocalRunnerError::invalid("ACPX submitted input resolution requires a response")
+            })?,
+        ),
+        "decline" | "cancel" if !object.contains_key("response") => Ok(()),
+        "decline" | "cancel" => Err(LocalRunnerError::invalid(
+            "ACPX declined input resolution cannot contain a response",
+        )),
+        _ => Err(LocalRunnerError::invalid(
+            "ACPX input resolution action is unsupported",
+        )),
+    }
 }
 
 fn with_cleanup_error(

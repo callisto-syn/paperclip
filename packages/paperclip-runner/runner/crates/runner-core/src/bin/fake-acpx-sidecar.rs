@@ -97,7 +97,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-invalid-reserved-block-terminal"
             | "turns-uncorrelated-reserved-result-terminal"
             | "turns-mismatched-reserved-result-terminal"
-            | "turns-unauthorized-tool" => {
+            | "turns-unauthorized-tool"
+            | "resolutions"
+            | "resolutions-wrong-ack" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
                 let turn_id = params
@@ -369,6 +371,54 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     next_sequence += 1;
                 }
+                if command == "turn.start"
+                    && matches!(mode, "resolutions" | "resolutions-wrong-ack")
+                {
+                    for (event_type, payload) in [
+                        (
+                            "runtime.tool_called",
+                            json!({
+                                "callId":"call-1",
+                                "operationId":"issues.read",
+                                "input":{"id":"issue-1"},
+                            }),
+                        ),
+                        (
+                            "runtime.input_requested",
+                            json!({
+                                "requestId":"input-1",
+                                "questionSet":{
+                                    "schema":"paperclip.question_set.v1",
+                                    "questions":[{
+                                        "id":"target",
+                                        "prompt":"Which target?",
+                                        "required":true,
+                                        "answerMode":"single_select",
+                                        "options":[{"id":"first","label":"First"}],
+                                    }],
+                                },
+                            }),
+                        ),
+                        (
+                            "runtime.permission_requested",
+                            json!({
+                                "requestId":"permission-1",
+                                "kind":"execute",
+                                "title":"Run a command?",
+                            }),
+                        ),
+                    ] {
+                        write_turn_event(
+                            &mut stdout,
+                            next_sequence,
+                            event_type,
+                            "run-1",
+                            turn_id,
+                            payload,
+                        )?;
+                        next_sequence += 1;
+                    }
+                }
                 if command == "turn.cancel" && mode == "turns" {
                     write_turn_event(
                         &mut stdout,
@@ -437,6 +487,8 @@ fn bootstrap_success(id: u64, command: &str, request: &Value, mode: &str) -> Val
             "turnId": if mode == "turns-wrong-turn" { "wrong-turn" } else { params.get("turnId").and_then(Value::as_str).unwrap_or("missing") },
         }),
         "turn.cancel" => json!({"cancelled":mode != "turns-wrong-cancel"}),
+        "tool.resolve" => json!({"resolved":mode != "resolutions-wrong-ack"}),
+        "input.resolve" | "permission.resolve" => json!({"resolved":true}),
         "session.close" => json!({"closed":true}),
         _ => json!({"command":command,"params":params}),
     };
