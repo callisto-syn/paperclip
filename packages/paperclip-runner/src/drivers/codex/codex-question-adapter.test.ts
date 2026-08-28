@@ -121,6 +121,31 @@ describe("Codex structured question adapter", () => {
       }],
     })).toThrow("Codex option description exceeds 4000 characters");
 
+    const oversizedSecret = `Bearer ${"a".repeat(4_001)}`;
+    for (const params of [
+      {
+        description: oversizedSecret,
+        questions: [{ id: "form", question: "Choose one" }],
+      },
+      {
+        questions: [{
+          id: "question",
+          question: "Choose one",
+          description: oversizedSecret,
+        }],
+      },
+      {
+        questions: [{
+          id: "option",
+          question: "Choose one",
+          options: [{ id: "option-1", label: "One", description: oversizedSecret }],
+        }],
+      },
+    ]) {
+      expect(() => normalizeCodexQuestionSet("tool/requestUserInput", params))
+        .toThrow("exceeds 4000 characters");
+    }
+
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
         type: "object",

@@ -121,6 +121,16 @@ function exactQuestionText(
   return candidate;
 }
 
+function exactRedactedQuestionText(
+  value: unknown,
+  field: string,
+  maxCharacters = 4_000,
+): string {
+  return redactCodexDiagnostic(
+    exactQuestionText(value, field, maxCharacters),
+  );
+}
+
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
   if (!Array.isArray(value)) return undefined;
   if (value.length > 128) throw new Error("Codex question exceeds 128 options");
@@ -135,8 +145,8 @@ function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]>
       label,
       ...(text(option.description).length > 0
         ? {
-            description: exactQuestionText(
-              redactCodexDiagnostic(text(option.description)),
+            description: exactRedactedQuestionText(
+              option.description,
               "option description",
             ),
           }
@@ -200,8 +210,8 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         ),
         ...(text(question.description).length > 0
           ? {
-              helpText: exactQuestionText(
-                redactCodexDiagnostic(text(question.description)),
+              helpText: exactRedactedQuestionText(
+                question.description,
                 "question description",
               ),
             }
@@ -229,8 +239,8 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       title: text(params.title, "Codex needs your input"),
       ...(text(params.description).length > 0
         ? {
-            description: exactQuestionText(
-              redactCodexDiagnostic(text(params.description)),
+            description: exactRedactedQuestionText(
+              params.description,
               "form description",
             ),
           }
