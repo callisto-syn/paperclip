@@ -531,6 +531,8 @@ impl CodexProvider {
             )?;
             if method == "turn/completed" {
                 self.active_provider_turn_id = None;
+                self.pending_tool_requests.clear();
+                self.pending_tool_request_bytes = 0;
             }
             return Ok(Some(CodexProviderEvent::Notification {
                 method: method.to_owned(),

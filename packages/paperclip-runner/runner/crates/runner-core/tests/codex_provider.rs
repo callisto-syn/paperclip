@@ -195,6 +195,68 @@ fn codex_dynamic_tool_round_trips_through_the_provider_boundary() {
 }
 
 #[test]
+fn codex_completion_releases_pending_tool_request_capacity() {
+    let directory = temporary_directory("completed-tool-call");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--emit-tool-call",
+            "--complete-after-tool-call",
+        ],
+    );
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Complete without waiting for the tool result.", &config.cwd)
+        .expect("start provider turn");
+
+    let first_call = (0..32)
+        .find_map(
+            |_| match provider.poll().expect("poll first provider turn") {
+                Some(CodexProviderEvent::ToolCall {
+                    call_id,
+                    operation_id,
+                    ..
+                }) => Some((call_id, operation_id)),
+                _ => None,
+            },
+        )
+        .expect("observe the first semantic tool call");
+    let completed = (0..32).any(|_| {
+        matches!(
+            provider.poll().expect("poll first completion"),
+            Some(CodexProviderEvent::Notification { method, .. })
+                if method == "turn/completed"
+        )
+    });
+    assert!(completed, "Codex completed with a tool call still pending");
+    assert!(provider
+        .deliver_tool_result(&ToolResult {
+            call_id: first_call.0,
+            operation_id: first_call.1,
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .is_err());
+
+    provider
+        .start_turn("Reuse the released provider identities.", &config.cwd)
+        .expect("start another provider turn");
+    let second_call = (0..32).any(|_| {
+        matches!(
+            provider.poll().expect("poll second provider turn"),
+            Some(CodexProviderEvent::ToolCall { call_id, .. })
+                if call_id == "semantic-call-1"
+        )
+    });
+    assert!(second_call, "the next turn can reuse the released call id");
+
+    provider.shutdown().expect("stop provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_rejects_a_tool_call_that_was_not_advertised() {
     let directory = temporary_directory("unauthorized-tool");
     let config = provider_config(&directory, &["--emit-tool-call"]);

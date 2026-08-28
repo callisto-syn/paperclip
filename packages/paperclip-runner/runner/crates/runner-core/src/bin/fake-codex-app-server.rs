@@ -99,6 +99,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let call_log = argument(&args, "--call-log").map(PathBuf::from);
     let emit_question = args.iter().any(|value| value == "--emit-question");
     let emit_tool_call = args.iter().any(|value| value == "--emit-tool-call");
+    let complete_after_tool_call = args
+        .iter()
+        .any(|value| value == "--complete-after-tool-call");
     let require_dynamic_tool = args.iter().any(|value| value == "--require-dynamic-tool");
     let hold_turn = args.iter().any(|value| value == "--hold-turn");
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
@@ -207,6 +210,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "arguments": {}
                         }
                     }))?;
+                    if complete_after_tool_call {
+                        finish_turn(&state_path, &mut state, "completed")?;
+                    }
                 } else if emit_question {
                     send(json!({
                         "id": "runtime-request-1",
