@@ -3766,12 +3766,19 @@ describe("Codex app-server Codex driver", () => {
       rejected.trace.events.find((event) => event.eventType === "run.terminal")
         ?.payload,
     ).toMatchObject({
-      runTerminalState: "succeeded",
+      runTerminalState: "failed",
       reportedWorkDisposition: "yielded",
     });
 
     const missing = await traceCompletedProposal(null);
     expect(missing.trace.resultDecision).toMatchObject({ status: "rejected" });
+    expect(
+      missing.trace.events.find((event) => event.eventType === "run.terminal")
+        ?.payload,
+    ).toMatchObject({
+      runTerminalState: "failed",
+      reportedWorkDisposition: "yielded",
+    });
     expect(
       missing.trace.events.some(
         (event) =>
