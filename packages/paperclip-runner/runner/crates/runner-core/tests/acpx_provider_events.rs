@@ -235,6 +235,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
 
     for unsafe_path in [
         "custom://host/path",
+        "s3:/bucket/key",
         r"sftp:\host\secret",
         "git+ssh:/host/repo",
         r"https:\host\secret",

@@ -765,6 +765,7 @@ fn is_known_uri_scheme(scheme: &str) -> bool {
             | "https"
             | "jar"
             | "mailto"
+            | "s3"
             | "sftp"
             | "ssh"
             | "tel"
@@ -844,6 +845,7 @@ mod tests {
     fn rejects_unambiguous_uri_display_paths() {
         for location in [
             "custom://host/path",
+            "s3:/bucket/key",
             r"sftp:\host\secret",
             "git+ssh:/host/repo",
         ] {
