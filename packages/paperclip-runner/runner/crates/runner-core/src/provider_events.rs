@@ -668,35 +668,43 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
     };
-    let path = value
+    let raw_path = value
         .get("path")
         .or_else(|| value.get("uri"))
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .replace('\\', "/");
+        .unwrap_or_default();
+    let path = raw_path.replace('\\', "/");
     if path.is_empty()
         || path.starts_with('/')
-        || is_windows_drive_path(&path)
+        || is_absolute_windows_drive_path(&path)
+        || (has_drive_relative_prefix(&path) && (cfg!(windows) || raw_path.contains('\\')))
         || path.split('/').any(|segment| segment == "..")
         || path.contains("://")
     {
         Value::Null
+    } else if has_drive_relative_prefix(&path) {
+        // A single-letter colon prefix is a drive-relative path on Windows but
+        // an ordinary filename on POSIX. Preserve the latter with an explicit
+        // relative marker so the canonical target can never be reinterpreted
+        // as a host drive path downstream.
+        Value::String(format!(
+            "./{}",
+            path.chars().take(3_998).collect::<String>()
+        ))
     } else {
         Value::String(path.chars().take(4_000).collect())
     }
 }
 
-fn is_windows_drive_path(path: &str) -> bool {
+fn has_drive_relative_prefix(path: &str) -> bool {
     path.split_once(':').is_some_and(|(drive, suffix)| {
-        drive.len() == 1
-            && drive.as_bytes()[0].is_ascii_alphabetic()
-            // `C:/...` is unambiguously absolute, and uppercase drive-relative
-            // paths are the portable provider spelling. On Windows every
-            // single-letter prefix is drive-relative; on POSIX, lowercase
-            // `a:b/file` is an ordinary workspace-relative name.
-            && (suffix.starts_with('/')
-                || cfg!(windows)
-                || drive.as_bytes()[0].is_ascii_uppercase())
+        drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && !suffix.starts_with('/')
+    })
+}
+
+fn is_absolute_windows_drive_path(path: &str) -> bool {
+    path.split_once(':').is_some_and(|(drive, suffix)| {
+        drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && suffix.starts_with('/')
     })
 }
 
@@ -714,11 +722,19 @@ mod tests {
         {
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": "a:b/file.txt"}))),
-                Value::String("a:b/file.txt".to_owned()),
+                Value::String("./a:b/file.txt".to_owned()),
             );
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
                 Value::Null,
+            );
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": "c:Users/alice/file.txt"}))),
+                Value::String("./c:Users/alice/file.txt".to_owned()),
+            );
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": "A:b/file.txt"}))),
+                Value::String("./A:b/file.txt".to_owned()),
             );
         }
         #[cfg(windows)]
