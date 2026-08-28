@@ -1,4 +1,8 @@
-import type { AcpRuntimeEvent, AcpRuntimeTurnResult } from "acpx/runtime";
+import type {
+  AcpElicitationHandler,
+  AcpRuntimeEvent,
+  AcpRuntimeTurnResult,
+} from "acpx/runtime";
 
 import type { NativeAcpxPermissionMode } from "../../contracts/native-execution.js";
 import {
@@ -50,6 +54,7 @@ export interface AcpxRuntimeTurnInput {
   text: string;
   requestId: string;
   signal?: AbortSignal;
+  onElicitation?: AcpElicitationHandler;
 }
 
 export interface AcpxRuntimeTurn {
@@ -293,6 +298,9 @@ export class AcpxRuntimeHost {
       text,
       requestId,
       ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.onElicitation
+        ? { onElicitation: input.onElicitation }
+        : {}),
     });
     this.#activeTurn = turn;
     void turn.result
