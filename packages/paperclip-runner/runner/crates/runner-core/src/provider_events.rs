@@ -682,11 +682,15 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     if path.is_empty()
         || windows_normalized_path.starts_with('/')
         || is_absolute_windows_drive_path(&windows_normalized_path)
-        || has_drive_relative_prefix(&windows_normalized_path)
+        // ACPX providers execute on the runner host. On POSIX, a leading
+        // single-letter colon component is a valid relative filename, not a
+        // Windows drive selector. Interpret that ambiguous spelling as a
+        // drive-relative path only when the runner itself is on Windows.
+        || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
         || windows_normalized_path
             .split('/')
             .any(|segment| segment == "..")
-        || path.contains("://")
+        || windows_normalized_path.contains("://")
     {
         Value::Null
     } else {
@@ -711,7 +715,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_windows_drive_paths_on_every_host_platform() {
+    fn rejects_absolute_windows_paths_on_every_host_platform() {
         assert_eq!(
             safe_acpx_location(Some(&json!({"path": "C:\\Users\\alice\\file.txt"}))),
             Value::Null,
@@ -720,15 +724,23 @@ mod tests {
             safe_acpx_location(Some(&json!({"path": "\\\\server\\share\\file.txt"}))),
             Value::Null,
         );
-        for drive_relative in [
-            "a:b/file.txt",
-            "C:Users\\alice\\file.txt",
-            "c:Users/alice/file.txt",
-            "A:b/file.txt",
-            "a:b\\c",
-        ] {
+    }
+
+    #[test]
+    fn classifies_ambiguous_drive_relative_syntax_for_the_runner_platform() {
+        let location = safe_acpx_location(Some(&json!({"path": "a:b/file.txt"})));
+        if cfg!(windows) {
+            assert_eq!(location, Value::Null);
+        } else {
+            assert_eq!(location, Value::String("a:b/file.txt".to_owned()));
+        }
+    }
+
+    #[test]
+    fn rejects_backslash_spelled_schemes_on_every_host_platform() {
+        for location in [r"https:\\host\secret", r"file:\\server\share"] {
             assert_eq!(
-                safe_acpx_location(Some(&json!({"path": drive_relative}))),
+                safe_acpx_location(Some(&json!({"path": location}))),
                 Value::Null,
             );
         }

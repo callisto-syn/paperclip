@@ -165,25 +165,42 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     );
     assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
 
-    for unsafe_path in [
-        r"C:Users\alice\repo\src\main.rs",
-        "c:Users/alice/repo/src/main.rs",
-    ] {
-        let windows_drive_relative = normalize(
+    let windows_drive_relative = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-3",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"a:b/file.txt"}]
+        }),
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            windows_drive_relative[0].payload["target"],
+            serde_json::Value::Null,
+        );
+    } else {
+        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt",);
+    }
+
+    for unsafe_path in [r"https:\\host\secret", r"file:\\server\share"] {
+        let backslash_scheme = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
                 "type":"tool_call",
                 "tag":"tool_call_update",
-                "toolCallId":"tool-3",
+                "toolCallId":"tool-scheme",
                 "kind":"read",
                 "status":"completed",
                 "locations":[{"path":unsafe_path}]
             }),
         );
         assert_eq!(
-            windows_drive_relative[0].payload["target"],
+            backslash_scheme[0].payload["target"],
             serde_json::Value::Null,
-            "drive-relative provider path should be rejected: {unsafe_path}",
+            "scheme-qualified provider path should be rejected: {unsafe_path}",
         );
     }
 }
