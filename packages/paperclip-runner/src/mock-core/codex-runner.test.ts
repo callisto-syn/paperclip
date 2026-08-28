@@ -54,6 +54,8 @@ function completedResult(): PrpStructuredRunResult {
 }
 
 class TraceConformanceDriver implements HarnessDriver {
+  constructor(private readonly result: PrpStructuredRunResult = completedResult()) {}
+
   async descriptor() {
     return {
       kind: "codex-trace-fixture",
@@ -78,6 +80,7 @@ class TraceConformanceDriver implements HarnessDriver {
       releaseEvents = resolve;
     });
     const events: PrpEvent[] = [];
+    const result = structuredClone(this.result);
     const context: CodexModelContextSnapshot = {
       protocolVersion: CODEX_CODEX_PROTOCOL_VERSION,
       codexVersion: "trace-fixture",
@@ -138,7 +141,7 @@ class TraceConformanceDriver implements HarnessDriver {
         events.push(
           event(1, "session.started", { context }, false),
           event(2, "turn.started", {}),
-          event(3, "run.result.proposed", completedResult()),
+          event(3, "run.result.proposed", result),
           event(4, "turn.completed", {}),
         );
         releaseEvents?.();
@@ -280,6 +283,30 @@ describe("Codex trace conformance", () => {
       contextIsSkillless: true,
       unrelatedSkillsAbsent: true,
       credentialsAbsent: true,
+    });
+    expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
+  });
+
+  it("fails the run when the controller rejects a completed provider proposal", async () => {
+    const rejectedResult = completedResult();
+    rejectedResult.completionClaim.contractRevision = "stale-contract-revision";
+    const trace = await runCodexCodexTracer({
+      driver: new TraceConformanceDriver(rejectedResult),
+      taskEnvelope: envelope,
+      workingDirectory: "/trace-workspace",
+      timeoutMs: 1_000,
+    });
+
+    expect(trace.resultDecision.status).toBe("rejected");
+    expect(trace.events.find((event) => event.eventType === "run.terminal")?.payload)
+      .toMatchObject({
+        turnTerminalState: "completed",
+        runTerminalState: "failed",
+        reportedWorkDisposition: "yielded",
+      });
+    expect(trace.liveSnapshot.terminal).toMatchObject({
+      turnTerminalState: "completed",
+      runTerminalState: "failed",
     });
     expect(trace.replaySnapshot).toEqual(trace.liveSnapshot);
   });

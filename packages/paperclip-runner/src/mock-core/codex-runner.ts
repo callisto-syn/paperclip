@@ -462,7 +462,13 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
     );
     const providerTerminal = providerEvents.findLast(isTurnTerminal);
     if (providerTerminal === undefined) throw new Error("turn terminal invariant failed");
-    const runtime = runtimeTerminal(providerTerminal);
+    const providerRuntime = runtimeTerminal(providerTerminal);
+    // A provider may complete its turn after proposing a result that the
+    // controller cannot accept. Preserve the provider's turn fact, but never
+    // promote a rejected semantic result to a successful run.
+    const runtime = resultDecision.status === "accepted"
+      ? providerRuntime
+      : { ...providerRuntime, runTerminalState: "failed" as const };
     controlEvents.push(controlEvent("run.terminal", {
       schema: "paperclip.prp.terminal.v1",
       ...runtime,
