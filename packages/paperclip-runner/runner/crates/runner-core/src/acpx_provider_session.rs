@@ -480,7 +480,7 @@ impl AcpxProviderSession {
     }
 
     pub fn deliver_tool_result(&mut self, result: &ToolResult) -> Result<(), LocalRunnerError> {
-        self.ensure_active_turn()?;
+        let turn_id = self.ensure_active_turn()?.to_owned();
         let mut next_state = self.state.clone();
         next_state.complete_tool(&result.call_id, &result.operation_id)?;
         let mut next_bridge = self.tool_bridge.clone();
@@ -491,7 +491,7 @@ impl AcpxProviderSession {
             GeneratedAcpxSidecarCommand::ToolResolve,
             json!({
                 "callId":result.call_id,
-                "turnId":self.state.active_turn_id(),
+                "turnId":turn_id,
                 "result":result.result,
                 "error":if result.is_error {
                     json!({"message":"Paperclip semantic operation failed"})

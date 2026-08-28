@@ -288,10 +288,9 @@ impl AcpxProviderState {
                 "ACPX tool result operation mismatch",
             ));
         }
-        let pending = self
-            .pending_tools
-            .remove(call_id)
-            .expect("validated ACPX pending tool remains present");
+        let pending = self.pending_tools.remove(call_id).ok_or_else(|| {
+            LocalRunnerError::invalid("ACPX pending tool disappeared during completion")
+        })?;
         self.pending_tool_input_bytes = self
             .pending_tool_input_bytes
             .saturating_sub(pending.input_bytes);
