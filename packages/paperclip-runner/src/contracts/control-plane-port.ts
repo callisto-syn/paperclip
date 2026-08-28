@@ -22,6 +22,14 @@ export interface AppendedEventReceipt {
   disposition: "committed" | "duplicate";
 }
 
+export interface AppendControlPlaneEventOptions {
+  /**
+   * Cancellation is a durability boundary: an aborted append must settle
+   * without committing before it rejects.
+   */
+  signal: AbortSignal;
+}
+
 export interface ReplayControlPlaneEventsInput {
   runId: string;
   sourceInstanceId: string;
@@ -52,7 +60,10 @@ export interface ControlPlanePort {
   openRun(input: OpenControlPlaneRunInput): Promise<void>;
   loadSessionCheckpoint?(): Promise<PersistedNativeSession | null>;
   checkpointSession?(snapshot: PersistedNativeSession): Promise<void>;
-  appendEvent(event: NativeRunEvent | PrpEvent): Promise<AppendedEventReceipt>;
+  appendEvent(
+    event: NativeRunEvent | PrpEvent,
+    options?: AppendControlPlaneEventOptions,
+  ): Promise<AppendedEventReceipt>;
   replayEvents(input: ReplayControlPlaneEventsInput): Promise<ReplayedControlPlaneEvents>;
   completeRun(result: NativeRunResult | CompleteControlPlaneRunInput): Promise<void>;
 }

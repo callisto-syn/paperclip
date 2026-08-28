@@ -77,7 +77,7 @@ async function consumeTurn(
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let timeoutTriggered = false;
+  const appendAbort = new AbortController();
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
   let stopConsumer = false;
@@ -99,7 +99,9 @@ async function consumeTurn(
           if (stopConsumer) throw new Error("native event consumer stopped");
           if (next.done) throw new Error("native event stream closed before a turn terminal fact");
           const event = next.value;
-          const receipt = await controlPlane.appendEvent(event);
+          const receipt = await controlPlane.appendEvent(event, {
+            signal: appendAbort.signal,
+          });
           if (stopConsumer) throw new Error("native event consumer stopped");
           eventCount += receipt.disposition === "committed" ? 1 : 0;
           highestContiguousSourceSeq = Math.max(highestContiguousSourceSeq, receipt.highestContiguousSourceSeq);
@@ -167,7 +169,6 @@ async function consumeTurn(
       consumer,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          timeoutTriggered = true;
           reject(new Error(`native session timed out after ${timeoutMs}ms`));
         }, timeoutMs);
       }),
@@ -175,6 +176,7 @@ async function consumeTurn(
     ]);
   } catch (error) {
     stopConsumer = true;
+    appendAbort.abort(error);
     await session.interrupt?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
     await session.cancel?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
     // `close` is the required termination boundary. Unlike optional interrupt
@@ -190,17 +192,12 @@ async function consumeTurn(
     // teardown before the session can be closed or reused.
     const iteratorTeardown = eventIterator.return?.().catch(() => undefined);
     // The consumer may already be past `next()` and awaiting a durable append.
-    // A configured timeout must still bound the caller if an external control
-    // plane ignores cancellation and leaves that append unresolved. Observe
-    // both teardown promises without joining them in that one case; the
-    // stopConsumer guard prevents a late receipt from advancing local state.
-    if (timeoutTriggered) {
-      void iteratorTeardown;
-      void consumer.catch(() => undefined);
-    } else {
-      await iteratorTeardown;
-      await consumer.catch(() => undefined);
-    }
+    // Abort is a control-plane durability boundary: appendEvent must settle
+    // without committing when its signal is aborted. Join both promises so a
+    // failed execution cannot be followed by a late durable write or provider
+    // teardown.
+    await iteratorTeardown;
+    await consumer.catch(() => undefined);
     if (timer !== undefined) clearTimeout(timer);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();

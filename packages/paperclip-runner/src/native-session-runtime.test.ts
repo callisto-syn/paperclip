@@ -305,9 +305,21 @@ describe("executeNativeSession recovery", () => {
     let releaseTeardown = () => {};
     const teardownReleased = new Promise<void>((resolve) => { releaseTeardown = resolve; });
     const iteratorTeardown = vi.fn();
-    const appendEvent = vi.fn(async () => {
+    let appendCommitted = false;
+    const appendEvent = vi.fn(async (
+      _event: PrpEvent,
+      options?: { signal: AbortSignal },
+    ) => {
       markAppendStarted();
-      await appendReleased;
+      await Promise.race([
+        appendReleased,
+        new Promise<never>((_resolve, reject) => {
+          const rejectAbort = () => reject(options?.signal.reason ?? new Error("append aborted"));
+          if (options?.signal.aborted) rejectAbort();
+          else options?.signal.addEventListener("abort", rejectAbort, { once: true });
+        }),
+      ]);
+      appendCommitted = true;
       return {
         cursor: 1,
         highestContiguousSourceSeq: 1,
@@ -315,7 +327,7 @@ describe("executeNativeSession recovery", () => {
       };
     });
     const cancel = vi.fn(async () => undefined);
-    const close = vi.fn(async () => undefined);
+    const close = vi.fn(async () => { releaseTeardown(); });
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -365,7 +377,6 @@ describe("executeNativeSession recovery", () => {
       async completeRun() {},
     };
 
-    let executionSettled = false;
     const execution = executeNativeSession({
       input,
       backend,
@@ -375,20 +386,17 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 1,
       keepSessionOpen: true,
     });
-    void execution.then(
-      () => { executionSettled = true; },
-      () => { executionSettled = true; },
-    );
+    const rejection = expect(execution).rejects.toThrow("native session timed out");
     await appendStarted;
     await vi.waitFor(() => expect(iteratorTeardown).toHaveBeenCalledOnce());
-    await expect(execution).rejects.toThrow("native session timed out");
-    expect(executionSettled).toBe(true);
+    await rejection;
     expect(cancel).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalled();
     expect(appendEvent).toHaveBeenCalledOnce();
-    releaseTeardown();
+    expect(appendCommitted).toBe(false);
     releaseAppend();
     await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(appendCommitted).toBe(false);
   });
 
   it("uses required session closure to release a blocked event read", async () => {
