@@ -15,6 +15,7 @@ use crate::process_supervisor::{BoundedLogBuffer, ProcessOutput, SupervisedProce
 
 pub const ACPX_SIDECAR_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_BUFFERED_EVENTS: usize = 512;
+const MAX_EVENT_POLL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug)]
@@ -127,13 +128,18 @@ impl AcpxSidecarTransport {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<AcpxSidecarEvent>, LocalRunnerError> {
-        if let Some(event) = self.buffered_events.pop_front() {
-            return Ok(Some(event));
-        }
         if self.poisoned {
             return Err(LocalRunnerError::invalid(
                 "ACPX sidecar transport is unavailable after a protocol failure",
             ));
+        }
+        if timeout > MAX_EVENT_POLL_TIMEOUT {
+            return Err(LocalRunnerError::invalid(
+                "ACPX sidecar event poll timeout must not exceed 120 s",
+            ));
+        }
+        if let Some(event) = self.buffered_events.pop_front() {
+            return Ok(Some(event));
         }
         if timeout.is_zero() {
             return Ok(None);
@@ -372,6 +378,7 @@ impl AcpxSidecarTransport {
             return;
         }
         self.poisoned = true;
+        self.buffered_events.clear();
         let _ = self.process.terminate_group();
     }
 }

@@ -35,6 +35,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "wrong-id" => {
                 write_json(&mut stdout, &success(id + 1, command, &request))?;
             }
+            "event-wrong-id" => {
+                write_event(&mut stdout, next_sequence)?;
+                next_sequence += 1;
+                write_json(&mut stdout, &success(id + 1, command, &request))?;
+            }
             "remote-error" => {
                 write_json(
                     &mut stdout,

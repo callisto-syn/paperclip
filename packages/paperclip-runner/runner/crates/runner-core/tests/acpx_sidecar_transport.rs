@@ -74,6 +74,19 @@ fn rejects_response_identity_mismatch() {
 }
 
 #[test]
+fn a_poisoned_transport_discards_events_buffered_before_failure() {
+    let mut transport = transport("event-wrong-id", Duration::from_secs(1));
+    let error = transport
+        .request(GeneratedAcpxSidecarCommand::Initialize, json!({}))
+        .expect_err("wrong response id must fail after the event is buffered");
+    assert!(error.to_string().contains("response id mismatch"));
+    let poll_error = transport
+        .poll_event(Duration::ZERO)
+        .expect_err("a poisoned transport must not expose retained events");
+    assert!(poll_error.to_string().contains("unavailable"));
+}
+
+#[test]
 fn bounds_events_while_waiting_for_a_response() {
     let mut transport = transport("flood", Duration::from_secs(2));
     let error = transport
@@ -115,6 +128,22 @@ fn an_empty_event_poll_does_not_poison_the_transport() {
         transport
             .poll_event(Duration::from_millis(20))
             .expect("the transport remains available after an empty poll"),
+        None
+    );
+    transport.shutdown().expect("fake sidecar should stop");
+}
+
+#[test]
+fn rejects_an_unbounded_event_poll_without_poisoning_the_transport() {
+    let mut transport = transport("silent", Duration::from_secs(1));
+    let error = transport
+        .poll_event(Duration::MAX)
+        .expect_err("an unbounded event poll must be rejected");
+    assert!(error.to_string().contains("must not exceed 120 s"));
+    assert_eq!(
+        transport
+            .poll_event(Duration::ZERO)
+            .expect("a caller timeout error must not poison the transport"),
         None
     );
     transport.shutdown().expect("fake sidecar should stop");
