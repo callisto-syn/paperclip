@@ -1243,6 +1243,29 @@ function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
         "persisted Codex ACPX semantic result has no completed terminal turn",
       );
     }
+  } else if (terminalTurns.length > 0) {
+    const settlementTurnId =
+      snapshot.activeTurnId ?? terminalTurns.at(-1)!.turnId;
+    const settlement = terminalTurns.find(
+      (terminal) => terminal.turnId === settlementTurnId,
+    );
+    if (!settlement || !isCompletedTerminal(settlement.fingerprint)) {
+      throw new Error(
+        "persisted Codex ACPX resultless recovery requires a completed terminal turn",
+      );
+    }
+  }
+}
+
+function isCompletedTerminal(terminalFingerprint: string): boolean {
+  try {
+    const value: unknown = JSON.parse(terminalFingerprint);
+    return typeof value === "object"
+      && value !== null
+      && !Array.isArray(value)
+      && (value as Record<string, unknown>).status === "completed";
+  } catch {
+    return false;
   }
 }
 

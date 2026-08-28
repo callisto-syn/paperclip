@@ -849,6 +849,39 @@ describe("Codex ACPX harness driver", () => {
     await session.close({ reason: "failed semantic recovery rejected" });
   });
 
+  it("rejects failed resultless terminals as disposition settlements", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-failed-resultless-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.completed");
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Attempt the task." },
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await terminalEvents;
+    const snapshot = await session.snapshot();
+    snapshot.terminalTurns = snapshot.terminalTurns?.map((terminal) => ({
+      ...terminal,
+      fingerprint: JSON.stringify({ status: "failed" }),
+    }));
+
+    for (const activeTurnId of [turnId, null]) {
+      await expect(fixture.driver.recoverSession!({
+        ...snapshot,
+        activeTurnId,
+      })).resolves.toEqual({
+        recovered: false,
+        reason:
+          "persisted Codex ACPX resultless recovery requires a completed terminal turn",
+      });
+    }
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    await session.close({ reason: "failed resultless recovery rejected" });
+  });
+
   it("rejects an unimplemented replacement policy before reopening", async () => {
     const fixture = driverFixture();
     const session = await fixture.driver.openSession({
