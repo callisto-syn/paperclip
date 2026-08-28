@@ -815,6 +815,40 @@ describe("Codex ACPX harness driver", () => {
     await session.close({ reason: "tampered recovery rejected" });
   });
 
+  it("rejects semantic results from failed terminal turns", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-failed-semantic-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.completed");
+    await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+    await fixture.hostOptions!.semanticTools!.handler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-before-failure",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await terminalEvents;
+    const snapshot = await session.snapshot();
+    snapshot.terminalTurns = snapshot.terminalTurns?.map((terminal) => ({
+      ...terminal,
+      fingerprint: JSON.stringify({ status: "failed" }),
+    }));
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason:
+        "persisted Codex ACPX semantic result has no completed terminal turn",
+    });
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    await session.close({ reason: "failed semantic recovery rejected" });
+  });
+
   it("rejects an unimplemented replacement policy before reopening", async () => {
     const fixture = driverFixture();
     const session = await fixture.driver.openSession({

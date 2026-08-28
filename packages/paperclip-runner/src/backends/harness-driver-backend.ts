@@ -64,6 +64,23 @@ export class HarnessDriverBackend implements NativeSessionBackend {
     if (this.#driver.recoverSession === undefined) {
       return { recovered: false, reason: "driver does not support recovery" };
     }
+    const recoveredSemanticTurn = completedSemanticTurn(snapshot);
+    const semanticTurnId =
+      recoveredSemanticTurn?.turnId ??
+      snapshot.activeTurnId ??
+      snapshot.terminalTurns?.at(-1)?.turnId ??
+      null;
+    const recoveredTerminal =
+      snapshot.terminal ??
+      (recoveredSemanticTurn && snapshot.semanticResult
+        ? {
+            schema: "paperclip.prp.terminal.v1" as const,
+            turnTerminalState: "completed" as const,
+            runTerminalState: "succeeded" as const,
+            reportedWorkDisposition:
+              snapshot.semanticResult.reportedWorkDisposition,
+          }
+        : null);
     const persisted: PersistedHarnessSession = {
       driverKind: snapshot.driverKind ?? snapshot.backendKind,
       driverSessionId: snapshot.sessionId,
@@ -76,7 +93,7 @@ export class HarnessDriverBackend implements NativeSessionBackend {
         : { providerRecoveryPolicy: snapshot.providerRecoveryPolicy }),
       runId: snapshot.identity.runId,
       normalizedSessionId: snapshot.identity.sessionId,
-      activeTurnId: snapshot.activeTurnId ?? snapshot.terminalTurns?.at(-1)?.turnId ?? null,
+      activeTurnId: snapshot.activeTurnId ?? recoveredSemanticTurn?.turnId ?? snapshot.terminalTurns?.at(-1)?.turnId ?? null,
       lastSourceSequence: parseCursor(snapshot.cursor),
       ...(snapshot.semanticResult === undefined || snapshot.semanticResult === null
         ? {}
@@ -84,7 +101,7 @@ export class HarnessDriverBackend implements NativeSessionBackend {
             semanticResult: {
               result: snapshot.semanticResult,
               fingerprint: canonicalJson(snapshot.semanticResult),
-              turnId: snapshot.activeTurnId ?? snapshot.terminalTurns?.at(-1)?.turnId ?? "recovered",
+              turnId: semanticTurnId ?? "recovered",
           },
         }),
       terminalTurns: snapshot.terminalTurns ?? [],
@@ -117,10 +134,34 @@ export class HarnessDriverBackend implements NativeSessionBackend {
       session: new HarnessNativeSession(
         { identity: snapshot.identity },
         recovered.session,
-        snapshot.terminal ?? null,
+        recoveredTerminal,
       ),
     };
   }
+}
+
+function completedSemanticTurn(
+  snapshot: PersistedNativeSession,
+): { turnId: string; fingerprint: string } | null {
+  if (snapshot.semanticResult === undefined || snapshot.semanticResult === null) {
+    return null;
+  }
+  const semanticFingerprint = canonicalJson(snapshot.semanticResult);
+  for (const terminal of [...(snapshot.terminalTurns ?? [])].reverse()) {
+    try {
+      const value: unknown = JSON.parse(terminal.fingerprint);
+      const record = plainRecord(value);
+      if (
+        record?.status === "completed" &&
+        record.semanticResult === semanticFingerprint
+      ) {
+        return terminal;
+      }
+    } catch {
+      // Non-canonical or legacy terminal fingerprints cannot prove completion.
+    }
+  }
+  return null;
 }
 
 function assertProviderSessionIdentity(

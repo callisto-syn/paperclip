@@ -1226,11 +1226,39 @@ function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
     ) {
       throw new Error("persisted Codex ACPX semantic result is invalid");
     }
-    if (!terminalTurnIds.has(semantic.turnId)) {
+    const semanticTerminal = terminalTurns.find(
+      (terminal) => terminal.turnId === semantic.turnId,
+    );
+    if (
+      !semanticTerminal ||
+      !isCompletedSemanticTerminal(
+        semanticTerminal.fingerprint,
+        semantic.fingerprint,
+      )
+    ) {
       throw new Error(
-        "persisted Codex ACPX semantic result has no terminal turn",
+        "persisted Codex ACPX semantic result has no completed terminal turn",
       );
     }
+  }
+}
+
+function isCompletedSemanticTerminal(
+  terminalFingerprint: string,
+  semanticFingerprint: string,
+): boolean {
+  try {
+    const value: unknown = JSON.parse(terminalFingerprint);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const terminal = value as Record<string, unknown>;
+    return (
+      terminal.status === "completed" &&
+      terminal.semanticResult === semanticFingerprint
+    );
+  } catch {
+    return false;
   }
 }
 

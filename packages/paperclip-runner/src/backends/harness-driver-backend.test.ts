@@ -345,6 +345,54 @@ describe("HarnessDriverBackend", () => {
     });
   });
 
+  it("reconstructs a missing top-level terminal from a completed semantic turn", async () => {
+    const recoveryDriver: HarnessDriver = {
+      ...driver,
+      async recoverSession() {
+        return { recovered: true, session: new FakeHarnessSession() };
+      },
+    };
+    const backend = new HarnessDriverBackend(recoveryDriver);
+    const semanticFingerprint = canonicalTestJson(result);
+    const recovery = await backend.recoverSession({
+      backendKind: "runner",
+      driverKind: "fake",
+      sessionId: "driver-1",
+      providerSessionId: "provider-1",
+      identity: {
+        runId: "run-terminal-inference",
+        sessionId: "session-1",
+        companyId: "company-1",
+        issueId: "issue-1",
+        agentId: "agent-1",
+      },
+      semanticResult: result,
+      terminal: null,
+      activeTurnId: null,
+      terminalTurns: [
+        {
+          turnId: "turn-1",
+          fingerprint: JSON.stringify({
+            status: "completed",
+            semanticResult: semanticFingerprint,
+          }),
+        },
+      ],
+    });
+
+    expect(recovery).toMatchObject({ recovered: true });
+    await expect(recovery.session!.result()).resolves.toEqual({
+      result,
+      terminal: {
+        schema: "paperclip.prp.terminal.v1",
+        turnTerminalState: "completed",
+        runTerminalState: "succeeded",
+        reportedWorkDisposition: "done",
+      },
+      turnId: "turn-1",
+    });
+  });
+
   it("delegates native runtime-request resolutions to the harness session", async () => {
     runtimeResolutions.length = 0;
     const backend = new HarnessDriverBackend(driver);
@@ -480,3 +528,17 @@ describe("HarnessDriverBackend", () => {
     await expect(iterator.next()).rejects.toThrow("provider stopped after cancellation");
   });
 });
+
+function canonicalTestJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalTestJson).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalTestJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
