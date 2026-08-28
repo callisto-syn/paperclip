@@ -3274,9 +3274,9 @@ describe("Codex app-server Codex driver", () => {
     const second = new FakeCodexTransport();
     const third = new FakeCodexTransport();
     const fourth = new FakeCodexTransport();
-    third.turnStartResponse = Promise.resolve({
-      turn: { id: "turn-2", status: "inProgress", items: [] },
-    });
+    third.turnStartResponse = Promise.reject(
+      new CodexRpcError('{"code":-32602,"message":"invalid params"}', -32_602),
+    );
     second.readResponse = {
       thread: {
         id: "thread-1",
@@ -3341,6 +3341,16 @@ describe("Codex app-server Codex driver", () => {
     const recoveryTerminal = collectUntilTerminal(retried!.events());
     await expect(retried!.startTurn({
       message: { role: "user", text: recoveryMessage },
+    })).rejects.toThrow("invalid params");
+    await expect(retried!.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      dispositionOnlyRecoveryConsumed: false,
+    });
+    third.turnStartResponse = Promise.resolve({
+      turn: { id: "turn-2", status: "inProgress", items: [] },
+    });
+    await expect(retried!.startTurn({
+      message: { role: "user", text: recoveryMessage },
     })).resolves.toMatchObject({ turnId: "turn-2" });
     await expect(retried!.snapshot()).resolves.toMatchObject({
       activeTurnId: "turn-2",
@@ -3352,7 +3362,7 @@ describe("Codex app-server Codex driver", () => {
     const recoveryStarts = third.calls.filter(
       (call) => call.method === "turn/start",
     );
-    expect(recoveryStarts).toHaveLength(1);
+    expect(recoveryStarts).toHaveLength(2);
     expect(recoveryStarts[0]!.params.input).toEqual([
       { type: "text", text: recoveryMessage, text_elements: [] },
     ]);

@@ -56,6 +56,7 @@ import {
   providerFamilyCapabilities,
 } from "../../provider-events.js";
 import {
+  CodexRpcError,
   ProcessCodexAppServerTransport,
   createSanitizedCodexEnvironment,
   isCodexMethodUnavailable,
@@ -1266,7 +1267,18 @@ class CodexHarnessSession implements HarnessSession {
           : { outputSchema: CODEX_RESULT_OUTPUT_SCHEMA }),
       });
     } catch (error) {
-      if (dispositionOnlyRecovery) this.#terminal = true;
+      if (dispositionOnlyRecovery) {
+        if (error instanceof CodexRpcError) {
+          // A JSON-RPC error is a definite provider rejection: no turn was
+          // accepted, so the one-shot recovery allowance remains available.
+          this.#dispositionOnlyRecoveryAvailable = true;
+          this.#dispositionOnlyRecoveryConsumed = false;
+        } else {
+          // A transport failure is ambiguous. Recovery must inspect the
+          // provider thread before deciding whether this submission landed.
+          this.#terminal = true;
+        }
+      }
       throw error;
     } finally {
       this.#turnStartPending = false;
