@@ -541,8 +541,11 @@ class CodexAcpxSession implements HarnessSession {
         const pending =
           this.#hostClosePromise ?? this.#startHostClose({ reason });
         try {
-          await pending;
+          await settleWithin(pending, this.#closeSettlementTimeoutMs);
         } catch {
+          if (this.#hostClosePromise === pending) {
+            this.#hostClosePromise = null;
+          }
           await retryCleanupAfter(this.#closeSettlementTimeoutMs);
         }
       }

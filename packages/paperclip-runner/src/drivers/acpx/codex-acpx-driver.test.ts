@@ -239,11 +239,36 @@ describe("Codex ACPX harness driver", () => {
       session.close({ reason: "runtime close stalled" }),
     ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
     firstClose.reject(new Error("late runtime cleanup failure"));
-    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
     recoveredClose.resolve();
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
     await vi.waitFor(async () => {
       await expect(
         session.close({ reason: "cleanup ownership verified" }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  it("autonomously retries cleanup that never settles after the close timeout", async () => {
+    const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+    const stalledClose = deferred<void>();
+    const recoveredClose = deferred<void>();
+    fixture.host.close
+      .mockImplementationOnce(() => stalledClose.promise)
+      .mockImplementationOnce(() => recoveredClose.promise);
+    const session = await fixture.driver.openSession({
+      runId: "run-close-stalled-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+
+    await expect(
+      session.close({ reason: "runtime close never settles" }),
+    ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
+    recoveredClose.resolve();
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => {
+      await expect(
+        session.close({ reason: "stalled cleanup ownership verified" }),
       ).resolves.toBeUndefined();
     });
   });
