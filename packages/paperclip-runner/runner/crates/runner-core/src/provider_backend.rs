@@ -1043,6 +1043,15 @@ impl CodexCommandExecutor {
             .get("requestId")
             .and_then(Value::as_str)
             .ok_or_else(|| DurableRunnerError::invalid("request.resolve requires requestId"))?;
+        if self
+            .state
+            .as_ref()
+            .is_none_or(|state| state.active_provider_turn_id.is_none())
+        {
+            return Err(DurableRunnerError::invalid(
+                "cannot resolve a Codex runtime request outside an active turn",
+            ));
+        }
         let response = payload
             .get("response")
             .ok_or_else(|| DurableRunnerError::invalid("request.resolve requires response"))?;

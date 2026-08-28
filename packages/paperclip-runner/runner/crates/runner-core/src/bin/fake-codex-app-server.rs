@@ -94,6 +94,29 @@ fn finish_turn(state_path: &Path, state: &mut FakeState, status: &str) -> io::Re
     save_state(state_path, state)
 }
 
+fn send_question(state: &FakeState) -> io::Result<()> {
+    send(json!({
+        "id": "runtime-request-1",
+        "method": "item/tool/requestUserInput",
+        "params": {
+            "threadId": state.thread_id,
+            "turnId": "provider-turn-1",
+            "itemId": "question-item-1",
+            "isBlocking": true,
+            "title": "Deployment input",
+            "questions": [{
+                "id": "environment",
+                "header": "Environment",
+                "question": "Where should we deploy?",
+                "options": [
+                    {"label": "Staging", "description": "Deploy safely."},
+                    {"label": "Production", "description": "Deploy directly."}
+                ]
+            }]
+        }
+    }))
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let state_path =
@@ -137,6 +160,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let delayed_tool_after_failed_turn = args
         .iter()
         .any(|value| value == "--delayed-tool-after-failed-turn");
+    let question_before_failed_turn = args
+        .iter()
+        .any(|value| value == "--question-before-failed-turn");
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
@@ -255,6 +281,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }))?;
                 if fail_after_second_turn_start && turn_start_count == 2 {
                     return Err("configured failure after second turn start".into());
+                } else if question_before_failed_turn {
+                    send_question(&state)?;
+                    send(json!({
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": state.thread_id,
+                            "turn": {"id": "provider-turn-1", "status": "failed"}
+                        }
+                    }))?;
+                    state.active_turn_id = None;
+                    save_state(&state_path, &state)?;
                 } else if delayed_tool_after_failed_turn {
                     send(json!({
                         "method": "turn/failed",
@@ -297,26 +334,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else if emit_question {
-                    send(json!({
-                        "id": "runtime-request-1",
-                        "method": "item/tool/requestUserInput",
-                        "params": {
-                            "threadId": state.thread_id,
-                            "turnId": "provider-turn-1",
-                            "itemId": "question-item-1",
-                            "isBlocking": true,
-                            "title": "Deployment input",
-                            "questions": [{
-                                "id": "environment",
-                                "header": "Environment",
-                                "question": "Where should we deploy?",
-                                "options": [
-                                    {"label": "Staging", "description": "Deploy safely."},
-                                    {"label": "Production", "description": "Deploy directly."}
-                                ]
-                            }]
-                        }
-                    }))?;
+                    send_question(&state)?;
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
                     if emit_post_completion_warning {

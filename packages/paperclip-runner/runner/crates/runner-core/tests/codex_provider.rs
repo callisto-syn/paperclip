@@ -672,6 +672,49 @@ fn codex_rejects_delayed_calls_after_every_terminal_notification() {
 }
 
 #[test]
+fn codex_rejects_a_runtime_response_after_its_turn_terminates() {
+    let directory = temporary_directory("delayed-question-response");
+    let config = provider_config(&directory, &["--question-before-failed-turn"]);
+    let mut provider = CodexProvider::start(&config, None).expect("start Codex provider");
+    provider
+        .start_turn("Ask and then fail.", &config.cwd)
+        .expect("start provider turn");
+
+    let mut request_id = None;
+    let mut terminal_seen = false;
+    for _ in 0..16 {
+        match provider.poll().expect("poll question and terminal") {
+            Some(CodexProviderEvent::RuntimeRequest {
+                request_id: observed,
+                ..
+            }) => request_id = Some(observed),
+            Some(CodexProviderEvent::Notification { method, .. }) if method == "turn/completed" => {
+                terminal_seen = true;
+            }
+            _ => {}
+        }
+        if request_id.is_some() && terminal_seen {
+            break;
+        }
+    }
+    let request_id = request_id.expect("observe the runtime request before termination");
+    assert!(terminal_seen);
+    let error = provider
+        .resolve_runtime_request(
+            &request_id,
+            &json!({
+                "schema": "paperclip.question_response.v1",
+                "answers": {"environment": {"selectedOptionIds": ["option-1"]}}
+            }),
+        )
+        .expect_err("terminal requests must not remain resolvable");
+    assert!(error.to_string().contains("no pending Codex request"));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_resume_advertises_the_same_authorized_tools() {
     let directory = temporary_directory("dynamic-tool-resume");
     let config = provider_config(&directory, &["--require-dynamic-tool"]);
@@ -1229,6 +1272,64 @@ fn unacknowledged_provider_events_survive_executor_restart() {
     recovered
         .shutdown()
         .expect("stop recovered provider process");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_rejects_a_runtime_response_after_terminal_settlement() {
+    let directory = temporary_directory("durable-delayed-question-response");
+    let config = provider_config(&directory, &["--question-before-failed-turn"]);
+    let mut executor = CodexCommandExecutor::new(&directory);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .expect("prepare provider");
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open provider session");
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Ask and then fail."}),
+        ))
+        .expect("start provider turn");
+
+    let mut request_seen = false;
+    let mut terminal_seen = false;
+    for _ in 0..16 {
+        for event in poll_and_ack(&mut executor).expect("poll question and terminal") {
+            request_seen |= event.event_type == "runtime_request.created";
+            terminal_seen |= event.event_type == "turn.failed";
+        }
+        if request_seen && terminal_seen {
+            break;
+        }
+    }
+    assert!(request_seen);
+    assert!(terminal_seen);
+    let error = executor
+        .execute(&command(
+            "resolve",
+            4,
+            "request.resolve",
+            json!({
+                "requestId": "runtime-request-1",
+                "response": {
+                    "schema": "paperclip.question_response.v1",
+                    "answers": {"environment": {"selectedOptionIds": ["option-1"]}}
+                }
+            }),
+        ))
+        .expect_err("terminal runtime requests must fail closed");
+    assert!(error.to_string().contains("outside an active turn"));
+
+    executor.shutdown().expect("stop provider process");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }
 
