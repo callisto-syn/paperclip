@@ -104,7 +104,11 @@ function exactOptionLabel(value: unknown, index: number): string {
   if (label.length > 1_000) {
     throw new Error("Codex option label exceeds 1000 characters");
   }
-  return label || `Option ${index + 1}`;
+  const redacted = redactCodexDiagnostic(label || `Option ${index + 1}`);
+  if (redacted.length > 1_000) {
+    throw new Error("Codex option label exceeds 1000 characters after redaction");
+  }
+  return redacted;
 }
 
 function exactQuestionText(
@@ -201,14 +205,14 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         id: stableQuestionId(question.id, index),
         ...(text(question.header).length > 0
           ? {
-              header: exactQuestionText(
+              header: exactRedactedQuestionText(
                 text(question.header),
                 "question header",
                 1_000,
               ),
             }
           : {}),
-        prompt: exactQuestionText(
+        prompt: exactRedactedQuestionText(
           text(question.question, text(question.prompt, `Question ${index + 1}`)),
           "question prompt",
         ),
@@ -240,7 +244,11 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
     });
     return parsePaperclipQuestionSet({
       schema: PAPERCLIP_QUESTION_SET_SCHEMA,
-      title: text(params.title, "Codex needs your input"),
+      title: exactRedactedQuestionText(
+        text(params.title, "Codex needs your input"),
+        "form title",
+        1_000,
+      ),
       ...(text(params.description).length > 0
         ? {
             description: exactRedactedQuestionText(
@@ -249,7 +257,11 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
             ),
           }
         : {}),
-      submitLabel: text(params.submitLabel, "Submit answers"),
+      submitLabel: exactRedactedQuestionText(
+        text(params.submitLabel, "Submit answers"),
+        "submit label",
+        1_000,
+      ),
       questions,
     });
   }
@@ -277,14 +289,17 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       id,
       ...(text(property.title).length > 0
         ? {
-            header: exactQuestionText(
+            header: exactRedactedQuestionText(
               text(property.title),
               "question header",
               1_000,
             ),
           }
         : {}),
-      prompt: exactQuestionText(text(property.title, id), "question prompt"),
+      prompt: exactRedactedQuestionText(
+        text(property.title, id),
+        "question prompt",
+      ),
       ...(text(property.description).length > 0
         ? {
             helpText: exactRedactedQuestionText(

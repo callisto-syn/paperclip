@@ -263,7 +263,7 @@ describe("Codex structured question adapter", () => {
     });
   });
 
-  it("redacts credential text from MCP elicitation descriptions", () => {
+  it("redacts credential text from every MCP elicitation display field", () => {
     const input = normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       message: "Authorization: Bearer message-secret",
       requestedSchema: {
@@ -271,13 +271,16 @@ describe("Codex structured question adapter", () => {
         properties: {
           environment: {
             type: "string",
-            title: "Environment",
+            title: "Authorization: Bearer property-title-secret",
             description: "token=property-secret",
-            oneOf: [{
-              const: "staging",
-              title: "Staging",
-              description: "password=option-secret",
-            }],
+            oneOf: [
+              {
+                const: "staging",
+                title: "token=option-title-secret",
+                description: "password=option-secret",
+              },
+              { const: "password=option-value-secret" },
+            ],
           },
         },
       },
@@ -286,12 +289,20 @@ describe("Codex structured question adapter", () => {
     expect(input).toMatchObject({
       description: expect.stringContaining("[REDACTED]"),
       questions: [{
+        header: expect.stringContaining("[REDACTED]"),
+        prompt: expect.stringContaining("[REDACTED]"),
         helpText: expect.stringContaining("[REDACTED]"),
-        options: [{ description: expect.stringContaining("[REDACTED]") }],
+        options: [
+          {
+            label: expect.stringContaining("[REDACTED]"),
+            description: expect.stringContaining("[REDACTED]"),
+          },
+          { label: expect.stringContaining("[REDACTED]") },
+        ],
       }],
     });
     expect(JSON.stringify(input)).not.toMatch(
-      /message-secret|property-secret|option-secret/,
+      /message-secret|property-title-secret|property-secret|option-title-secret|option-value-secret|option-secret/,
     );
   });
 });
