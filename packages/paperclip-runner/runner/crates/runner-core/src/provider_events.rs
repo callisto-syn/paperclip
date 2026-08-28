@@ -716,12 +716,24 @@ fn has_scheme_qualified_path(path: &str) -> bool {
         // is handled as a drive selector on Windows). Multi-letter URI
         // schemes followed by either one or two normalized separators are
         // never workspace-relative display paths.
-        scheme.len() > 1
+        let valid_scheme = scheme.len() > 1
             && scheme.bytes().enumerate().all(|(index, byte)| {
                 byte.is_ascii_alphabetic()
                     || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
-            })
-            && suffix.starts_with('/')
+            });
+        if !valid_scheme || !suffix.starts_with('/') {
+            return false;
+        }
+        // `name:/child` is a valid relative POSIX path whose first directory
+        // contains a colon. Reject the unambiguous `://` form and the common
+        // external schemes whose backslashes normalize to a single slash.
+        // Windows filenames cannot contain this colon spelling at all.
+        cfg!(windows)
+            || suffix.starts_with("//")
+            || matches!(
+                scheme.to_ascii_lowercase().as_str(),
+                "file" | "ftp" | "ftps" | "git" | "http" | "https" | "s3" | "ssh" | "ws" | "wss"
+            )
     })
 }
 
@@ -764,6 +776,22 @@ mod tests {
                 Value::Null,
             );
         }
+    }
+
+    #[test]
+    fn classifies_single_separator_colon_components_for_the_runner_platform() {
+        for location in ["src:/main.rs", "foo:/bar"] {
+            let normalized = safe_acpx_location(Some(&json!({"path": location})));
+            if cfg!(windows) {
+                assert_eq!(normalized, Value::Null);
+            } else {
+                assert_eq!(normalized, Value::String(location.to_owned()));
+            }
+        }
+        assert_eq!(
+            safe_acpx_location(Some(&json!({"path": "custom://host/path"}))),
+            Value::Null,
+        );
     }
 
     #[test]
