@@ -92,6 +92,26 @@ describe("Codex structured question adapter", () => {
       }],
     })).toThrow("Codex question identifier exceeds 160 characters");
 
+    expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
+      questions: [{
+        id: "oversized-label",
+        question: "Choose one",
+        options: [{ id: "option-1", label: "x".repeat(1_001) }],
+      }],
+    })).toThrow("Codex option label exceeds 1000 characters");
+
+    expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
+      requestedSchema: {
+        type: "object",
+        properties: {
+          choice: {
+            type: "string",
+            oneOf: [{ const: "one", title: "x".repeat(1_001) }],
+          },
+        },
+      },
+    })).toThrow("Codex option label exceeds 1000 characters");
+
     expect(() => normalizeCodexQuestionSet("mcpServer/elicitation/request", {
       requestedSchema: {
         type: "object",

@@ -99,15 +99,26 @@ function stableQuestionId(value: unknown, index: number): string {
   return candidate.length > 0 ? candidate : `question-${index + 1}`;
 }
 
+function exactOptionLabel(value: unknown, index: number): string {
+  const label = text(value);
+  if (label.length > 1_000) {
+    throw new Error("Codex option label exceeds 1000 characters");
+  }
+  return label || `Option ${index + 1}`;
+}
+
 function codexOptions(value: unknown): NonNullable<PaperclipQuestion["options"]> | undefined {
   if (!Array.isArray(value)) return undefined;
   if (value.length > 128) throw new Error("Codex question exceeds 128 options");
   return value.map((rawOption, index) => {
     const option = record(rawOption);
-    const label = text(option.label, text(option.value, text(rawOption))).slice(0, 1_000);
+    const label = exactOptionLabel(
+      text(option.label, text(option.value, text(rawOption))),
+      index,
+    );
     return {
       id: stableQuestionId(option.id, index).replace(/^question-/, "option-"),
-      label: label || `Option ${index + 1}`,
+      label,
       ...(text(option.description).length > 0
         ? { description: boundedText(redactCodexDiagnostic(text(option.description))) }
         : {}),
@@ -126,7 +137,13 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NonNullable<Papercl
     const oneOf = Array.isArray(schema.oneOf) ? record(schema.oneOf[index]) : {};
     return {
       id: `option-${index + 1}`,
-      label: text(oneOf.title, typeof value === "string" ? value : JSON.stringify(value)).slice(0, 1_000),
+      label: exactOptionLabel(
+        text(
+          oneOf.title,
+          typeof value === "string" ? value : JSON.stringify(value),
+        ),
+        index,
+      ),
       ...(text(oneOf.description).length > 0
         ? { description: boundedText(text(oneOf.description)) }
         : {}),
