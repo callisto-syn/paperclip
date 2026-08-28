@@ -130,3 +130,21 @@ fn validates_recovery_identity_against_the_requested_session() {
     mismatch.expected_identity = Some(expected);
     assert!(start_error(&mismatch).contains("conflicts with the requested session"));
 }
+
+#[cfg(unix)]
+#[test]
+fn rejects_non_utf8_directories_before_spawning() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut directory_name =
+        format!("paperclip-acpx-non-utf8-{}-", std::process::id()).into_bytes();
+    directory_name.push(0xff);
+    let directory = std::env::temp_dir().join(OsString::from_vec(directory_name));
+
+    let mut invalid = config("bootstrap");
+    invalid.working_directory = directory;
+    let error = start_error(&invalid);
+
+    assert!(error.contains("must be valid UTF-8"), "{error}");
+}

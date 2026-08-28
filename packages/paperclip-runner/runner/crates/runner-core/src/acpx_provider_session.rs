@@ -81,7 +81,17 @@ impl AcpxProviderSessionConfig {
             (&self.runtime_directory, "runtime directory"),
             (&self.working_directory, "working directory"),
         ] {
-            if !path.is_absolute() || !path.is_dir() {
+            if !path.is_absolute() {
+                return Err(LocalRunnerError::invalid(format!(
+                    "ACPX {label} must be an existing absolute directory"
+                )));
+            }
+            if path.to_str().is_none() {
+                return Err(LocalRunnerError::invalid(format!(
+                    "ACPX {label} must be valid UTF-8"
+                )));
+            }
+            if !path.is_dir() {
                 return Err(LocalRunnerError::invalid(format!(
                     "ACPX {label} must be an existing absolute directory"
                 )));
