@@ -19,7 +19,7 @@ use crate::durable::{
 };
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, semantic_value_digest, AuthorizedToolSet, PendingToolCall,
-    ProviderToolBridge, ToolResult, TOOL_SET_SCHEMA,
+    ProviderToolBridge, ToolResult, MAX_RETAINED_CALLS, TOOL_SET_SCHEMA,
 };
 use crate::provider_events::{normalize_codex_notification, NormalizedProviderEvent};
 
@@ -27,10 +27,13 @@ const PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.codex-provider-state.v1";
 const PROVIDER_STATE_FILE: &str = "codex-provider-state.json";
 const MAX_PROVIDER_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVENTS_PER_POLL: usize = 128;
-// One accepted semantic call can produce an input and a result event. Keep a
-// bounded durable backlog so a terminal transition can settle every call
-// without making one poll or one persisted pending prefix unbounded.
-const MAX_QUEUED_PROVIDER_EVENTS: usize = 2 * 4_096 + 3;
+// One accepted semantic call can produce an input and a result event. Normal
+// traffic cannot consume the additional capacity required to settle every
+// retained call and record the provider plus run terminal events.
+const MAX_REGULAR_QUEUED_PROVIDER_EVENTS: usize = 2 * MAX_RETAINED_CALLS + 3;
+const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_RETAINED_CALLS + 3;
+const MAX_QUEUED_PROVIDER_EVENTS: usize =
+    MAX_REGULAR_QUEUED_PROVIDER_EVENTS + MAX_TERMINAL_SETTLEMENT_EVENTS;
 
 #[derive(Clone, Debug)]
 struct ProviderEventIdentity {
@@ -427,10 +430,14 @@ impl CodexProviderState {
         Ok(())
     }
 
-    fn push_event(&mut self, event: NormalizedProviderEvent) -> Result<(), DurableRunnerError> {
+    fn push_event_with_limit(
+        &mut self,
+        event: NormalizedProviderEvent,
+        max_queued_events: usize,
+    ) -> Result<(), DurableRunnerError> {
         let queue_event =
             !self.queued_events.is_empty() || self.pending_events.len() >= MAX_EVENTS_PER_POLL;
-        if queue_event && self.queued_events.len() >= MAX_QUEUED_PROVIDER_EVENTS {
+        if queue_event && self.queued_events.len() >= max_queued_events {
             return Err(DurableRunnerError::invalid(
                 "Codex provider event backlog exceeds its durable limit",
             ));
@@ -451,6 +458,17 @@ impl CodexProviderState {
             self.pending_events.push_back(event);
         }
         Ok(())
+    }
+
+    fn push_event(&mut self, event: NormalizedProviderEvent) -> Result<(), DurableRunnerError> {
+        self.push_event_with_limit(event, MAX_REGULAR_QUEUED_PROVIDER_EVENTS)
+    }
+
+    fn push_terminal_event(
+        &mut self,
+        event: NormalizedProviderEvent,
+    ) -> Result<(), DurableRunnerError> {
+        self.push_event_with_limit(event, MAX_QUEUED_PROVIDER_EVENTS)
     }
 
     fn refill_pending_events(&mut self) {
@@ -487,6 +505,16 @@ impl CodexProviderState {
         } else {
             "session_open".to_owned()
         };
+    }
+
+    fn extend_terminal_events(
+        &mut self,
+        events: impl IntoIterator<Item = NormalizedProviderEvent>,
+    ) -> Result<(), DurableRunnerError> {
+        for event in events {
+            self.push_terminal_event(event)?;
+        }
+        Ok(())
     }
 }
 
@@ -599,12 +627,14 @@ impl CodexCommandExecutor {
             .expect("Codex state remains available during recovery")
             .provider_process_generation = process_generation;
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
+            let recovered_turn_ended =
+                previous_active_turn_id.is_some() && recovered_active_turn_id.is_none();
             let identity = self.event_identity.clone();
             let state = self
                 .state
                 .as_mut()
                 .expect("Codex state remains available during recovery");
-            if previous_active_turn_id.is_some() && recovered_active_turn_id.is_none() {
+            if recovered_turn_ended {
                 let settled = state
                     .tool_bridge
                     .settle_turn("provider_turn_terminated")
@@ -620,12 +650,12 @@ impl CodexCommandExecutor {
                         )
                     })?;
                     for result in settled {
-                        state.push_event(semantic_result_event(identity, &result))?;
+                        state.push_terminal_event(semantic_result_event(identity, &result))?;
                     }
                 }
             }
             state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
-            state.push_event(NormalizedProviderEvent {
+            let reconciled = NormalizedProviderEvent {
                 event_type: "session.reconciled".to_owned(),
                 priority: EventPriority::P0,
                 payload: json!({
@@ -634,7 +664,12 @@ impl CodexCommandExecutor {
                     "previousProviderTurnId": previous_active_turn_id,
                     "activeProviderTurnId": recovered_active_turn_id,
                 }),
-            })?;
+            };
+            if recovered_turn_ended {
+                state.push_terminal_event(reconciled)?;
+            } else {
+                state.push_event(reconciled)?;
+            }
         }
         self.save_state()?;
         Ok(())
@@ -890,6 +925,15 @@ impl CodexCommandExecutor {
                 "Codex already has an active provider turn",
             ));
         }
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.queued_events.len() > MAX_REGULAR_QUEUED_PROVIDER_EVENTS)
+        {
+            return Err(DurableRunnerError::invalid(
+                "cannot start a new Codex turn until terminal events are acknowledged",
+            ));
+        }
         let text = payload
             .get("text")
             .and_then(Value::as_str)
@@ -968,7 +1012,7 @@ impl CodexCommandExecutor {
                     ))
                 })?;
             for result in cancelled {
-                next_state.push_event(semantic_result_event(&identity, &result))?;
+                next_state.push_terminal_event(semantic_result_event(&identity, &result))?;
             }
             self.persist_state(&next_state)?;
             self.state = Some(next_state);
@@ -1306,7 +1350,9 @@ impl CodexCommandExecutor {
                                 )
                             })?;
                             for result in settled {
-                                state.push_event(semantic_result_event(identity, &result))?;
+                                state.push_terminal_event(semantic_result_event(
+                                    identity, &result,
+                                ))?;
                             }
                         }
                         state.active_provider_turn_id = None;
@@ -1323,9 +1369,13 @@ impl CodexCommandExecutor {
                         }
                         state.lifecycle = "session_open".to_owned();
                     }
-                    state.extend_events(normalized)?;
+                    if terminal_event_type.is_some() {
+                        state.extend_terminal_events(normalized)?;
+                    } else {
+                        state.extend_events(normalized)?;
+                    }
                     if let Some(event_type) = terminal_event_type {
-                        state.extend_events(terminal_events(state, &event_type))?;
+                        state.extend_terminal_events(terminal_events(state, &event_type))?;
                     }
                     self.save_state()?;
                 }
@@ -1379,7 +1429,7 @@ impl CodexCommandExecutor {
                             .as_mut()
                             .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
-                        state.push_event(NormalizedProviderEvent {
+                        state.push_terminal_event(NormalizedProviderEvent {
                             // A completed turn remains authoritative, while the
                             // reusable provider session independently becomes
                             // unavailable. Avoid emitting session.failed for
@@ -1628,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn buffers_large_terminal_settlement_across_bounded_poll_prefixes() {
+    fn regular_backlog_preserves_bounded_terminal_settlement_capacity() {
         let mut state = CodexProviderState::new(
             CodexProviderConfig {
                 provider: "codex".to_owned(),
@@ -1654,9 +1704,24 @@ mod tests {
             turn_id: "turn-1".to_owned(),
             item_id: "item-1".to_owned(),
         };
-        for index in 0..(MAX_EVENTS_PER_POLL + 32) {
+        let ordinary_event = || NormalizedProviderEvent {
+            event_type: "harness.diagnostic".to_owned(),
+            priority: EventPriority::P1,
+            payload: json!({"code": "ordinary_backlog"}),
+        };
+        for _ in 0..(MAX_EVENTS_PER_POLL + MAX_REGULAR_QUEUED_PROVIDER_EVENTS) {
+            state.push_event(ordinary_event()).unwrap();
+        }
+        assert_eq!(state.pending_events.len(), MAX_EVENTS_PER_POLL);
+        assert_eq!(
+            state.queued_events.len(),
+            MAX_REGULAR_QUEUED_PROVIDER_EVENTS
+        );
+        assert!(state.push_event(ordinary_event()).is_err());
+
+        for index in 0..MAX_RETAINED_CALLS {
             state
-                .push_event(semantic_result_event(
+                .push_terminal_event(semantic_result_event(
                     &identity,
                     &ToolResult {
                         call_id: format!("call-{index}"),
@@ -1667,15 +1732,20 @@ mod tests {
                 ))
                 .unwrap();
         }
+        for event_type in ["turn.completed", "run.result.proposed", "run.terminal"] {
+            state
+                .push_terminal_event(NormalizedProviderEvent {
+                    event_type: event_type.to_owned(),
+                    priority: EventPriority::P0,
+                    payload: json!({"terminal": true}),
+                })
+                .unwrap();
+        }
 
         assert_eq!(state.pending_events.len(), MAX_EVENTS_PER_POLL);
-        assert_eq!(state.queued_events.len(), 32);
+        assert_eq!(state.queued_events.len(), MAX_QUEUED_PROVIDER_EVENTS);
         state.validate().unwrap();
-
-        state.pending_events.clear();
-        state.refill_pending_events();
-        assert_eq!(state.pending_events.len(), 32);
-        assert!(state.queued_events.is_empty());
-        state.validate().unwrap();
+        assert!(state.push_terminal_event(ordinary_event()).is_err());
+        assert!(serde_json::to_vec(&state).unwrap().len() as u64 <= MAX_PROVIDER_STATE_BYTES);
     }
 }

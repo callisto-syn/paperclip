@@ -18,7 +18,7 @@ const MAX_TOOL_SET_BYTES: usize = 768 * 1024;
 const MAX_TOOL_VALUE_BYTES: usize = 768 * 1024;
 const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RETAINED_CALLS: usize = 4_096;
+pub(crate) const MAX_RETAINED_CALLS: usize = 4_096;
 const MAX_SETTLED_CALL_IDS: usize = 65_536;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
