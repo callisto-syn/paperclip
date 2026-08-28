@@ -186,11 +186,10 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("bounds a non-settling host close before publishing interruption", async () => {
+  it("reports a host close timeout and retains cleanup ownership", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
-    fixture.host.close.mockImplementation(
-      () => new Promise<void>(() => undefined),
-    );
+    const hostClose = deferred<void>();
+    fixture.host.close.mockImplementation(() => hostClose.promise);
     const session = await fixture.driver.openSession({
       runId: "run-close-timeout",
       normalizedSessionId: "session-1",
@@ -203,7 +202,15 @@ describe("Codex ACPX harness driver", () => {
 
     await expect(
       session.close({ reason: "runtime close stalled" }),
+    ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
+    expect(fixture.host.close).toHaveBeenCalledOnce();
+
+    fixture.finishTurn({ status: "cancelled", stopReason: "session_closed" });
+    hostClose.resolve();
+    await expect(
+      session.close({ reason: "finish retained cleanup" }),
     ).resolves.toBeUndefined();
+    expect(fixture.host.close).toHaveBeenCalledOnce();
     await expect(terminalEvents).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ eventType: "turn.interrupted" }),
@@ -272,6 +279,42 @@ describe("Codex ACPX harness driver", () => {
       retained.filter((event) => event.eventType === "turn.completed"),
     ).toHaveLength(2);
   });
+
+  it("preserves every terminal when the bounded queue is all critical", async () => {
+    const fixture = driverFixture({}, { maxBufferedEvents: 4 });
+    const session = await fixture.driver.openSession({
+      runId: "run-critical-bounds",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalTurnIds: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const { turnId } = await session.startTurn({
+        message: { role: "user", text: `Complete turn ${index}.` },
+      });
+      terminalTurnIds.push(turnId);
+      fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+      await vi.waitFor(async () => {
+        await expect(session.snapshot()).resolves.toMatchObject({
+          activeTurnId: null,
+        });
+      });
+    }
+    await expect(
+      session.startTurn({
+        message: { role: "user", text: "Exceed the bounded turn limit." },
+      }),
+    ).rejects.toThrow("bounded session turn limit");
+
+    await session.close({ reason: "critical bounds verified" });
+    const retained: PrpEvent[] = [];
+    for await (const event of session.events()) retained.push(event);
+    expect(
+      retained
+        .filter((event) => event.eventType === "turn.completed")
+        .map((event) => event.turnId),
+    ).toEqual(terminalTurnIds);
+  });
 });
 
 function driverFixture(
@@ -279,6 +322,7 @@ function driverFixture(
   fixtureOptions: {
     runtimeEvents?: readonly AcpRuntimeEvent[];
     closeSettlementTimeoutMs?: number;
+    maxBufferedEvents?: number;
   } = {},
 ): {
   driver: CodexAcpxDriver;
@@ -324,6 +368,7 @@ function driverFixture(
       return host;
     },
     closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
+    maxBufferedEvents: fixtureOptions.maxBufferedEvents,
   };
   const driver = new CodexAcpxDriver(
     {

@@ -84,6 +84,8 @@ export interface CodexAcpxDriverDependencies {
   openHost?: (options: OpenAcpxRuntimeHostOptions) => Promise<CodexAcpxHost>;
   /** Internal test seam; production uses the fixed close-settlement bound. */
   closeSettlementTimeoutMs?: number;
+  /** Internal test seam; production uses the fixed event-retention bound. */
+  maxBufferedEvents?: number;
 }
 
 /** Codex-only HarnessDriver backed by the admitted ACPX runtime host. */
@@ -91,6 +93,7 @@ export class CodexAcpxDriver implements HarnessDriver {
   readonly #options: CodexAcpxDriverOptions;
   readonly #openHost: NonNullable<CodexAcpxDriverDependencies["openHost"]>;
   readonly #closeSettlementTimeoutMs: number;
+  readonly #maxBufferedEvents: number;
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -112,8 +115,11 @@ export class CodexAcpxDriver implements HarnessDriver {
           openRuntime: openCodexAcpxRuntime,
         }));
     this.#closeSettlementTimeoutMs =
-      dependencies.closeSettlementTimeoutMs ??
-      CLOSE_TURN_SETTLEMENT_TIMEOUT_MS;
+      dependencies.closeSettlementTimeoutMs ?? CLOSE_TURN_SETTLEMENT_TIMEOUT_MS;
+    this.#maxBufferedEvents = Math.max(
+      1,
+      Math.floor(dependencies.maxBufferedEvents ?? MAX_BUFFERED_EVENTS),
+    );
   }
 
   async descriptor(): Promise<HarnessDriverDescriptor> {
@@ -190,6 +196,7 @@ export class CodexAcpxDriver implements HarnessDriver {
         dynamicToolHandler: this.#options.dynamicToolHandler,
         now: this.#options.now ?? (() => new Date()),
         closeSettlementTimeoutMs: this.#closeSettlementTimeoutMs,
+        maxBufferedEvents: this.#maxBufferedEvents,
       });
       return session;
     } catch (error) {
@@ -207,10 +214,8 @@ class CodexAcpxSession implements HarnessSession {
   readonly #dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
   readonly #now: () => Date;
   readonly #closeSettlementTimeoutMs: number;
-  readonly #events = new AsyncQueue<PrpEvent>(
-    MAX_BUFFERED_EVENTS,
-    isCriticalBufferedEvent,
-  );
+  readonly #maxBufferedEvents: number;
+  readonly #events: AsyncQueue<PrpEvent>;
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
@@ -223,9 +228,11 @@ class CodexAcpxSession implements HarnessSession {
   #usage: Record<string, unknown> | null = null;
   #assistantText = "";
   #closed = false;
+  #closingStarted = false;
   #eventStreamClosed = false;
   #activePump: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
+  #hostClosePromise: Promise<void> | null = null;
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
   #transcriptOmitted = false;
@@ -237,6 +244,7 @@ class CodexAcpxSession implements HarnessSession {
     dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
     now: () => Date;
     closeSettlementTimeoutMs: number;
+    maxBufferedEvents: number;
   }) {
     const identity = input.host.identity();
     if (identity.normalizedSessionId !== input.input.normalizedSessionId) {
@@ -247,6 +255,12 @@ class CodexAcpxSession implements HarnessSession {
     this.#dynamicToolHandler = input.dynamicToolHandler;
     this.#now = input.now;
     this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
+    this.#maxBufferedEvents = input.maxBufferedEvents;
+    this.#events = new AsyncQueue<PrpEvent>(
+      input.maxBufferedEvents,
+      isCriticalBufferedEvent,
+      (event) => isTerminalEvent(event.eventType),
+    );
     this.#sourceInstanceId = stableId(
       "paperclip-acpx",
       input.input.normalizedSessionId,
@@ -272,6 +286,12 @@ class CodexAcpxSession implements HarnessSession {
     this.#assertOpen();
     if (this.#activeTurnId) {
       throw new Error("Codex ACPX session already has an active turn");
+    }
+    if (this.#terminalTurns.size >= this.#maxBufferedEvents) {
+      throw new HarnessCapabilityUnavailableError(
+        "turn.start",
+        "the bounded session turn limit was reached; open a new session",
+      );
     }
     const turnId = `turn-${randomBytes(12).toString("hex")}`;
     this.#activeTurnId = turnId;
@@ -448,24 +468,29 @@ class CodexAcpxSession implements HarnessSession {
   async close(input: { reason: string }): Promise<void> {
     if (this.#closePromise) return await this.#closePromise;
     if (this.#closed) return;
-    this.#closed = true;
-    this.#closePromise = this.#finishClose(input.reason);
-    return await this.#closePromise;
+    this.#closingStarted = true;
+    const closePromise = this.#finishClose(input.reason);
+    this.#closePromise = closePromise;
+    try {
+      await closePromise;
+      this.#closed = true;
+    } finally {
+      if (this.#closePromise === closePromise) this.#closePromise = null;
+    }
   }
 
   async #finishClose(reason: string): Promise<void> {
     const closingTurnId = this.#activeTurnId;
     const pump = this.#activePump;
-    let closeError: unknown = null;
-    const hostClose = this.#host.close({ reason }).catch((error) => {
-      closeError = error;
-    });
-    const settlement = pump
-      ? Promise.all([hostClose, pump.catch(() => undefined)]).then(
-          () => undefined,
-        )
-      : hostClose;
-    await settleWithin(settlement, this.#closeSettlementTimeoutMs);
+    const hostClose =
+      this.#hostClosePromise ?? this.#startHostClose({ reason });
+    await settleWithin(hostClose, this.#closeSettlementTimeoutMs);
+    if (pump) {
+      await settleWithin(
+        pump.catch(() => undefined),
+        this.#closeSettlementTimeoutMs,
+      ).catch(() => undefined);
+    }
     if (closingTurnId && !this.#terminalTurns.has(closingTurnId)) {
       if (this.#activeTurnId === closingTurnId) this.#activeTurnId = null;
       this.#terminalTurns.set(
@@ -480,7 +505,17 @@ class CodexAcpxSession implements HarnessSession {
     }
     this.#eventStreamClosed = true;
     this.#events.close();
-    if (closeError) throw closeError;
+  }
+
+  #startHostClose(input: { reason: string }): Promise<void> {
+    const closePromise = this.#host.close(input);
+    this.#hostClosePromise = closePromise;
+    void closePromise.catch(() => {
+      if (this.#hostClosePromise === closePromise) {
+        this.#hostClosePromise = null;
+      }
+    });
+    return closePromise;
   }
 
   async #pumpTurn(turnId: string, turn: AcpxRuntimeTurn): Promise<void> {
@@ -690,7 +725,9 @@ class CodexAcpxSession implements HarnessSession {
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new Error("Codex ACPX session is closed");
+    if (this.#closed || this.#closingStarted) {
+      throw new Error("Codex ACPX session is closing or closed");
+    }
   }
 }
 
@@ -766,14 +803,20 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   readonly #waiters: Array<(result: IteratorResult<T>) => void> = [];
   readonly #maxItems: number;
   readonly #isCritical: (item: T) => boolean;
+  readonly #isProtected: (item: T) => boolean;
   #closed = false;
 
-  constructor(maxItems: number, isCritical: (item: T) => boolean) {
+  constructor(
+    maxItems: number,
+    isCritical: (item: T) => boolean,
+    isProtected: (item: T) => boolean,
+  ) {
     this.#maxItems = maxItems;
     this.#isCritical = isCritical;
+    this.#isProtected = isProtected;
   }
 
-  /** Returns true when the oldest buffered item had to be omitted. */
+  /** Returns true when an event had to be omitted. */
   push(item: T): boolean {
     if (this.#closed) return false;
     const waiter = this.#waiters.shift();
@@ -787,8 +830,13 @@ class AsyncQueue<T> implements AsyncIterable<T> {
         (candidate) => !this.#isCritical(candidate),
       );
       if (expendable >= 0) this.#items.splice(expendable, 1);
-      else if (!this.#isCritical(item)) return true;
-      else this.#items.shift();
+      else if (this.#isProtected(item)) {
+        const unprotected = this.#items.findIndex(
+          (candidate) => !this.#isProtected(candidate),
+        );
+        if (unprotected >= 0) this.#items.splice(unprotected, 1);
+        else return true;
+      } else return true;
     }
     this.#items.push(item);
     return omitted;
@@ -823,11 +871,17 @@ async function settleWithin(
   timeoutMs: number,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    promise.catch(() => undefined),
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("ACPX host cleanup exceeded its shutdown timeout"));
+        }, timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
