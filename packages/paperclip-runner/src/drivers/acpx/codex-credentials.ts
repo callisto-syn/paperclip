@@ -220,31 +220,23 @@ async function writeCredential(
   } catch {
     throw new Error("Managed Codex credential destination could not be opened");
   }
-  let installed = false;
   try {
     await handle.chmod(PRIVATE_FILE_MODE);
     await handle.writeFile(bytes);
     await handle.sync();
     await handle.close();
     await rename(temporaryPath, destination);
-    installed = true;
-    await syncDirectory(home);
-  } catch (error) {
-    if (installed) {
-      try {
-        await removeCredential(destination, home);
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "Managed Codex credential staging and rollback failed",
-        );
-      }
-    }
-    throw error;
   } finally {
     await handle.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
   }
+  // The atomic rename is the ownership-transfer boundary: after it succeeds,
+  // always return the lease that owns auth.json. A directory fsync failure can
+  // make the installation disappear after a crash (which fails closed), but
+  // rolling it back and then throwing can make the secret reappear after a
+  // crash with no caller holding cleanup ownership. Lease.close() performs and
+  // retries the durable removal boundary.
+  await syncDirectory(home).catch(() => undefined);
 }
 
 async function removeCredential(path: string, home: string): Promise<void> {

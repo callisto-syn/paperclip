@@ -86,6 +86,44 @@ describe("managed Codex credentials", () => {
     },
   );
 
+  it.runIf(process.platform !== "win32")(
+    "preserves cleanup ownership when installation and removal directory syncs fail",
+    async () => {
+      const fixture = await credentialFixture();
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const originalSync = prototype.sync;
+      let syncAttempts = 0;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          syncAttempts += 1;
+          // The initial stale-file directory sync and temporary credential
+          // file sync succeed. Installation and first removal directory sync fail.
+          if (syncAttempts === 3 || syncAttempts === 4) {
+            throw new Error("injected directory sync failure");
+          }
+          await originalSync.call(this);
+        },
+      );
+      try {
+        const lease = await stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        });
+        await expect(readFile(lease.path, "utf8")).resolves.toBe("{}");
+        await expect(lease.close()).rejects.toThrow("injected directory sync failure");
+        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lease.close()).resolves.toBeUndefined();
+        expect(syncAttempts).toBe(5);
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
+
   it("copies an explicit private source without changing the source", async () => {
     const fixture = await credentialFixture();
     const source = join(fixture.root, "managed-auth.json");
