@@ -2716,10 +2716,12 @@ class CodexHarnessSession implements HarnessSession {
     turn: Record<string, unknown>,
     expectedFingerprint: string,
   ): TerminalReplayConflict | null {
+    const turnId = text(turn.id);
     const candidate = this.#resultFromTurn(turn);
     if (
       candidate !== null &&
       this.#resultFingerprint !== null &&
+      this.#resultTurnId === turnId &&
       canonicalJson(candidate) !== this.#resultFingerprint
     ) {
       return {
@@ -2727,7 +2729,9 @@ class CodexHarnessSession implements HarnessSession {
         message: "contains a conflicting semantic result",
       };
     }
-    const semanticResult = this.#result ?? candidate;
+    const semanticResult = this.#resultTurnId === turnId
+      ? this.#result
+      : candidate;
     if (
       this.#terminalFingerprint(turn, semanticResult) !== expectedFingerprint
     ) {
@@ -2740,7 +2744,7 @@ class CodexHarnessSession implements HarnessSession {
       this.#admitResult(
         candidate,
         text(this.#resultItemFromTurn(turn)?.id),
-        text(turn.id),
+        turnId,
       );
     }
     return null;

@@ -3327,7 +3327,7 @@ describe("Codex app-server Codex driver", () => {
     await recovered!.close({ reason: "test complete" });
   });
 
-  it("keeps a newer result-bearing recovery turn active beside an older terminal", async () => {
+  it("keeps a newer result-bearing recovery turn active beside an older result-less terminal", async () => {
     const first = new FakeCodexTransport();
     const second = new FakeCodexTransport();
     second.readResponse = {
@@ -3373,6 +3373,8 @@ describe("Codex app-server Codex driver", () => {
       ...snapshot.semanticResult,
       turnId: "turn-2",
     };
+    snapshot.terminalTurns![0]!.fingerprint =
+      '{"error":null,"result":null,"terminalState":"completed"}';
     await original.close({ reason: "transport lost during recovery turn" });
 
     const recovery = await driver.recoverSession?.(snapshot);
