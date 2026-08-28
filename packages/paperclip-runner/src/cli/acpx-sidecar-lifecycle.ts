@@ -6,6 +6,27 @@ export interface OpenedAcpxSidecarHost {
 
 const FAILED_ADMISSION_CLOSE_TIMEOUT_MS = 8_000;
 
+export async function awaitSidecarCleanupWithin(
+  cleanup: Promise<void>,
+  timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+): Promise<"settled" | "deferred"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      cleanup.then(
+        () => "settled" as const,
+        () => "settled" as const,
+      ),
+      new Promise<"deferred">((resolve) => {
+        timer = setTimeout(() => resolve("deferred"), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function verifyOpenedAcpxSidecarHost(
   host: OpenedAcpxSidecarHost,
   sanitizeStatus: (value: unknown) => Record<string, unknown>,

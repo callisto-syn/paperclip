@@ -51,6 +51,7 @@ import {
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
 import {
+  awaitSidecarCleanupWithin,
   boundedIdentity,
   parseAcpxRunAttachment,
   verifyOpenedAcpxSidecarHost,
@@ -1006,9 +1007,16 @@ async function shutdown(reason: string): Promise<void> {
   if (turnId) rejectTurnWaiters(turnId, reason);
   if (host) await host.close({ reason }).catch(() => undefined);
   const retainedCleanup = failedAdmissionCleanup;
-  if (retainedCleanup) await retainedCleanup.catch(() => undefined);
+  if (retainedCleanup) {
+    const cleanupDisposition = await awaitSidecarCleanupWithin(retainedCleanup);
+    if (cleanupDisposition === "deferred") {
+      diagnostic(
+        "failed_admission_cleanup_deferred",
+        "ACPX failed-admission cleanup remains owned after the bounded shutdown wait.",
+      );
+    }
+  }
   host = null;
-  failedAdmissionCleanup = null;
   openParams = null;
   runId = null;
   turnId = null;

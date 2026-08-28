@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ACPX_SIDECAR_PROTOCOL_VERSION } from "../drivers/acpx/sidecar-protocol.js";
 import {
+  awaitSidecarCleanupWithin,
   parseAcpxRunAttachment,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
@@ -54,6 +55,22 @@ describe("Codex ACPX runtime sidecar", () => {
     expect(retainCleanup).toHaveBeenCalledWith(cleanup);
     finishCleanup();
     await cleanup;
+  });
+
+  it("bounds shutdown waiting without releasing retained cleanup ownership", async () => {
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+
+    await expect(awaitSidecarCleanupWithin(cleanup, 1)).resolves.toBe("deferred");
+    let settled = false;
+    void cleanup.then(() => { settled = true; });
+    expect(settled).toBe(false);
+    finishCleanup();
+    await cleanup;
+    expect(settled).toBe(true);
+    await expect(awaitSidecarCleanupWithin(cleanup, 1)).resolves.toBe("settled");
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {
