@@ -744,6 +744,34 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
+  it("bounds a stalled session handshake and terminates its provider", async () => {
+    const child = fakeChild();
+    const command = fakeCommand();
+    vi.mocked(command.spawn).mockReturnValue(child);
+    const runtime = fakeRuntime();
+
+    await expect(
+      openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        sessionHandshakeTimeoutMs: 1,
+        createRuntime: (options) => {
+          vi.mocked(runtime.ensureSession).mockImplementation(() => {
+            options.spawnAgent?.({
+              command: "ignored",
+              args: ["--stdio"],
+              options: {},
+            });
+            return new Promise<AcpRuntimeHandle>(() => undefined);
+          });
+          return runtime;
+        },
+      }),
+    ).rejects.toThrow("session handshake exceeded its admission deadline");
+    expect(runtime.close).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
   it("rejects non-Codex profiles before constructing ACPX", async () => {
     const createRuntime = vi.fn();
     await expect(

@@ -38,6 +38,7 @@ export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
 // This prevents abandoned protocol work from being garbage-collected without
 // letting one permanently pending attempt block all future recovery.
 const activeRuntimeCleanupOwners = new Set<Promise<unknown>>();
+const SESSION_HANDSHAKE_TIMEOUT_MS = 8_000;
 
 class AcpxRuntimeCloseTimeoutError extends Error {
   constructor() {
@@ -53,6 +54,8 @@ export interface CodexAcpxRuntimeDependencies {
   }) => AcpAgentRegistry;
   createStore?: (input: { stateDir: string }) => AcpSessionStore;
   runtimeCloseTimeoutMs?: number;
+  /** Internal test seam for the provider-session admission deadline. */
+  sessionHandshakeTimeoutMs?: number;
 }
 
 /**
@@ -177,18 +180,21 @@ export async function openCodexAcpxRuntime(
 
   let handle: AcpRuntimeHandle;
   try {
-    handle = await runtime.ensureSession({
-      sessionKey: options.providerSessionKey,
-      agent: "codex",
-      mode: "persistent",
-      cwd: options.cwd,
-      sessionOptions: {
-        model: options.profile.qualificationModel,
-        ...(options.systemInstructions
-          ? { systemPrompt: { append: options.systemInstructions } }
-          : {}),
-      },
-    });
+    handle = await boundedSessionHandshake(
+      runtime.ensureSession({
+        sessionKey: options.providerSessionKey,
+        agent: "codex",
+        mode: "persistent",
+        cwd: options.cwd,
+        sessionOptions: {
+          model: options.profile.qualificationModel,
+          ...(options.systemInstructions
+            ? { systemPrompt: { append: options.systemInstructions } }
+            : {}),
+        },
+      }),
+      dependencies.sessionHandshakeTimeoutMs ?? SESSION_HANDSHAKE_TIMEOUT_MS,
+    );
   } catch (error) {
     const cleanupErrors = await cleanupFailedRuntimeOpen(
       runtime,
@@ -229,6 +235,30 @@ export async function openCodexAcpxRuntime(
       );
     }
     throw error;
+  }
+}
+
+async function boundedSessionHandshake(
+  handshake: Promise<AcpRuntimeHandle>,
+  timeoutMs: number,
+): Promise<AcpRuntimeHandle> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      handshake,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error("ACPX session handshake exceeded its admission deadline"),
+            ),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
