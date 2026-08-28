@@ -85,6 +85,8 @@ export interface CodexAcpxDriverDependencies {
   openHost?: (options: OpenAcpxRuntimeHostOptions) => Promise<CodexAcpxHost>;
   /** Internal test seam; production uses the fixed close-settlement bound. */
   closeSettlementTimeoutMs?: number;
+  /** Internal test seam; production makes three bounded autonomous cleanup attempts. */
+  maxHostCleanupRecoveryAttempts?: number;
   /** Internal test seam; production uses the fixed event-retention bound. */
   maxBufferedEvents?: number;
 }
@@ -95,6 +97,7 @@ export class CodexAcpxDriver implements HarnessDriver {
   readonly #openHost: NonNullable<CodexAcpxDriverDependencies["openHost"]>;
   readonly #closeSettlementTimeoutMs: number;
   readonly #maxBufferedEvents: number;
+  readonly #maxHostCleanupRecoveryAttempts: number;
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -117,6 +120,10 @@ export class CodexAcpxDriver implements HarnessDriver {
         }));
     this.#closeSettlementTimeoutMs =
       dependencies.closeSettlementTimeoutMs ?? CLOSE_TURN_SETTLEMENT_TIMEOUT_MS;
+    this.#maxHostCleanupRecoveryAttempts = Math.max(
+      1,
+      Math.floor(dependencies.maxHostCleanupRecoveryAttempts ?? 3),
+    );
     this.#maxBufferedEvents = Math.max(
       TERMINAL_EVENT_RESERVE,
       Math.floor(dependencies.maxBufferedEvents ?? MAX_BUFFERED_EVENTS),
@@ -197,6 +204,7 @@ export class CodexAcpxDriver implements HarnessDriver {
         dynamicToolHandler: this.#options.dynamicToolHandler,
         now: this.#options.now ?? (() => new Date()),
         closeSettlementTimeoutMs: this.#closeSettlementTimeoutMs,
+        maxHostCleanupRecoveryAttempts: this.#maxHostCleanupRecoveryAttempts,
         maxBufferedEvents: this.#maxBufferedEvents,
       });
       return session;
@@ -216,6 +224,7 @@ class CodexAcpxSession implements HarnessSession {
   readonly #now: () => Date;
   readonly #closeSettlementTimeoutMs: number;
   readonly #maxBufferedEvents: number;
+  readonly #maxHostCleanupRecoveryAttempts: number;
   readonly #events: AsyncQueue<PrpEvent>;
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
@@ -247,6 +256,7 @@ class CodexAcpxSession implements HarnessSession {
     dynamicToolHandler?: CodexAcpxDriverOptions["dynamicToolHandler"];
     now: () => Date;
     closeSettlementTimeoutMs: number;
+    maxHostCleanupRecoveryAttempts: number;
     maxBufferedEvents: number;
   }) {
     const identity = input.host.identity();
@@ -258,6 +268,7 @@ class CodexAcpxSession implements HarnessSession {
     this.#dynamicToolHandler = input.dynamicToolHandler;
     this.#now = input.now;
     this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
+    this.#maxHostCleanupRecoveryAttempts = input.maxHostCleanupRecoveryAttempts;
     this.#maxBufferedEvents = input.maxBufferedEvents;
     this.#events = new AsyncQueue<PrpEvent>(input.maxBufferedEvents);
     this.#sourceInstanceId = stableId(
@@ -513,6 +524,18 @@ class CodexAcpxSession implements HarnessSession {
         { turnId: closingTurnId },
       );
     }
+    if (hostCloseError) {
+      this.#emit(
+        "harness.diagnostic",
+        {
+          code: "acpx_host_cleanup_deferred",
+          message:
+            "ACPX host cleanup exceeded its close bound; bounded autonomous recovery is scheduled and explicit close retains cleanup ownership.",
+        },
+        closingTurnId ? { turnId: closingTurnId } : {},
+        0,
+      );
+    }
     this.#eventStreamClosed = true;
     this.#events.close();
     if (hostCloseError) {
@@ -537,7 +560,11 @@ class CodexAcpxSession implements HarnessSession {
   #retainHostCleanupOwnership(reason: string): void {
     if (this.#hostClosed || this.#hostCleanupRecoveryPromise) return;
     const recovery = (async () => {
-      while (!this.#hostClosed) {
+      for (
+        let attempt = 1;
+        attempt <= this.#maxHostCleanupRecoveryAttempts && !this.#hostClosed;
+        attempt += 1
+      ) {
         const pending =
           this.#hostClosePromise ?? this.#startHostClose({ reason });
         try {
@@ -546,7 +573,9 @@ class CodexAcpxSession implements HarnessSession {
           if (this.#hostClosePromise === pending) {
             this.#hostClosePromise = null;
           }
-          await retryCleanupAfter(this.#closeSettlementTimeoutMs);
+          if (attempt < this.#maxHostCleanupRecoveryAttempts) {
+            await retryCleanupAfter(this.#closeSettlementTimeoutMs);
+          }
         }
       }
     })();

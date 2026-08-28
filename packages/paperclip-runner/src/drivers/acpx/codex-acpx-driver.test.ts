@@ -273,6 +273,41 @@ describe("Codex ACPX harness driver", () => {
     });
   });
 
+  it("bounds autonomous cleanup after permanent host close failure", async () => {
+    const fixture = driverFixture({}, {
+      closeSettlementTimeoutMs: 1,
+      maxHostCleanupRecoveryAttempts: 2,
+    });
+    fixture.host.close.mockRejectedValue(new Error("permanent cleanup failure"));
+    const session = await fixture.driver.openSession({
+      runId: "run-close-permanent-failure",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const diagnosticEvents = collectUntil(session.events(), "harness.diagnostic");
+
+    await expect(
+      session.close({ reason: "runtime close permanently failed" }),
+    ).rejects.toThrow("permanent cleanup failure");
+    await expect(diagnosticEvents).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: "harness.diagnostic",
+        payload: expect.objectContaining({ code: "acpx_host_cleanup_deferred" }),
+      }),
+    ]));
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(3));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(fixture.host.close).toHaveBeenCalledTimes(3);
+
+    // Exhausting bounded autonomous recovery does not discard ownership. A
+    // later explicit close starts a new bounded attempt.
+    fixture.host.close.mockResolvedValueOnce(undefined);
+    await expect(
+      session.close({ reason: "operator retries retained cleanup" }),
+    ).resolves.toBeUndefined();
+    expect(fixture.host.close).toHaveBeenCalledTimes(4);
+  });
+
   it("bounds lagging streams without introducing source sequence gaps", async () => {
     const fixture = driverFixture(
       {},
@@ -381,6 +416,7 @@ function driverFixture(
   fixtureOptions: {
     runtimeEvents?: readonly AcpRuntimeEvent[];
     closeSettlementTimeoutMs?: number;
+    maxHostCleanupRecoveryAttempts?: number;
     maxBufferedEvents?: number;
   } = {},
 ): {
@@ -427,6 +463,7 @@ function driverFixture(
       return host;
     },
     closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
+    maxHostCleanupRecoveryAttempts: fixtureOptions.maxHostCleanupRecoveryAttempts,
     maxBufferedEvents: fixtureOptions.maxBufferedEvents,
   };
   const driver = new CodexAcpxDriver(
