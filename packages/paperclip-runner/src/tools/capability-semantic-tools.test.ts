@@ -44,6 +44,7 @@ async function runtimeFor(options: {
   seed?: CapabilityFixtureSeed;
   resolveSecretValue?: (name: string) => string | null;
   semanticToolRuntimeStore?: CapabilitySemanticToolRuntimeStore;
+  now?: () => number;
 } = {}) {
   const actor = {
     id: "actor-1",
@@ -87,6 +88,7 @@ async function runtimeFor(options: {
       scenarioGrants: options.scenarioGrants,
       policy: options.policy,
       resolveSecretValue: options.resolveSecretValue,
+      now: options.now,
     }),
   };
 }
@@ -483,6 +485,60 @@ describe("Capability exposure and authorization", () => {
       ok: true,
       operationResultId: completed.ok ? completed.operationResultId : undefined,
       value: { key: "case-pending", body: "Case body", upserted: true },
+    });
+  });
+
+  it("reclaims an expired durable extension lease after executor loss", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: `${OPEN.identity.runId}:upsert_case:expired-case`,
+        input: '{"body":"Case body","key":"case-expired"}',
+        status: "pending",
+        ownerId: "terminated-executor",
+        leaseExpiresAtMs: 1_000,
+      }],
+    };
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["cases:write"],
+      now: () => 1_001,
+    });
+
+    await expect(restored.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-expired", body: "Case body" },
+      idempotencyKey: "expired-case",
+    })).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: { key: "case-expired", body: "Case body", upserted: true },
+    });
+    expect(durableSnapshot.extensions).toEqual([
+      expect.objectContaining({
+        key: `${OPEN.identity.runId}:upsert_case:expired-case`,
+        status: "completed",
+        resultId: "tool-result-1",
+      }),
+    ]);
+    expect(durableSnapshot.operationResults["tool-result-1"]).toEqual({
+      key: "case-expired",
+      body: "Case body",
+      upserted: true,
     });
   });
 

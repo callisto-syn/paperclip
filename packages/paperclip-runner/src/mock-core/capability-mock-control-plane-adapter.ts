@@ -1814,6 +1814,15 @@ function isSemanticToolRuntimeSnapshot(
     }
     if (extension.status === "pending") {
       if ("resultId" in extension || "execution" in extension) return false;
+      if (
+        (extension.ownerId !== undefined &&
+          (typeof extension.ownerId !== "string" || extension.ownerId.length === 0)) ||
+        (extension.leaseExpiresAtMs !== undefined &&
+          (!Number.isSafeInteger(extension.leaseExpiresAtMs) ||
+            Number(extension.leaseExpiresAtMs) < 0))
+      ) {
+        return false;
+      }
       keys.add(extension.key);
       return true;
     }

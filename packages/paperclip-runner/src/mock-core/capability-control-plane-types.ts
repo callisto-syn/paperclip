@@ -259,7 +259,14 @@ export interface CapabilitySemanticToolRuntimeSnapshot {
   resultSequence: number;
   operationResults: Record<string, CapabilityJsonValue>;
   extensions: Array<
-    | { key: string; input: string; status: "pending" }
+    | {
+        key: string;
+        input: string;
+        status: "pending";
+        /** Optional only for legacy pending snapshots, which are immediately reclaimable. */
+        ownerId?: string;
+        leaseExpiresAtMs?: number;
+      }
     | {
         key: string;
         input: string;
