@@ -244,8 +244,7 @@ fn validate_text_constraints(
 }
 
 fn parse_javascript_number(value: &str) -> Option<f64> {
-    let value =
-        value.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    let value = value.trim_matches(is_ecmascript_whitespace);
     if value.is_empty() {
         return Some(0.0);
     }
@@ -264,4 +263,26 @@ fn parse_javascript_number(value: &str) -> Option<f64> {
         }
     }
     value.parse::<f64>().ok()
+}
+
+fn is_ecmascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'
+            | '\u{000a}'
+            | '\u{000b}'
+            | '\u{000c}'
+            | '\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
