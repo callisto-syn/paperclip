@@ -489,51 +489,82 @@ describe("Capability exposure and authorization", () => {
   });
 
   it("bounds completion contention and retries the fulfilled execution without rerunning it", async () => {
-    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
-    let rejectCompletion = true;
-    let completionAttempts = 0;
-    const durableStore: CapabilitySemanticToolRuntimeStore = {
-      load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
-      save: (_runId, snapshot) => {
-        durableSnapshot = structuredClone(snapshot);
-      },
-      compareAndSwap: (_runId, expected, snapshot) => {
-        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
-        const completing = snapshot.extensions.some(
-          (extension) => extension.status === "completed",
-        );
-        if (completing) completionAttempts += 1;
-        if (completing && rejectCompletion) return false;
-        durableSnapshot = structuredClone(snapshot);
-        return true;
-      },
-    };
-    const { runtime } = await runtimeFor({
-      scenarioGrants: ["cases:write"],
-      semanticToolRuntimeStore: durableStore,
-    });
-    const invocation = {
-      operationId: "upsert_case",
-      input: { key: "case-bounded-contention", body: "Case body" },
-      idempotencyKey: "upsert-case-bounded-contention",
-    } as const;
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      let rejectCompletion = true;
+      let completionAttempts = 0;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+        save: (_runId, snapshot) => {
+          durableSnapshot = structuredClone(snapshot);
+        },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+          const completing = snapshot.extensions.some(
+            (extension) => extension.status === "completed",
+          );
+          if (completing) completionAttempts += 1;
+          if (completing && rejectCompletion) return false;
+          durableSnapshot = structuredClone(snapshot);
+          return true;
+        },
+      };
+      const { adapter, runtime } = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+        now: Date.now,
+      });
+      const invocation = {
+        operationId: "upsert_case",
+        input: { key: "case-bounded-contention", body: "Case body" },
+        idempotencyKey: "upsert-case-bounded-contention",
+      } as const;
 
-    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
-      ok: false,
-      error: { code: "operation_unsupported" },
-    });
-    expect(completionAttempts).toBe(64);
-    expect(durableSnapshot?.extensions).toEqual([
-      expect.objectContaining({ status: "pending" }),
-    ]);
+      const contended = runtime.invoke(invocation);
+      for (let yieldIndex = 0; yieldIndex < 8; yieldIndex += 1) {
+        await vi.advanceTimersToNextTimerAsync();
+      }
+      await expect(contended).resolves.toMatchObject({
+        ok: false,
+        error: { code: "operation_unsupported" },
+      });
+      expect(completionAttempts).toBe(64);
+      expect(durableSnapshot?.extensions).toEqual([
+        expect.objectContaining({ status: "pending" }),
+      ]);
 
-    rejectCompletion = false;
-    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
-      ok: true,
-      operationResultId: "tool-result-1",
-      value: { key: "case-bounded-contention", upserted: true },
-    });
-    expect(completionAttempts).toBe(65);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const pending = durableSnapshot?.extensions[0];
+      expect(pending?.status).toBe("pending");
+      if (pending?.status !== "pending") throw new Error("expected a pending extension");
+      expect(pending.leaseExpiresAtMs).toBeGreaterThan(Date.now());
+
+      const followerAdapter = CapabilityMockControlPlaneAdapter.restore(
+        adapter.serialize(),
+        { semanticToolRuntimeStore: durableStore },
+      );
+      const follower = new CapabilitySemanticToolRuntime({
+        adapter: followerAdapter,
+        runId: OPEN.identity.runId,
+        scenarioGrants: ["cases:write"],
+        now: Date.now,
+      });
+      await expect(follower.invoke(invocation)).resolves.toMatchObject({
+        ok: false,
+        error: { reason: "idempotency_recovery_in_flight" },
+      });
+
+      rejectCompletion = false;
+      await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+        ok: true,
+        operationResultId: "tool-result-1",
+        value: { key: "case-bounded-contention", upserted: true },
+      });
+      expect(completionAttempts).toBe(65);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries rejected-execution cleanup through snapshot contention", async () => {
@@ -589,6 +620,68 @@ describe("Capability exposure and authorization", () => {
       operationResultId: "tool-result-2",
       value: { key: "case-cleanup-raced", upserted: true },
     });
+  });
+
+  it("retains a failed lease until cleanup contention clears", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      let failExecutionAllocation = true;
+      let cleanupAttempts = 0;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () => {
+          if (
+            failExecutionAllocation &&
+            durableSnapshot?.extensions.some((extension) => extension.status === "pending")
+          ) {
+            failExecutionAllocation = false;
+            throw new Error("injected result allocation failure");
+          }
+          return durableSnapshot === null ? null : structuredClone(durableSnapshot);
+        },
+        save: (_runId, snapshot) => {
+          durableSnapshot = structuredClone(snapshot);
+        },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+          const removingFailedLease =
+            durableSnapshot?.extensions.some((extension) => extension.status === "pending") &&
+            snapshot.extensions.length === 0;
+          if (removingFailedLease) {
+            cleanupAttempts += 1;
+            if (cleanupAttempts <= 8) return false;
+          }
+          durableSnapshot = structuredClone(snapshot);
+          return true;
+        },
+      };
+      const { runtime } = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+        now: Date.now,
+      });
+      const invocation = {
+        operationId: "upsert_case",
+        input: { key: "case-cleanup-exhausted", body: "Case body" },
+        idempotencyKey: "upsert-case-cleanup-exhausted",
+      } as const;
+
+      await expect(runtime.invoke(invocation)).resolves.toMatchObject({ ok: false });
+      expect(cleanupAttempts).toBe(8);
+      expect(durableSnapshot?.extensions).toEqual([
+        expect.objectContaining({ status: "pending" }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(cleanupAttempts).toBe(9);
+      expect(durableSnapshot?.extensions).toEqual([]);
+      await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+        ok: true,
+        value: { key: "case-cleanup-exhausted", upserted: true },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("allocates read result ids from the latest shared durable sequence", async () => {

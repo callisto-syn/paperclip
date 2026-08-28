@@ -46,6 +46,7 @@ interface ExtensionIdempotencyRecord {
   ownerId: string | null;
   leaseExpiresAtMs: number;
   leaseHeartbeat: ReturnType<typeof setInterval> | null;
+  cleanupRetry: ReturnType<typeof setTimeout> | null;
   completed?: { resultId: string; value: ExtensionExecution };
 }
 
@@ -211,6 +212,7 @@ export class CapabilitySemanticToolRuntime {
             ownerId: null,
             leaseExpiresAtMs: 0,
             leaseHeartbeat: null,
+            cleanupRetry: null,
           };
           this.#state.extensionIdempotency.set(
             extensionIdempotencyKey,
@@ -358,7 +360,24 @@ export class CapabilitySemanticToolRuntime {
           observableValue,
         );
         if (completedResultId === null) {
-          this.#stopExtensionExecutionLease(extensionRecord);
+          // The extension already ran. Retain and renew its durable ownership
+          // so another runtime cannot execute it again while this runtime can
+          // still publish the exact completed receipt on an identical retry.
+          try {
+            const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+            const extension = durable?.extensions.find(
+              (candidate) => candidate.key === extensionIdempotencyKey,
+            );
+            if (
+              durable === null ||
+              extension?.status !== "pending" ||
+              extension.ownerId !== extensionRecord.ownerId
+            ) {
+              this.#stopExtensionExecutionLease(extensionRecord);
+            }
+          } catch {
+            // A read failure cannot prove ownership was lost. Keep renewing it.
+          }
           throw new Error("durable extension execution lease was superseded");
         }
         resultId = completedResultId;
@@ -488,36 +507,63 @@ export class CapabilitySemanticToolRuntime {
     }, EXTENSION_EXECUTION_HEARTBEAT_MS);
     record.leaseHeartbeat.unref();
     void execution.catch(() => {
-      this.#stopExtensionExecutionLease(record);
-      try {
-        for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
-          const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
-          const currentExtension = current?.extensions.find(
-            (candidate) => candidate.key === key,
-          );
-          if (current === null || currentExtension?.status !== "pending" ||
-            currentExtension.ownerId !== record.ownerId) break;
-          const withoutFailedLease = structuredClone(current);
-          withoutFailedLease.extensions = withoutFailedLease.extensions.filter(
-            (candidate) => candidate.key !== key,
-          );
-          if (this.#adapter.compareAndSwapSemanticToolRuntime(
-            this.#runId,
-            current,
-            withoutFailedLease,
-          )) break;
-        }
-      } finally {
+      record.execution = null;
+      this.#scheduleFailedExtensionCleanup(key, record);
+    });
+    return true;
+  }
+
+  #scheduleFailedExtensionCleanup(
+    key: string,
+    record: ExtensionIdempotencyRecord,
+  ): void {
+    if (record.cleanupRetry !== null) return;
+    const cleanup = () => {
+      record.cleanupRetry = null;
+      if (this.#removeFailedExtensionLease(key, record)) {
+        this.#stopExtensionExecutionLease(record);
         if (this.#state.extensionIdempotency.get(key) === record) {
           this.#state.extensionIdempotency.delete(key);
         }
+        return;
       }
-    }).catch(() => {
-      if (this.#state.extensionIdempotency.get(key) === record) {
-        this.#state.extensionIdempotency.delete(key);
+      record.cleanupRetry = setTimeout(cleanup, 1_000);
+      record.cleanupRetry.unref();
+    };
+    cleanup();
+  }
+
+  #removeFailedExtensionLease(
+    key: string,
+    record: ExtensionIdempotencyRecord,
+  ): boolean {
+    try {
+      for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+        const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
+        const currentExtension = current?.extensions.find(
+          (candidate) => candidate.key === key,
+        );
+        if (
+          current === null ||
+          currentExtension?.status !== "pending" ||
+          currentExtension.ownerId !== record.ownerId
+        ) {
+          return true;
+        }
+        const withoutFailedLease = structuredClone(current);
+        withoutFailedLease.extensions = withoutFailedLease.extensions.filter(
+          (candidate) => candidate.key !== key,
+        );
+        if (this.#adapter.compareAndSwapSemanticToolRuntime(
+          this.#runId,
+          current,
+          withoutFailedLease,
+        )) return true;
       }
-    });
-    return true;
+    } catch {
+      return false;
+    }
+    return false;
   }
 
   #renewExtensionExecutionLease(
@@ -622,6 +668,8 @@ export class CapabilitySemanticToolRuntime {
   #stopExtensionExecutionLease(record: ExtensionIdempotencyRecord): void {
     if (record.leaseHeartbeat !== null) clearInterval(record.leaseHeartbeat);
     record.leaseHeartbeat = null;
+    if (record.cleanupRetry !== null) clearTimeout(record.cleanupRetry);
+    record.cleanupRetry = null;
   }
 
   #restoreState(
@@ -643,6 +691,7 @@ export class CapabilitySemanticToolRuntime {
           ownerId: extension.ownerId ?? null,
           leaseExpiresAtMs: extension.leaseExpiresAtMs ?? 0,
           leaseHeartbeat: null,
+          cleanupRetry: null,
         });
         continue;
       }
@@ -656,6 +705,7 @@ export class CapabilitySemanticToolRuntime {
         ownerId: null,
         leaseExpiresAtMs: 0,
         leaseHeartbeat: null,
+        cleanupRetry: null,
         completed,
       });
     }
