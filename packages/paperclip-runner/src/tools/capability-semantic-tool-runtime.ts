@@ -218,12 +218,23 @@ export class CapabilitySemanticToolRuntime {
             extensionIdempotencyKey,
             idempotencyRecord,
           );
-          if (!this.#startExtensionExecution(
-            extensionIdempotencyKey,
-            idempotencyRecord,
-            descriptor,
-            invocation,
-          )) {
+          let executionStarted = false;
+          try {
+            executionStarted = this.#startExtensionExecution(
+              extensionIdempotencyKey,
+              idempotencyRecord,
+              descriptor,
+              invocation,
+            );
+          } catch (error) {
+            // Acquisition has not handed an execution promise to this record.
+            // Do not let a transient store failure strand the local key; any
+            // durable lease that committed before the failure still gates the
+            // next attempt through the normal recovery path.
+            this.#state.extensionIdempotency.delete(extensionIdempotencyKey);
+            throw error;
+          }
+          if (!executionStarted) {
             this.#state.extensionIdempotency.delete(extensionIdempotencyKey);
             const denied = this.#authorization.denyInvocation(
               invocation.operationId,

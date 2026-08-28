@@ -1002,6 +1002,49 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
+  it("retries initial acquisition after a transient durable-store failure", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    let failNextLoad = false;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => {
+        if (failNextLoad) {
+          failNextLoad = false;
+          throw new Error("transient store read failure");
+        }
+        return durableSnapshot === null ? null : structuredClone(durableSnapshot);
+      },
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const { runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
+    });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-acquisition-retry", body: "Case body" },
+      idempotencyKey: "acquisition-retry",
+    };
+
+    failNextLoad = true;
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+      ok: false,
+      error: { reason: "mock_operation_rejected" },
+    });
+    await expect(runtime.invoke(invocation)).resolves.toMatchObject({
+      ok: true,
+      value: { key: "case-acquisition-retry", upserted: true },
+    });
+  });
+
   it("reclaims an expired durable extension lease after executor loss", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
