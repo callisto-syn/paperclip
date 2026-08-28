@@ -269,6 +269,32 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
+  it("bounds post-handshake model verification and cleans the runtime", async () => {
+    const fixture = await hostFixture();
+    const runtime = runtimePort({
+      getStatus: () => new Promise<never>(() => undefined),
+    });
+    const dependencies = fixture.dependencies({
+      openRuntime: async () => runtime,
+    });
+    dependencies.admissionVerificationTimeoutMs = 1;
+
+    await expect(
+      AcpxRuntimeHost.open(
+        {
+          ...fixture.options,
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "approve-all",
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("admission verification exceeded its deadline");
+    expect(runtime.close).toHaveBeenCalledOnce();
+    expect(fixture.commandClose).toHaveBeenCalledOnce();
+  });
+
   it("attempts every cleanup when runtime shutdown fails", async () => {
     const fixture = await hostFixture();
     let failClose = true;

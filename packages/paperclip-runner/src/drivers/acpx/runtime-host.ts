@@ -43,6 +43,14 @@ import {
 import type { AcpxExpectedSessionIdentity } from "./sidecar-protocol.js";
 
 export const ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS = 2_000;
+const RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS = 8_000;
+
+class AcpxRuntimeAdmissionTimeoutError extends Error {
+  constructor() {
+    super("ACPX runtime admission verification exceeded its deadline");
+    this.name = "AcpxRuntimeAdmissionTimeoutError";
+  }
+}
 
 export interface AcpxRuntimePortIdentity {
   acpxRecordId: string;
@@ -102,6 +110,8 @@ export interface AcpxRuntimeHostDependencies {
     profile: QualifiedAcpxProfile,
   ) => Promise<VerifiedAcpxInstallation>;
   openRuntime(options: AcpxRuntimePortOpenOptions): Promise<AcpxRuntimePort>;
+  /** Internal test seam for the post-handshake admission deadline. */
+  admissionVerificationTimeoutMs?: number;
 }
 
 export interface OpenAcpxRuntimeHostOptions {
@@ -222,8 +232,12 @@ export class AcpxRuntimeHost {
             ]
           : [],
       });
-      await requireVerifiedAcpxModel(runtime, profile);
-      const runtimeIdentity = await runtime.identity();
+      const runtimeIdentity = await boundedRuntimeAdmissionVerification(
+        runtime,
+        profile,
+        dependencies.admissionVerificationTimeoutMs ??
+          RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS,
+      );
       const observedIdentity: AcpxExpectedSessionIdentity = {
         kind: "acpx",
         normalizedSessionId: binding.normalizedSessionId,
@@ -373,6 +387,32 @@ export class AcpxRuntimeHost {
     if (errors.length > 0) {
       throw new AggregateError(errors, "ACPX runtime cleanup failed");
     }
+  }
+}
+
+async function boundedRuntimeAdmissionVerification(
+  runtime: AcpxRuntimePort,
+  profile: QualifiedAcpxProfile,
+  timeoutMs: number,
+): Promise<AcpxRuntimePortIdentity> {
+  const verification = Promise.resolve().then(async () => {
+    await requireVerifiedAcpxModel(runtime, profile);
+    return await runtime.identity();
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      verification,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new AcpxRuntimeAdmissionTimeoutError()),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
