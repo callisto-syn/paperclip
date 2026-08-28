@@ -2,6 +2,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -114,6 +116,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let fail_after_turn_completion = args
         .iter()
         .any(|value| value == "--fail-after-turn-completion");
+    let fail_after_completed_turn_signal =
+        argument(&args, "--fail-after-completed-turn-signal").map(PathBuf::from);
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
@@ -253,6 +257,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     finish_turn(&state_path, &mut state, "completed")?;
                     if fail_after_turn_completion {
                         return Err("configured failure after turn completion".into());
+                    }
+                    if let Some(signal_path) = &fail_after_completed_turn_signal {
+                        while !signal_path.exists() {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        return Err("configured failure after completed turn became idle".into());
                     }
                     if exit_after_turn_completion {
                         return Ok(());
