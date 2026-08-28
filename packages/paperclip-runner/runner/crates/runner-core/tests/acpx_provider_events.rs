@@ -185,8 +185,29 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt",);
     }
 
+    for posix_path in ["src:/main.rs", "foo:/bar"] {
+        let colon_component = normalize(
+            AcpxRuntimeEventKind::ToolCall,
+            json!({
+                "type":"tool_call",
+                "tag":"tool_call_update",
+                "toolCallId":"tool-posix-colon",
+                "kind":"read",
+                "status":"completed",
+                "locations":[{"path":posix_path}]
+            }),
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                colon_component[0].payload["target"],
+                serde_json::Value::Null
+            );
+        } else {
+            assert_eq!(colon_component[0].payload["target"], posix_path);
+        }
+    }
+
     for unsafe_path in [
-        "src:/main.rs",
         "custom://host/path",
         r"sftp:\host\secret",
         "git+ssh:/host/repo",

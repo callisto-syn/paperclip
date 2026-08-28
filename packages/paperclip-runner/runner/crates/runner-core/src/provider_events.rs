@@ -687,10 +687,11 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         // Windows drive selector. Interpret that ambiguous spelling as a
         // drive-relative path only when the runner itself is on Windows.
         || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
+        || (cfg!(windows) && raw_path.contains(':'))
         || windows_normalized_path
             .split('/')
             .any(|segment| segment == "..")
-        || has_scheme_qualified_path(&windows_normalized_path)
+        || has_unsafe_uri_spelling(raw_path)
     {
         Value::Null
     } else {
@@ -710,20 +711,49 @@ fn is_absolute_windows_drive_path(path: &str) -> bool {
     })
 }
 
-fn has_scheme_qualified_path(path: &str) -> bool {
+fn has_unsafe_uri_spelling(path: &str) -> bool {
     path.split_once(':').is_some_and(|(scheme, suffix)| {
         // A one-letter prefix is ambiguous with a valid POSIX filename (and
-        // is handled as a drive selector on Windows). Multi-letter URI
-        // schemes followed by a normalized separator are rejected without an
-        // allowlist: URI schemes are extensible, and this display-only boundary
-        // must fail closed for unfamiliar or compound schemes.
+        // is handled as a drive selector on Windows). A multi-letter prefix
+        // followed by one forward slash is likewise indistinguishable from a
+        // valid POSIX colon component such as `src:/main.rs`. Reject the
+        // unambiguous URI spellings and known transport schemes while keeping
+        // that POSIX spelling displayable.
         let valid_scheme = scheme.len() > 1
             && scheme.bytes().enumerate().all(|(index, byte)| {
                 byte.is_ascii_alphabetic()
                     || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
             });
-        valid_scheme && suffix.starts_with('/')
+        if !valid_scheme {
+            return false;
+        }
+        suffix.starts_with("//")
+            || suffix.starts_with('\\')
+            || (suffix.starts_with('/')
+                && (scheme.contains(['+', '-', '.']) || is_known_uri_scheme(scheme)))
     })
+}
+
+fn is_known_uri_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "data"
+            | "file"
+            | "ftp"
+            | "ftps"
+            | "git"
+            | "http"
+            | "https"
+            | "jar"
+            | "mailto"
+            | "sftp"
+            | "ssh"
+            | "tel"
+            | "urn"
+            | "vscode"
+            | "ws"
+            | "wss"
+    )
 }
 
 #[cfg(test)]
@@ -768,9 +798,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_every_scheme_qualified_display_path() {
+    fn preserves_posix_colon_components() {
+        for location in ["src:/main.rs", "foo:/bar"] {
+            let normalized = safe_acpx_location(Some(&json!({"path": location})));
+            if cfg!(windows) {
+                assert_eq!(normalized, Value::Null);
+            } else {
+                assert_eq!(normalized, Value::String(location.to_owned()));
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unambiguous_uri_display_paths() {
         for location in [
-            "src:/main.rs",
             "custom://host/path",
             r"sftp:\host\secret",
             "git+ssh:/host/repo",
