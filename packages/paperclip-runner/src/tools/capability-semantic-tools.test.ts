@@ -395,6 +395,38 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("rejects incomplete or malformed restored extension executions", async () => {
+    const { adapter, runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+    });
+    await runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-1", body: "Case body" },
+      idempotencyKey: "upsert-case-1",
+    });
+
+    for (const mutate of [
+      (execution: Record<string, unknown>) => delete execution.value,
+      (execution: Record<string, unknown>) => {
+        execution.commandResult = { disposition: "applied" };
+      },
+    ]) {
+      const snapshot = JSON.parse(adapter.serialize()) as {
+        semanticToolRuntimes: Record<
+          string,
+          { extensions: Array<{ execution: Record<string, unknown> }> }
+        >;
+      };
+      const execution =
+        snapshot.semanticToolRuntimes[OPEN.identity.runId]!.extensions[0]!
+          .execution;
+      mutate(execution);
+      expect(() =>
+        CapabilityMockControlPlaneAdapter.restore(JSON.stringify(snapshot)),
+      ).toThrow("semantic tool runtime for run-tools is invalid");
+    }
+  });
+
   it("serializes concurrent retries for required-idempotency extensions", async () => {
     const { runtime } = await runtimeFor({ scenarioGrants: ["cases:write"] });
     const invocation = {

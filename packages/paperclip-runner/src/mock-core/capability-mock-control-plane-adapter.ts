@@ -1748,6 +1748,13 @@ function isSemanticToolRuntimeSnapshot(
   ) {
     return false;
   }
+  if (
+    !Object.values(snapshot.operationResults as Record<string, unknown>).every(
+      isCapabilityJsonValue,
+    )
+  ) {
+    return false;
+  }
   const keys = new Set<string>();
   return snapshot.extensions.every((candidate) => {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
@@ -1768,12 +1775,61 @@ function isSemanticToolRuntimeSnapshot(
       return false;
     }
     const execution = extension.execution as Record<string, unknown>;
-    if (!Array.isArray(execution.entityRefs) || execution.entityRefs.some((ref) => typeof ref !== "string")) {
+    if (
+      !("value" in execution) ||
+      !isCapabilityJsonValue(execution.value) ||
+      !("commandResult" in execution) ||
+      (execution.commandResult !== null &&
+        !isCapabilityCommandResult(execution.commandResult)) ||
+      !Array.isArray(execution.entityRefs) ||
+      execution.entityRefs.some((ref) => typeof ref !== "string")
+    ) {
       return false;
     }
     keys.add(extension.key);
     return true;
   });
+}
+
+function isCapabilityJsonValue(value: unknown): value is CapabilityJsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isCapabilityJsonValue);
+  if (typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).every(
+    isCapabilityJsonValue,
+  );
+}
+
+function isCapabilityCommandResult(
+  value: unknown,
+): value is CapabilityCommandResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.commandId === "string" &&
+    result.commandId.length > 0 &&
+    typeof result.commandKind === "string" &&
+    Object.prototype.hasOwnProperty.call(
+      CAPABILITY_COMMAND_REQUIRED_CLAIMS,
+      result.commandKind,
+    ) &&
+    (result.disposition === "applied" || result.disposition === "duplicate") &&
+    Number.isSafeInteger(result.stateRevision) &&
+    Number(result.stateRevision) >= 0 &&
+    Array.isArray(result.entityRefs) &&
+    result.entityRefs.every((ref) => typeof ref === "string") &&
+    Array.isArray(result.scheduledWakeIds) &&
+    result.scheduledWakeIds.every((id) => typeof id === "string")
+  );
 }
 
 function isFixtureState(value: unknown): value is CapabilityFixtureState {
