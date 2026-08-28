@@ -928,7 +928,7 @@ impl CodexCommandExecutor {
         if self
             .state
             .as_ref()
-            .is_some_and(|state| state.queued_events.len() > MAX_REGULAR_QUEUED_PROVIDER_EVENTS)
+            .is_some_and(|state| state.queued_events.len() >= MAX_REGULAR_QUEUED_PROVIDER_EVENTS)
         {
             return Err(DurableRunnerError::invalid(
                 "cannot start a new Codex turn until terminal events are acknowledged",
@@ -1756,5 +1756,53 @@ mod tests {
         state.validate().unwrap();
         assert!(state.push_terminal_event(ordinary_event()).is_err());
         assert!(serde_json::to_vec(&state).unwrap().len() as u64 <= MAX_PROVIDER_STATE_BYTES);
+    }
+
+    #[test]
+    fn exact_regular_backlog_capacity_rejects_turn_admission() {
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+            },
+            None,
+            ProviderToolBridge::default(),
+        );
+        state.lifecycle = "prepared".to_owned();
+        for _ in 0..(MAX_EVENTS_PER_POLL + MAX_REGULAR_QUEUED_PROVIDER_EVENTS) {
+            state
+                .push_event(NormalizedProviderEvent {
+                    event_type: "harness.diagnostic".to_owned(),
+                    priority: EventPriority::P1,
+                    payload: json!({"code": "admission_boundary"}),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            state.queued_events.len(),
+            MAX_REGULAR_QUEUED_PROVIDER_EVENTS,
+        );
+        let mut executor = CodexCommandExecutor::new(PathBuf::from("unused-test-state"));
+        executor.state = Some(state);
+        executor.restore_checked = true;
+
+        let error = executor
+            .start_turn(&json!({"text": "must not reach the provider"}))
+            .expect_err("the exact regular backlog limit must reject admission");
+        assert!(error
+            .to_string()
+            .contains("until terminal events are acknowledged"));
+        assert!(executor.provider.is_none());
     }
 }
