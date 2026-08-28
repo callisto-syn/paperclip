@@ -186,6 +186,29 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
+  it("classifies a pump rejection during close as interrupted", async () => {
+    const runtimeEventFailure = deferred<never>();
+    const fixture = driverFixture({}, { runtimeEventFailure: runtimeEventFailure.promise });
+    const session = await fixture.driver.openSession({
+      runId: "run-close-pump-failure",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.interrupted");
+    await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+
+    const closing = session.close({ reason: "operator shutdown" });
+    runtimeEventFailure.reject(new Error("provider stream closed during shutdown"));
+    await expect(closing).resolves.toBeUndefined();
+
+    const emitted = await terminalEvents;
+    expect(emitted.filter((event) => event.eventType === "turn.interrupted"))
+      .toHaveLength(1);
+    expect(emitted.some((event) => event.eventType === "turn.failed")).toBe(false);
+  });
+
   it("reports a host close timeout and retains cleanup ownership", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
     const hostClose = deferred<void>();
@@ -375,6 +398,44 @@ describe("Codex ACPX harness driver", () => {
     );
   });
 
+  it("retains a committed semantic proposal under terminal queue pressure", async () => {
+    const fixture = driverFixture({}, { maxBufferedEvents: 6 });
+    const session = await fixture.driver.openSession({
+      runId: "run-semantic-bounds",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+    await expect(fixture.hostOptions!.semanticTools!.handler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-bounded",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    })).resolves.toEqual({ accepted: true });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+
+    await vi.waitFor(async () => {
+      await expect(session.snapshot()).resolves.toMatchObject({
+        terminalTurns: [expect.objectContaining({ turnId })],
+      });
+    });
+    await session.close({ reason: "bounded result verified" });
+    const retained: PrpEvent[] = [];
+    for await (const event of session.events()) retained.push(event);
+
+    const proposalIndex = retained.findIndex(
+      (event) => event.eventType === "run.result.proposed",
+    );
+    const terminalIndex = retained.findIndex(
+      (event) => event.eventType === "turn.completed",
+    );
+    expect(proposalIndex).toBeGreaterThanOrEqual(0);
+    expect(terminalIndex).toBeGreaterThan(proposalIndex);
+    expect(retained).toHaveLength(6);
+  });
+
   it("preserves every terminal when the bounded consumer keeps draining", async () => {
     const fixture = driverFixture({}, { maxBufferedEvents: 4 });
     const session = await fixture.driver.openSession({
@@ -415,6 +476,7 @@ function driverFixture(
   overrides: Partial<CodexAcpxDriverOptions> = {},
   fixtureOptions: {
     runtimeEvents?: readonly AcpRuntimeEvent[];
+    runtimeEventFailure?: Promise<never>;
     closeSettlementTimeoutMs?: number;
     maxHostCleanupRecoveryAttempts?: number;
     maxBufferedEvents?: number;
@@ -447,6 +509,9 @@ function driverFixture(
             text: "Reading",
           },
         ];
+        if (fixtureOptions.runtimeEventFailure) {
+          await fixtureOptions.runtimeEventFailure;
+        }
       },
     },
     result: result.promise,

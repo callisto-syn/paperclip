@@ -668,7 +668,7 @@ class CodexAcpxSession implements HarnessSession {
     } catch (error) {
       if (this.#terminalTurns.has(turnId)) return;
       if (this.#activeTurnId === turnId) this.#activeTurnId = null;
-      if (this.#closed) {
+      if (this.#closed || this.#closingStarted) {
         this.#terminalTurns.set(
           turnId,
           canonicalJson({ status: "interrupted" }),
@@ -739,7 +739,9 @@ class CodexAcpxSession implements HarnessSession {
     refs: { turnId?: string; itemId?: string } = {},
     reservedAfter = isTerminalEvent(eventType)
       ? 0
-      : TERMINAL_EVENT_RESERVE,
+      : eventType === "run.result.proposed"
+        ? TERMINAL_EVENT_RESERVE - 1
+        : TERMINAL_EVENT_RESERVE,
   ): boolean {
     if (this.#eventStreamClosed) return false;
     if (this.#eventStreamOmitted && isTerminalEvent(eventType)) {
