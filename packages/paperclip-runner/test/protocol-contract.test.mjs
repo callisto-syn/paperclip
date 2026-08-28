@@ -112,6 +112,33 @@ test("the Codex question fixture uses stable provider-neutral IDs", async () => 
   assert.deepEqual(Object.keys(value.canonicalResponse.answers), ["environment"]);
 });
 
+test("every question adapter fixture satisfies its declared schema", async () => {
+  const schemas = await loadSchemaCatalog(resolve(protocolRoot, "schemas"));
+  const validators = compileProtocolValidators(schemas);
+  for (const adapter of ["codex", "acpx"]) {
+    const value = await fixture(`questions/${adapter}.json`);
+    assert.doesNotThrow(() =>
+      assertSchemaInstance(
+        validators.questionAdapterFixture,
+        value,
+        `${adapter}-question-fixture`,
+      ),
+    );
+  }
+
+  const malformed = structuredClone(await fixture("questions/acpx.json"));
+  delete malformed.canonicalQuestionSet.schema;
+  assert.throws(
+    () =>
+      assertSchemaInstance(
+        validators.questionAdapterFixture,
+        malformed,
+        "malformed-acpx-question-fixture",
+      ),
+    /schema_validation_failed/,
+  );
+});
+
 test("the cross-language conformance input and output have one stable identity", async () => {
   const input = await fixture("conformance-minimal-run.json");
   const output = await fixture("conformance-expected-output.json");

@@ -64,14 +64,16 @@ export async function buildProtocolManifest() {
           compatibilityCase = "additive-optional-fields";
         }
       }
-    } else if (relativePath === "fixtures/questions/codex.json") {
-      assertCodexQuestionFixture(value);
+    } else if (relativePath.startsWith("fixtures/questions/")) {
       assertSchemaInstance(
         validators.questionAdapterFixture,
         value,
         relativePath,
       );
-      compatibilityCase = "codex-structured-input";
+      if (relativePath === "fixtures/questions/codex.json") {
+        assertCodexQuestionFixture(value);
+      }
+      compatibilityCase = `${value.adapter}-structured-input`;
     } else if (relativePath === "fixtures/conformance-minimal-run.json") {
       assertSchemaInstance(validators.conformanceFixture, value, relativePath);
       compatibilityCase = "cross-language-input";
