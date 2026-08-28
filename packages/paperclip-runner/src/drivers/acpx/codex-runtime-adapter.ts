@@ -361,9 +361,7 @@ function runtimePort(
         mode: "prompt",
         requestId: input.requestId,
         ...(input.signal ? { signal: input.signal } : {}),
-        ...(input.onElicitation
-          ? { onElicitation: input.onElicitation }
-          : {}),
+        ...(input.onElicitation ? { onElicitation: input.onElicitation } : {}),
       });
     },
     close: closeRuntime,

@@ -34,6 +34,20 @@ describe("Codex ACPX runtime sidecar", () => {
     });
   });
 
+  it("bounds failed-admission cleanup when the host does not settle", async () => {
+    const close = vi.fn(() => new Promise<void>(() => undefined));
+    const host = {
+      identity: () => ({ kind: "acpx" }),
+      status: vi.fn().mockRejectedValue(new Error("status failed")),
+      close,
+    };
+
+    await expect(
+      verifyOpenedAcpxSidecarHost(host, () => ({}), 1),
+    ).rejects.toThrow("verification and provider cleanup failed");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("validates a complete run attachment before it can be committed", () => {
     let attachedRunId: string | null = null;
     const attach = (params: Record<string, unknown>) => {
