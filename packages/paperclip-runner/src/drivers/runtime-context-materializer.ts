@@ -119,8 +119,23 @@ export async function materializeNativeRuntimeSkills(
     dependencies.removeTree ??
     ((path: string) => rm(path, { recursive: true, force: true }));
   if (context) {
+    const runtimeNames = new Set<string>();
     for (const skill of context.skills) {
       safeMaterializationTarget(skillsHome, skill.runtimeName);
+      if (runtimeNames.has(skill.runtimeName)) {
+        throw new Error("runtime context skill names must not overlap");
+      }
+      runtimeNames.add(skill.runtimeName);
+    }
+    for (const runtimeName of runtimeNames) {
+      const segments = runtimeName.split("/");
+      for (let length = 1; length < segments.length; length += 1) {
+        if (runtimeNames.has(segments.slice(0, length).join("/"))) {
+          throw new Error("runtime context skill names must not overlap");
+        }
+      }
+    }
+    for (const skill of context.skills) {
       await assertSafeTree(skill.bundle.rootPath);
     }
   }

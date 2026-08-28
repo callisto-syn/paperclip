@@ -234,24 +234,26 @@ describe("runtime context materialization", () => {
       key: "company/group",
       runtimeName: "group",
     };
-    const value = {
-      ...replacementContext,
-      skills: [...replacementContext.skills, collidingSkill],
-    };
-    const collidingContext = {
-      ...value,
-      aggregateDigest: canonicalNativeRuntimeContextDigest(value),
-    };
+    for (const skills of [
+      [...replacementContext.skills, collidingSkill],
+      [collidingSkill, ...replacementContext.skills],
+    ]) {
+      const value = { ...replacementContext, skills };
+      const collidingContext = {
+        ...value,
+        aggregateDigest: canonicalNativeRuntimeContextDigest(value),
+      };
 
-    await expect(prepareIsolatedCodexHome({
-      context: collidingContext,
-      codexHome,
-    })).rejects.toThrow();
-    await expect(readFile(
-      join(codexHome, "skills", "assigned", "SKILL.md"),
-      "utf8",
-    )).resolves.toBe("# Assigned\n");
-    await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+      await expect(prepareIsolatedCodexHome({
+        context: collidingContext,
+        codexHome,
+      })).rejects.toThrow("skill names must not overlap");
+      await expect(readFile(
+        join(codexHome, "skills", "assigned", "SKILL.md"),
+        "utf8",
+      )).resolves.toBe("# Assigned\n");
+      await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
+    }
   });
 
   it("does not report replacement failure after the live-tree swap commits", async () => {
