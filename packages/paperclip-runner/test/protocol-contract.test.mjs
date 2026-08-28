@@ -8,6 +8,7 @@ import { buildProtocolManifest } from "../scripts/generate-protocol-manifest.mjs
 import {
   assertCodexQuestionFixture,
   assertConformanceFixturePair,
+  assertQuestionAdapterFixture,
   assertReplayFixtureCompatibility,
   assertSchemaInstance,
   compileProtocolValidators,
@@ -124,6 +125,7 @@ test("every question adapter fixture satisfies its declared schema", async () =>
         `${adapter}-question-fixture`,
       ),
     );
+    assert.doesNotThrow(() => assertQuestionAdapterFixture(value));
   }
 
   const malformed = structuredClone(await fixture("questions/acpx.json"));
@@ -136,6 +138,25 @@ test("every question adapter fixture satisfies its declared schema", async () =>
         "malformed-acpx-question-fixture",
       ),
     /schema_validation_failed/,
+  );
+
+  const unknownQuestion = structuredClone(await fixture("questions/acpx.json"));
+  unknownQuestion.canonicalResponse.answers = {
+    "unknown-question": { selectedOptionIds: ["option-1"] },
+  };
+  assert.throws(
+    () => assertQuestionAdapterFixture(unknownQuestion),
+    /answer has unknown question ID unknown-question/,
+  );
+
+  const unknownOption = structuredClone(await fixture("questions/acpx.json"));
+  const [questionId] = Object.keys(unknownOption.canonicalResponse.answers);
+  unknownOption.canonicalResponse.answers[questionId].selectedOptionIds = [
+    "unknown-option",
+  ];
+  assert.throws(
+    () => assertQuestionAdapterFixture(unknownOption),
+    /answer has unknown option ID unknown-option/,
   );
 });
 

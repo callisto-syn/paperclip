@@ -7,6 +7,7 @@ import {
   SUPPORTED_PROTOCOL_VERSION,
   assertCodexQuestionFixture,
   assertConformanceFixturePair,
+  assertQuestionAdapterFixture,
   assertReplayFixtureCompatibility,
   assertSchemaInstance,
   compileProtocolValidators,
@@ -70,6 +71,7 @@ export async function buildProtocolManifest() {
         value,
         relativePath,
       );
+      assertQuestionAdapterFixture(value);
       if (relativePath === "fixtures/questions/codex.json") {
         assertCodexQuestionFixture(value);
       }

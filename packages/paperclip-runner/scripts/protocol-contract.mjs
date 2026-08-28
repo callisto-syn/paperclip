@@ -180,30 +180,26 @@ export function assertReplayFixtureCompatibility(fixture) {
   return fixture;
 }
 
-export function assertCodexQuestionFixture(fixture) {
+export function assertQuestionAdapterFixture(fixture) {
   requireSchema(fixture, "paperclip.question_adapter_fixture.v1", "question fixture");
-  if (fixture.adapter !== "codex") throw contractError("unsupported_provider", String(fixture.adapter));
   requireSchema(fixture.canonicalQuestionSet, "paperclip.question_set.v1", "canonicalQuestionSet");
   requireSchema(fixture.canonicalResponse, "paperclip.question_response.v1", "canonicalResponse");
-  if (fixture.nativeRequest?.method !== "item/tool/requestUserInput") {
-    throw contractError("invalid_codex_question_fixture", "native request method");
-  }
 
   const questions = fixture.canonicalQuestionSet.questions;
   if (!Array.isArray(questions) || questions.length === 0) {
-    throw contractError("invalid_codex_question_fixture", "questions must be non-empty");
+    throw contractError("invalid_question_adapter_fixture", "questions must be non-empty");
   }
   const questionIds = new Set();
   const optionIdsByQuestion = new Map();
   for (const question of questions) {
     if (typeof question.id !== "string" || question.id.length === 0 || questionIds.has(question.id)) {
-      throw contractError("invalid_codex_question_fixture", "question IDs must be unique");
+      throw contractError("invalid_question_adapter_fixture", "question IDs must be unique");
     }
     questionIds.add(question.id);
     const optionIds = new Set();
     for (const option of question.options ?? []) {
       if (typeof option.id !== "string" || option.id.length === 0 || optionIds.has(option.id)) {
-        throw contractError("invalid_codex_question_fixture", `option IDs for ${question.id} must be unique`);
+        throw contractError("invalid_question_adapter_fixture", `option IDs for ${question.id} must be unique`);
       }
       optionIds.add(option.id);
     }
@@ -211,13 +207,22 @@ export function assertCodexQuestionFixture(fixture) {
   }
   for (const [answerId, answer] of Object.entries(fixture.canonicalResponse.answers ?? {})) {
     if (!questionIds.has(answerId)) {
-      throw contractError("invalid_codex_question_fixture", `answer has unknown question ID ${answerId}`);
+      throw contractError("invalid_question_adapter_fixture", `answer has unknown question ID ${answerId}`);
     }
     for (const optionId of answer.selectedOptionIds ?? []) {
       if (!optionIdsByQuestion.get(answerId)?.has(optionId)) {
-        throw contractError("invalid_codex_question_fixture", `answer has unknown option ID ${optionId}`);
+        throw contractError("invalid_question_adapter_fixture", `answer has unknown option ID ${optionId}`);
       }
     }
+  }
+  return fixture;
+}
+
+export function assertCodexQuestionFixture(fixture) {
+  assertQuestionAdapterFixture(fixture);
+  if (fixture.adapter !== "codex") throw contractError("unsupported_provider", String(fixture.adapter));
+  if (fixture.nativeRequest?.method !== "item/tool/requestUserInput") {
+    throw contractError("invalid_codex_question_fixture", "native request method");
   }
   return fixture;
 }
