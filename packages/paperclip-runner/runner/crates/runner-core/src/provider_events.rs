@@ -690,7 +690,7 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         || windows_normalized_path
             .split('/')
             .any(|segment| segment == "..")
-        || windows_normalized_path.contains("://")
+        || has_scheme_qualified_path(&windows_normalized_path)
     {
         Value::Null
     } else {
@@ -707,6 +707,21 @@ fn has_drive_relative_prefix(path: &str) -> bool {
 fn is_absolute_windows_drive_path(path: &str) -> bool {
     path.split_once(':').is_some_and(|(drive, suffix)| {
         drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && suffix.starts_with('/')
+    })
+}
+
+fn has_scheme_qualified_path(path: &str) -> bool {
+    path.split_once(':').is_some_and(|(scheme, suffix)| {
+        // A one-letter prefix is ambiguous with a valid POSIX filename (and
+        // is handled as a drive selector on Windows). Multi-letter URI
+        // schemes followed by either one or two normalized separators are
+        // never workspace-relative display paths.
+        scheme.len() > 1
+            && scheme.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+            })
+            && suffix.starts_with('/')
     })
 }
 
@@ -738,7 +753,12 @@ mod tests {
 
     #[test]
     fn rejects_backslash_spelled_schemes_on_every_host_platform() {
-        for location in [r"https:\\host\secret", r"file:\\server\share"] {
+        for location in [
+            r"https:\host\secret",
+            r"file:\server\share",
+            r"https:\\host\secret",
+            r"file:\\server\share",
+        ] {
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": location}))),
                 Value::Null,

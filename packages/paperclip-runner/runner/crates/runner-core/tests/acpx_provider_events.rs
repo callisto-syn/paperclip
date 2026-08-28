@@ -185,7 +185,12 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt",);
     }
 
-    for unsafe_path in [r"https:\\host\secret", r"file:\\server\share"] {
+    for unsafe_path in [
+        r"https:\host\secret",
+        r"file:\server\share",
+        r"https:\\host\secret",
+        r"file:\\server\share",
+    ] {
         let backslash_scheme = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
