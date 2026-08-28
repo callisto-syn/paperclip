@@ -625,6 +625,59 @@ describe("Capability exposure and authorization", () => {
     expect(successfulClaims).toBe(1);
   });
 
+  it("preserves a durable extension lease when a stale runtime saves another result", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () =>
+        durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const base = await runtimeFor({ semanticToolRuntimeStore: durableStore });
+    const staleAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const staleRuntime = new CapabilitySemanticToolRuntime({
+      adapter: staleAdapter,
+      runId: OPEN.identity.runId,
+    });
+    const pendingKey = `${OPEN.identity.runId}:upsert_case:owned-elsewhere`;
+    durableSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: pendingKey,
+        input: '{"body":"Case body","key":"case-owned"}',
+        status: "pending",
+        ownerId: "other-runtime",
+        leaseExpiresAtMs: 30_000,
+      }],
+    };
+
+    await expect(staleRuntime.invoke({
+      operationId: "get_task_context",
+      input: {},
+    })).resolves.toMatchObject({ ok: true });
+
+    expect(durableSnapshot.extensions).toEqual([
+      expect.objectContaining({
+        key: pendingKey,
+        status: "pending",
+        ownerId: "other-runtime",
+      }),
+    ]);
+  });
+
   it("rejects incomplete or malformed restored extension executions", async () => {
     const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["cases:write"],

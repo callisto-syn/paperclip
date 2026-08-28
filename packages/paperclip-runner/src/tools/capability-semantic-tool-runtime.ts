@@ -59,6 +59,7 @@ const RUNTIME_STATE_BY_ADAPTER = new WeakMap<
   Map<string, CapabilitySemanticRuntimeState>
 >();
 const EXTENSION_EXECUTION_LEASE_MS = 30_000;
+const RUNTIME_PERSIST_CAS_ATTEMPTS = 8;
 
 export class CapabilitySemanticToolRuntime {
   readonly #adapter: CapabilityMockControlPlanePort;
@@ -548,7 +549,7 @@ export class CapabilitySemanticToolRuntime {
   }
 
   #persistState(): void {
-    this.#adapter.saveSemanticToolRuntime(this.#runId, {
+    const localSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
       resultSequence: this.#state.resultSequence,
       operationResults: Object.fromEntries(
@@ -575,7 +576,36 @@ export class CapabilitySemanticToolRuntime {
                 execution: structuredClone(record.completed.value),
               },
         ),
-    });
+    };
+    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const replacement = durable === null
+        ? structuredClone(localSnapshot)
+        : structuredClone(durable);
+      replacement.resultSequence = Math.max(
+        replacement.resultSequence,
+        localSnapshot.resultSequence,
+      );
+      for (const [resultId, value] of Object.entries(localSnapshot.operationResults)) {
+        const existing = replacement.operationResults[resultId];
+        if (existing !== undefined && canonicalJson(existing) !== canonicalJson(value)) {
+          throw new Error("durable semantic tool result id was reused");
+        }
+        replacement.operationResults[resultId] = structuredClone(value);
+      }
+      // Extension leases and completed receipts use their own CAS path. A
+      // general invocation must preserve the latest durable copy instead of
+      // replacing it with a stale restored adapter snapshot.
+      if (this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) {
+        this.#state.resultSequence = replacement.resultSequence;
+        return;
+      }
+    }
+    throw new Error("durable semantic tool runtime changed during persistence");
   }
 
   async #execute(
