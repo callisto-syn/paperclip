@@ -852,6 +852,100 @@ fn durable_backend_reconciles_a_replayed_pending_tool_call() {
 }
 
 #[test]
+fn durable_backend_settles_pending_tools_when_recovery_finds_the_turn_ended() {
+    let directory = temporary_directory("durable-tool-ended-offline");
+    let config = provider_config(&directory, &["--require-dynamic-tool", "--emit-tool-call"]);
+    let runner_config = durable_config(&directory);
+    let mut first = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    first
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare the recoverable tool bridge");
+    first
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open the first provider");
+    first
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "End while the runner is offline."}),
+        ))
+        .expect("start the first turn");
+    let mut input_seen = false;
+    for _ in 0..32 {
+        input_seen |= poll_and_ack(&mut first)
+            .expect("poll first tool input")
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.input");
+        if input_seen {
+            break;
+        }
+    }
+    assert!(input_seen);
+    drop(first);
+
+    fs::write(
+        directory.join("fake-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "threadId": "codex-thread-1",
+            "activeTurnId": null,
+        }))
+        .unwrap(),
+    )
+    .expect("record that the provider turn ended while offline");
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    recovered
+        .execute(&command("snapshot", 4, "session.snapshot", json!({})))
+        .expect("restore the provider session");
+    let mut observed = Vec::new();
+    for _ in 0..32 {
+        observed.extend(
+            poll_and_ack(&mut recovered)
+                .expect("poll recovered settlement")
+                .into_iter()
+                .map(|event| event.event_type),
+        );
+        if observed.iter().any(|event| event == "session.reconciled") {
+            break;
+        }
+    }
+    let semantic_result = observed
+        .iter()
+        .position(|event| event == "semantic_tool.result")
+        .expect("recovery settles the pending semantic tool");
+    let reconciled = observed
+        .iter()
+        .position(|event| event == "session.reconciled")
+        .expect("recovery emits a reconciliation event");
+    assert!(semantic_result < reconciled);
+    assert!(recovered
+        .execute(&command(
+            "late-result",
+            5,
+            "semantic_tool.result",
+            json!({
+                "callId": "semantic-call-1",
+                "operationId": "get_task_context",
+                "result": {"ok": true},
+                "isError": false,
+            }),
+        ))
+        .is_err());
+
+    recovered.shutdown().expect("stop recovered provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn durable_backend_rejects_tool_catalog_drift_during_attach() {
     let directory = temporary_directory("durable-tool-attach-drift");
     let config = provider_config(&directory, &[]);

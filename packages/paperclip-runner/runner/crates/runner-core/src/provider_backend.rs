@@ -599,10 +599,31 @@ impl CodexCommandExecutor {
             .expect("Codex state remains available during recovery")
             .provider_process_generation = process_generation;
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
+            let identity = self.event_identity.clone();
             let state = self
                 .state
                 .as_mut()
                 .expect("Codex state remains available during recovery");
+            if previous_active_turn_id.is_some() && recovered_active_turn_id.is_none() {
+                let settled = state
+                    .tool_bridge
+                    .settle_turn("provider_turn_terminated")
+                    .map_err(|error| {
+                        DurableRunnerError::invalid(format!(
+                            "failed to settle semantic tools during recovery: {error}"
+                        ))
+                    })?;
+                if !settled.is_empty() {
+                    let identity = identity.as_ref().ok_or_else(|| {
+                        DurableRunnerError::invalid(
+                            "Codex semantic tool events require the durable runner identity",
+                        )
+                    })?;
+                    for result in settled {
+                        state.push_event(semantic_result_event(identity, &result))?;
+                    }
+                }
+            }
             state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
             state.push_event(NormalizedProviderEvent {
                 event_type: "session.reconciled".to_owned(),
