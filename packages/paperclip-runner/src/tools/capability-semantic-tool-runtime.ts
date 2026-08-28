@@ -514,32 +514,38 @@ export class CapabilitySemanticToolRuntime {
     observableValue: CapabilityJsonValue,
   ): boolean {
     if (record.ownerId === null) return false;
-    const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
-    const extension = durable?.extensions.find((candidate) => candidate.key === key);
-    if (durable === null || extension?.status !== "pending" ||
-      extension.ownerId !== record.ownerId) return false;
-    const replacement = structuredClone(durable);
-    replacement.resultSequence = Math.max(
-      replacement.resultSequence,
-      this.#state.resultSequence,
-    );
-    replacement.operationResults[completed.resultId] = structuredClone(observableValue);
-    replacement.extensions = replacement.extensions.map((candidate) =>
-      candidate.key === key
-        ? {
-            key,
-            input: record.input,
-            status: "completed" as const,
-            resultId: completed.resultId,
-            execution: structuredClone(completed.value),
-          }
-        : candidate,
-    );
-    return this.#adapter.compareAndSwapSemanticToolRuntime(
-      this.#runId,
-      durable,
-      replacement,
-    );
+    // Execution already happened. Retry only the durable completion merge so
+    // a lease heartbeat or unrelated snapshot update cannot discard its
+    // receipt or cause the operation to execute again.
+    for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const extension = durable?.extensions.find((candidate) => candidate.key === key);
+      if (durable === null || extension?.status !== "pending" ||
+        extension.ownerId !== record.ownerId) return false;
+      const replacement = structuredClone(durable);
+      replacement.resultSequence = Math.max(
+        replacement.resultSequence,
+        this.#state.resultSequence,
+      );
+      replacement.operationResults[completed.resultId] = structuredClone(observableValue);
+      replacement.extensions = replacement.extensions.map((candidate) =>
+        candidate.key === key
+          ? {
+              key,
+              input: record.input,
+              status: "completed" as const,
+              resultId: completed.resultId,
+              execution: structuredClone(completed.value),
+            }
+          : candidate,
+      );
+      if (this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) return true;
+    }
+    return false;
   }
 
   #restoreState(

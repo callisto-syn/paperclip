@@ -437,6 +437,57 @@ describe("Capability exposure and authorization", () => {
     );
   });
 
+  it("retries the completion merge after a concurrent lease heartbeat", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+    let injectedHeartbeat = false;
+    let completionAttempts = 0;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => durableSnapshot === null ? null : structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        const completing = snapshot.extensions.some((extension) => extension.status === "completed");
+        if (completing) completionAttempts += 1;
+        if (completing && !injectedHeartbeat && durableSnapshot !== null) {
+          injectedHeartbeat = true;
+          const heartbeat = structuredClone(durableSnapshot) as CapabilitySemanticToolRuntimeSnapshot;
+          heartbeat.extensions = heartbeat.extensions.map((extension) =>
+            extension.status === "pending"
+              ? { ...extension, leaseExpiresAtMs: (extension.leaseExpiresAtMs ?? 0) + 1_000 }
+              : extension,
+          );
+          durableSnapshot = heartbeat;
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const { runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+      semanticToolRuntimeStore: durableStore,
+    });
+
+    await expect(runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-raced", body: "Case body" },
+      idempotencyKey: "upsert-case-raced",
+    })).resolves.toMatchObject({ ok: true, value: { upserted: true } });
+
+    expect(injectedHeartbeat).toBe(true);
+    expect(completionAttempts).toBe(2);
+    expect(durableSnapshot?.extensions).toEqual([
+      expect.objectContaining({ status: "completed", resultId: "tool-result-1" }),
+    ]);
+    expect(durableSnapshot?.operationResults["tool-result-1"]).toEqual({
+      key: "case-raced",
+      body: "Case body",
+      upserted: true,
+    });
+  });
+
   it("fails closed while a restored extension is in flight and reconciles its durable receipt", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
     const durableStore: CapabilitySemanticToolRuntimeStore = {
