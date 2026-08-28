@@ -38,8 +38,9 @@ describe("ACPX sidecar input sequencing", () => {
         events.push("failed");
         throw new Error("bad frame");
       },
-      () => {
+      async () => {
         events.push("diagnostic");
+        await Promise.resolve();
         throw new Error("diagnostic transport failed");
       },
     );

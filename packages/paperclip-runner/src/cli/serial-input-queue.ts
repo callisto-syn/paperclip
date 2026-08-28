@@ -5,11 +5,11 @@
 export function enqueueSerialInput(
   pending: Promise<void>,
   operation: () => Promise<void>,
-  onError: (error: unknown) => void,
+  onError: (error: unknown) => void | Promise<void>,
 ): Promise<void> {
-  const reportError = (error: unknown): void => {
+  const reportError = async (error: unknown): Promise<void> => {
     try {
-      onError(error);
+      await onError(error);
     } catch {
       // Diagnostics must not poison the queue or skip later input frames.
     }
