@@ -379,6 +379,54 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
+fn nonzero_provider_exit_does_not_refail_a_completed_turn() {
+    let directory = temporary_directory("completion-then-nonzero-exit");
+    let config = provider_config(&directory, &["--fail-after-turn-completion"]);
+    let mut executor = CodexCommandExecutor::new(&directory);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .expect("prepare Codex provider");
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open Codex session");
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Complete before exiting with an error."}),
+        ))
+        .expect("start provider turn");
+
+    let mut event_types = Vec::new();
+    for _ in 0..40 {
+        event_types.extend(
+            poll_and_ack(&mut executor)
+                .expect("poll completion and nonzero exit")
+                .into_iter()
+                .map(|event| event.event_type),
+        );
+    }
+
+    assert!(event_types.iter().any(|event| event == "turn.completed"));
+    assert!(!event_types.iter().any(|event| event == "session.failed"));
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(directory.join("codex-provider-state.json"))
+            .expect("read provider state after nonzero exit"),
+    )
+    .expect("parse provider state after nonzero exit");
+    assert_eq!(persisted["lifecycle"], "session_open");
+    assert_eq!(persisted["completedProviderTurn"], true);
+
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_rejects_a_tool_call_that_was_not_advertised() {
     let directory = temporary_directory("unauthorized-tool");
     let config = provider_config(&directory, &["--emit-tool-call"]);

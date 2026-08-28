@@ -164,6 +164,8 @@ struct CodexProviderState {
     #[serde(default)]
     active_provider_turn_id: Option<String>,
     #[serde(default)]
+    completed_provider_turn: bool,
+    #[serde(default)]
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -185,6 +187,7 @@ impl CodexProviderState {
             thread_id,
             provider_session_id: None,
             active_provider_turn_id: None,
+            completed_provider_turn: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),
@@ -606,6 +609,7 @@ impl CodexCommandExecutor {
             .as_mut()
             .expect("Codex state exists after turn start");
         state.active_provider_turn_id = Some(provider_turn_id.clone());
+        state.completed_provider_turn = false;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -779,6 +783,7 @@ impl CodexCommandExecutor {
                     if method == "turn/completed" {
                         state.active_provider_turn_id = None;
                         state.lifecycle = "session_open".to_owned();
+                        state.completed_provider_turn = true;
                     }
                     state.extend_events(normalized)?;
                     if let Some(event_type) = terminal_event_type {
@@ -822,7 +827,11 @@ impl CodexCommandExecutor {
                 }
                 CodexProviderEvent::Exited { exit_code, success } => {
                     self.provider = None;
-                    if !success {
+                    let completed_turn_is_authoritative = self
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.completed_provider_turn);
+                    if !success && !completed_turn_is_authoritative {
                         let state = self
                             .state
                             .as_mut()
@@ -954,6 +963,7 @@ mod tests {
             thread_id: Some("thread-1".to_owned()),
             provider_session_id: None,
             active_provider_turn_id: None,
+            completed_provider_turn: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),

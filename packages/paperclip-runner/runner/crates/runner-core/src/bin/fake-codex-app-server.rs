@@ -111,6 +111,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let exit_after_turn_completion = args
         .iter()
         .any(|value| value == "--exit-after-turn-completion");
+    let fail_after_turn_completion = args
+        .iter()
+        .any(|value| value == "--fail-after-turn-completion");
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
@@ -248,6 +251,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
+                    if fail_after_turn_completion {
+                        return Err("configured failure after turn completion".into());
+                    }
                     if exit_after_turn_completion {
                         return Ok(());
                     }
