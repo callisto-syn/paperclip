@@ -424,7 +424,7 @@ describe("Capability exposure and authorization", () => {
     );
   });
 
-  it("fails closed after restoring an in-flight extension marker", async () => {
+  it("fails closed while a restored extension is in flight and reconciles its durable receipt", async () => {
     const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["cases:write"],
     });
@@ -452,7 +452,21 @@ describe("Capability exposure and authorization", () => {
         reason: "idempotency_recovery_in_flight",
       },
     });
-    await expect(inFlight).resolves.toMatchObject({ ok: true });
+    const completed = await inFlight;
+    expect(completed).toMatchObject({ ok: true });
+    const durableCompletion = adapter.loadSemanticToolRuntime(OPEN.identity.runId);
+    if (durableCompletion === null) throw new Error("expected durable extension completion");
+    restoredAdapter.saveSemanticToolRuntime(
+      OPEN.identity.runId,
+      durableCompletion,
+    );
+
+    const recovered = await restored.invoke(invocation);
+    expect(recovered).toMatchObject({
+      ok: true,
+      operationResultId: completed.ok ? completed.operationResultId : undefined,
+      value: { key: "case-pending", body: "Case body", upserted: true },
+    });
   });
 
   it("rejects incomplete or malformed restored extension executions", async () => {

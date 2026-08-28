@@ -218,18 +218,49 @@ export class CapabilitySemanticToolRuntime {
           });
         }
         if (idempotencyRecord.execution === null) {
-          const denied = this.#authorization.denyInvocation(
-            invocation.operationId,
-            context,
-            "idempotency_recovery_in_flight",
+          const durableState = this.#adapter.loadSemanticToolRuntime(this.#runId);
+          const durableExtension = durableState?.extensions.find(
+            (extension) => extension.key === extensionIdempotencyKey,
           );
-          return {
-            observableResult: this.#denial(
+          if (
+            durableState === null ||
+            durableExtension === undefined ||
+            durableExtension.status === "pending"
+          ) {
+            const denied = this.#authorization.denyInvocation(
               invocation.operationId,
-              denied,
-              "operation_unsupported",
-            ),
+              context,
+              "idempotency_recovery_in_flight",
+            );
+            return {
+              observableResult: this.#denial(
+                invocation.operationId,
+                denied,
+                "operation_unsupported",
+              ),
+            };
+          }
+          if (durableExtension.input !== idempotencyRecord.input) {
+            throw new Error("durable extension input changed during recovery");
+          }
+          const completed = {
+            resultId: durableExtension.resultId,
+            value: structuredClone(durableExtension.execution),
           };
+          const durableResult = durableState.operationResults[completed.resultId];
+          if (durableResult === undefined) {
+            throw new Error("durable extension receipt omitted its operation result");
+          }
+          idempotencyRecord.completed = structuredClone(completed);
+          idempotencyRecord.execution = Promise.resolve(structuredClone(completed));
+          this.#state.operationResults.set(
+            completed.resultId,
+            structuredClone(durableResult),
+          );
+          this.#state.resultSequence = Math.max(
+            this.#state.resultSequence,
+            durableState.resultSequence,
+          );
         }
         const completed = await idempotencyRecord.execution;
         execution = structuredClone(completed.value);
