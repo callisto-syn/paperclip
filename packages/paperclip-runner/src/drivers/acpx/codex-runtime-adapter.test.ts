@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 
 import type {
   AcpAgentRegistry,
@@ -82,7 +83,7 @@ describe("Codex ACPX runtime adapter", () => {
         return runtime;
       },
     });
-    const child = {} as ChildProcess;
+    const child = fakeChild();
     vi.mocked(command.spawn).mockReturnValue(child);
     const spawnOptions = { cwd: "/runtime/spawn" };
 
@@ -144,6 +145,32 @@ describe("Codex ACPX runtime adapter", () => {
       reason: "ACPX runtime identity validation failed",
       discardPersistentState: false,
     });
+  });
+
+  it("terminates a provider spawned before the session handshake rejects", async () => {
+    const child = fakeChild();
+    const command = fakeCommand();
+    vi.mocked(command.spawn).mockReturnValue(child);
+    const failure = new Error("ACP handshake rejected");
+
+    await expect(
+      openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => ({
+          ...fakeRuntime(),
+          ensureSession: vi.fn(async () => {
+            options.spawnAgent?.({
+              command: "ignored",
+              args: ["--stdio"],
+              options: {},
+            });
+            throw failure;
+          }),
+        }),
+      }),
+    ).rejects.toBe(failure);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("rejects non-Codex profiles before constructing ACPX", async () => {
@@ -216,6 +243,20 @@ function fakeRuntime(handle: AcpRuntimeHandle = HANDLE): AcpRuntime {
 
 function fakeCommand(): VerifiedAcpxCommandLease {
   return { spawn: vi.fn(), close: vi.fn() };
+}
+
+function fakeChild(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperties(child, {
+    exitCode: { value: null, writable: true },
+    signalCode: { value: null, writable: true },
+  });
+  child.kill = vi.fn(() => {
+    child.signalCode = "SIGTERM";
+    queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+    return true;
+  });
+  return child;
 }
 
 function registry(): AcpAgentRegistry {

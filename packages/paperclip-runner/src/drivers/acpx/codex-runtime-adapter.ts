@@ -43,6 +43,7 @@ export async function openCodexAcpxRuntime(
   const createRegistry = dependencies.createRegistry ?? createAgentRegistry;
   const createStore = dependencies.createStore ?? createRuntimeStore;
   const createRuntime = dependencies.createRuntime ?? createAcpRuntime;
+  const children = new SpawnedChildSet();
   const runtime = createRuntime({
     cwd: options.cwd,
     sessionStore: createStore({ stateDir: options.stateDirectory }),
@@ -63,24 +64,38 @@ export async function openCodexAcpxRuntime(
     spawnEnvironment: () => definedEnvironment(options.launchEnvironment),
     spawnCwd: options.cwd,
     spawnAgent: (input) =>
-      options.command.spawn(input.args, input.options) as ChildProcess,
+      children.add(
+        options.command.spawn(input.args, input.options) as ChildProcess,
+      ),
   });
 
-  const handle = await runtime.ensureSession({
-    sessionKey: options.providerSessionKey,
-    agent: "codex",
-    mode: "persistent",
-    cwd: options.cwd,
-    sessionOptions: {
-      model: options.profile.qualificationModel,
-      ...(options.systemInstructions
-        ? { systemPrompt: { append: options.systemInstructions } }
-        : {}),
-    },
-  });
+  let handle: AcpRuntimeHandle;
+  try {
+    handle = await runtime.ensureSession({
+      sessionKey: options.providerSessionKey,
+      agent: "codex",
+      mode: "persistent",
+      cwd: options.cwd,
+      sessionOptions: {
+        model: options.profile.qualificationModel,
+        ...(options.systemInstructions
+          ? { systemPrompt: { append: options.systemInstructions } }
+          : {}),
+      },
+    });
+  } catch (error) {
+    const cleanupErrors = await children.terminate();
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "ACPX session handshake and provider cleanup failed",
+      );
+    }
+    throw error;
+  }
 
   try {
-    return runtimePort(runtime, handle, requireIdentity(handle));
+    return runtimePort(runtime, handle, requireIdentity(handle), children);
   } catch (error) {
     try {
       await runtime.close({
@@ -89,9 +104,17 @@ export async function openCodexAcpxRuntime(
         discardPersistentState: false,
       });
     } catch (cleanupError) {
+      const processErrors = await children.terminate();
       throw new AggregateError(
-        [error, cleanupError],
+        [error, cleanupError, ...processErrors],
         "ACPX runtime identity validation and cleanup failed",
+      );
+    }
+    const processErrors = await children.terminate();
+    if (processErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...processErrors],
+        "ACPX runtime identity validation and provider cleanup failed",
       );
     }
     throw error;
@@ -102,6 +125,7 @@ function runtimePort(
   runtime: AcpRuntime,
   handle: AcpRuntimeHandle,
   identity: AcpxRuntimePortIdentity,
+  children: SpawnedChildSet,
 ): AcpxRuntimePort {
   return {
     async identity() {
@@ -125,13 +149,92 @@ function runtimePort(
         }
       : {}),
     async close(input) {
-      await runtime.close({
-        handle,
-        reason: input.reason,
-        discardPersistentState: false,
-      });
+      let closeError: unknown;
+      try {
+        await runtime.close({
+          handle,
+          reason: input.reason,
+          discardPersistentState: false,
+        });
+      } catch (error) {
+        closeError = error;
+      }
+      const processErrors = await children.terminate();
+      if (closeError !== undefined || processErrors.length > 0) {
+        const errors = [...processErrors];
+        if (closeError !== undefined) errors.unshift(closeError);
+        throw new AggregateError(
+          errors,
+          "ACPX runtime and provider cleanup failed",
+        );
+      }
     },
   };
+}
+
+class SpawnedChildSet {
+  readonly #children = new Set<ChildProcess>();
+
+  add(child: ChildProcess): ChildProcess {
+    this.#children.add(child);
+    const forget = () => this.#children.delete(child);
+    child.once("exit", forget);
+    child.once("close", forget);
+    return child;
+  }
+
+  async terminate(): Promise<unknown[]> {
+    const errors: unknown[] = [];
+    const children = [...this.#children];
+    await Promise.all(
+      children.map(async (child) => {
+        if (!running(child)) return;
+        try {
+          child.kill("SIGTERM");
+        } catch (error) {
+          errors.push(error);
+        }
+        if (await waitForExit(child, 2_000)) return;
+        try {
+          child.kill("SIGKILL");
+        } catch (error) {
+          errors.push(error);
+        }
+        if (!(await waitForExit(child, 2_000))) {
+          errors.push(new Error("ACPX provider did not exit after SIGKILL"));
+        }
+      }),
+    );
+    return errors;
+  }
+}
+
+function running(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+async function waitForExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!running(child)) return true;
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("close", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once("exit", onExit);
+    child.once("close", onExit);
+    if (!running(child)) finish(true);
+  });
 }
 
 function requireIdentity(handle: AcpRuntimeHandle): AcpxRuntimePortIdentity {
