@@ -323,6 +323,51 @@ describe("ACPX runtime host", () => {
       vi.useRealTimers();
     }
   });
+
+  it("retains the cancellation handle while runtime cleanup remains retryable", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = await hostFixture();
+      const turn = runtimeTurn();
+      turn.cancel.mockImplementation(() => new Promise(() => undefined));
+      let failRuntimeClose = true;
+      const runtime = runtimePort({
+        startTurn: () => turn,
+        onClose: async () => {
+          if (failRuntimeClose) throw new Error("runtime cleanup failed");
+        },
+      });
+      const host = await AcpxRuntimeHost.open(
+        {
+          ...fixture.options,
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "approve-reads",
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        },
+        fixture.dependencies({ openRuntime: async () => runtime }),
+      );
+      host.startTurn({ text: "Complete the task.", requestId: "turn-1" });
+
+      const firstClose = host.close({ reason: "first shutdown" });
+      const firstRejected = expect(firstClose).rejects.toThrow(/cleanup failed/);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await firstRejected;
+      expect(turn.cancel).toHaveBeenCalledOnce();
+
+      failRuntimeClose = false;
+      const retry = host.close({ reason: "retry shutdown" });
+      const retryRejected = expect(retry).rejects.toThrow(/cleanup failed/);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await retryRejected;
+      expect(turn.cancel).toHaveBeenCalledTimes(2);
+      expect(runtime.close).toHaveBeenCalledTimes(2);
+      await expect(host.close({ reason: "cleanup complete" }))
+        .resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function runtimePort(

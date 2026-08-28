@@ -281,10 +281,6 @@ export class AcpxRuntimeHost {
   async #close(reason: string): Promise<void> {
     const errors: unknown[] = [];
     const activeTurn = this.#activeTurn;
-    // Once shutdown starts no new turn can be admitted. Detach the current turn
-    // before cancellation so an uncooperative provider cannot make every close
-    // retry repeat the same bounded wait.
-    this.#activeTurn = null;
     if (activeTurn) {
       try {
         const cancellationError = await boundedCancellation(
@@ -307,6 +303,7 @@ export class AcpxRuntimeHost {
       // when the provider never acknowledged turn cancellation. Preserve that
       // cancellation error for this caller, but make later close calls
       // idempotently observe the successfully closed host.
+      if (this.#activeTurn === activeTurn) this.#activeTurn = null;
       this.#closed = true;
     }
     if (errors.length > 0) {
