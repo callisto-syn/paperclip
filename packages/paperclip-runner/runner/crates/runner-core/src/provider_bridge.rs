@@ -20,7 +20,7 @@ const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
 const MAX_RETAINED_CALL_RECEIPTS: usize = 32_768;
-const COMPACTED_RECEIPT_WORDS: usize = 65_536;
+const MAX_COMPACTED_CALL_RECEIPTS: usize = 4_096;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +87,7 @@ pub struct ProviderToolBridge {
     #[serde(default)]
     evicted: BTreeMap<String, EvictedToolCall>,
     #[serde(default)]
-    compacted_receipts: Vec<u64>,
+    compacted_receipts: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,11 +276,9 @@ impl ProviderToolBridge {
                 "recovered provider tool bridge exceeds its call limit",
             ));
         }
-        if !self.compacted_receipts.is_empty()
-            && self.compacted_receipts.len() != COMPACTED_RECEIPT_WORDS
-        {
+        if self.compacted_receipts.len() > MAX_COMPACTED_CALL_RECEIPTS {
             return Err(ProviderBridgeError::invalid(
-                "recovered provider tool bridge has an invalid compacted receipt filter",
+                "recovered provider tool bridge exceeds its compacted receipt limit",
             ));
         }
         self.validate_retained_value_bytes()?;
@@ -328,6 +326,17 @@ impl ProviderToolBridge {
             {
                 return Err(ProviderBridgeError::invalid(
                     "recovered evicted tool call identity is inconsistent",
+                ));
+            }
+        }
+        for call_id in &self.compacted_receipts {
+            validate_stable_id(call_id, "compacted tool call id")?;
+            if self.pending.contains_key(call_id)
+                || self.completed.contains_key(call_id)
+                || self.evicted.contains_key(call_id)
+            {
+                return Err(ProviderBridgeError::invalid(
+                    "recovered compacted tool call identity is inconsistent",
                 ));
             }
         }
@@ -440,7 +449,7 @@ impl ProviderToolBridge {
                 "concurrent provider tool call limit reached",
             ));
         }
-        self.compact_receipts_to_fit();
+        self.compact_receipts_to_fit()?;
         let input_bytes = json_size(&call.input, "provider tool input")?;
         let pending_bytes = self.pending_value_bytes()?;
         if pending_bytes
@@ -671,7 +680,7 @@ impl ProviderToolBridge {
         }
     }
 
-    fn compact_receipts_to_fit(&mut self) {
+    fn compact_receipts_to_fit(&mut self) -> Result<(), ProviderBridgeError> {
         while self
             .pending
             .len()
@@ -679,6 +688,11 @@ impl ProviderToolBridge {
             .saturating_add(self.evicted.len())
             >= MAX_RETAINED_CALL_RECEIPTS
         {
+            if self.compacted_receipts.len() >= MAX_COMPACTED_CALL_RECEIPTS {
+                return Err(ProviderBridgeError::invalid(
+                    "provider tool receipt capacity is exhausted for the active turn",
+                ));
+            }
             let call_id = self
                 .evicted
                 .keys()
@@ -690,24 +704,13 @@ impl ProviderToolBridge {
             };
             self.evicted.remove(&call_id);
             self.completed.remove(&call_id);
-            self.insert_compacted_receipt(&call_id);
+            self.compacted_receipts.insert(call_id);
         }
-    }
-
-    fn insert_compacted_receipt(&mut self, call_id: &str) {
-        if self.compacted_receipts.is_empty() {
-            self.compacted_receipts = vec![0; COMPACTED_RECEIPT_WORDS];
-        }
-        for bit in compacted_receipt_bits(call_id) {
-            self.compacted_receipts[bit / 64] |= 1u64 << (bit % 64);
-        }
+        Ok(())
     }
 
     fn compacted_receipt_contains(&self, call_id: &str) -> bool {
-        !self.compacted_receipts.is_empty()
-            && compacted_receipt_bits(call_id)
-                .into_iter()
-                .all(|bit| self.compacted_receipts[bit / 64] & (1u64 << (bit % 64)) != 0)
+        self.compacted_receipts.contains(call_id)
     }
 
     fn validate_retained_value_bytes(&self) -> Result<(), ProviderBridgeError> {
@@ -718,19 +721,6 @@ impl ProviderToolBridge {
         }
         Ok(())
     }
-}
-
-fn compacted_receipt_bits(call_id: &str) -> [usize; 4] {
-    let digest = Sha256::digest(call_id.as_bytes());
-    std::array::from_fn(|index| {
-        let offset = index * 8;
-        let value = u64::from_be_bytes(
-            digest[offset..offset + 8]
-                .try_into()
-                .expect("sha256 digest chunk has eight bytes"),
-        );
-        (value as usize) % (COMPACTED_RECEIPT_WORDS * 64)
-    })
 }
 
 fn evicted_replay_result(call_id: &str, operation_id: &str) -> ToolResult {
@@ -1015,6 +1005,8 @@ mod tests {
             )
             .expect("compacted receipts preserve capacity for later calls");
         assert!(!bridge.compacted_receipts.is_empty());
+        assert!(bridge.compacted_receipts.contains("call-0"));
+        assert!(!bridge.compacted_receipts.contains("call-new"));
         assert!(bridge
             .replay_result("call-0", "get_task_context", &json!({}))
             .unwrap()
