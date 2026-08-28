@@ -27,6 +27,11 @@ export interface LiveConsoleGoalFixture {
   params: Record<string, unknown>;
 }
 
+export interface LiveConsoleControlFixture {
+  turnId?: string;
+  expected: string;
+}
+
 export interface LiveConsoleConformanceFixture {
   schema: typeof LIVE_CONSOLE_CONFORMANCE_SCHEMA;
   codexVersion: string;
@@ -36,7 +41,12 @@ export interface LiveConsoleConformanceFixture {
     rootThreadId: string;
     childThread: Record<string, unknown> & { id: string; sessionId: string };
   };
-  controls: Record<string, { turnId?: string; expected: string }>;
+  controls: {
+    sameTurnSteer: LiveConsoleControlFixture & { turnId: string };
+    staleTurnSteer: LiveConsoleControlFixture & { turnId: string };
+    interruptBeforeStart: LiveConsoleControlFixture;
+    interruptAfterTerminal: LiveConsoleControlFixture;
+  };
   reconnect: {
     runId: string;
     normalizedSessionId: string;
@@ -57,6 +67,15 @@ const GOAL_METHODS = {
   pause: "thread/goal/set",
   resume: "thread/goal/set",
   clear: "thread/goal/clear",
+} as const;
+const CONTROL_EXPECTATIONS = {
+  sameTurnSteer: { expected: "acknowledged", requiresTurnId: true },
+  staleTurnSteer: { expected: "stale_turn", requiresTurnId: true },
+  interruptBeforeStart: { expected: "queued", requiresTurnId: false },
+  interruptAfterTerminal: {
+    expected: "already_terminal",
+    requiresTurnId: false,
+  },
 } as const;
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -175,15 +194,27 @@ export async function loadLiveConsoleConformanceFixture(
   ) {
     throw new Error("Live console fixture identity or lineage is incomplete");
   }
+  const controlNames = Object.keys(CONTROL_EXPECTATIONS);
   if (
     controls === null ||
-    Object.keys(controls).length === 0 ||
     Object.keys(controls).length > MAX_CONTROL_CASES ||
-    Object.values(controls).some((candidate) => {
-      const control = record(candidate);
-      return control === null ||
-        !nonEmpty(control.expected) ||
-        (control.turnId !== undefined && !nonEmpty(control.turnId));
+    Object.keys(controls).length !== controlNames.length ||
+    controlNames.some((name) => {
+      const expectation =
+        CONTROL_EXPECTATIONS[name as keyof typeof CONTROL_EXPECTATIONS];
+      const control = record(controls[name]);
+      if (
+        control === null ||
+        control.expected !== expectation.expected ||
+        Object.keys(control).some(
+          (key) => key !== "expected" && key !== "turnId",
+        )
+      ) {
+        return true;
+      }
+      return expectation.requiresTurnId
+        ? !nonEmpty(control.turnId)
+        : control.turnId !== undefined;
     })
   ) {
     throw new Error("Live console fixture controls are invalid");

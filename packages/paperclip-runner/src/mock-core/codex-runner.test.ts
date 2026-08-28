@@ -237,6 +237,23 @@ describe("Codex trace conformance", () => {
       await writeFile(candidatePath, JSON.stringify(source));
       await expect(loadLiveConsoleConformanceFixture(candidatePath))
         .rejects.toThrow("controls are invalid");
+
+      source.controls.sameTurnSteer.expected = "arbitrary_outcome";
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("controls are invalid");
+
+      source.controls.sameTurnSteer.expected = "acknowledged";
+      source.controls.unsupportedControl = { expected: "queued" };
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("controls are invalid");
+
+      delete source.controls.unsupportedControl;
+      delete source.controls.sameTurnSteer.turnId;
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("controls are invalid");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
