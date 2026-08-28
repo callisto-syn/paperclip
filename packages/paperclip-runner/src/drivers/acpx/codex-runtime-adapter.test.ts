@@ -132,6 +132,54 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
+  it("terminates provider processes when runtime close never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      vi.mocked(runtime.close).mockImplementation(
+        () => new Promise<void>(() => undefined),
+      );
+      const child = fakeChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const firstClose = port.close({ reason: "runtime close stalled" });
+      const firstCloseRejection = expect(firstClose).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({
+            message: "ACPX runtime close exceeded its shutdown timeout",
+          }),
+        ],
+      });
+      await Promise.resolve();
+      expect(runtime.close).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await firstCloseRejection;
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+      await expect(
+        port.close({ reason: "cleanup ownership retried" }),
+      ).resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps prompt turns to the admitted ACPX handle", async () => {
     const runtime = fakeRuntime();
     const turn = {
