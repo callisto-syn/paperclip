@@ -3269,9 +3269,12 @@ describe("Codex app-server Codex driver", () => {
     ).toBe(false);
   });
 
-  it("keeps a result-less task terminal after recovery", async () => {
+  it("permits one recovery turn for a result-less terminal task", async () => {
     const first = new FakeCodexTransport();
     const second = new FakeCodexTransport();
+    second.turnStartResponse = Promise.resolve({
+      turn: { id: "turn-2", status: "inProgress", items: [] },
+    });
     second.readResponse = {
       thread: {
         id: "thread-1",
@@ -3306,8 +3309,11 @@ describe("Codex app-server Codex driver", () => {
     await recovered!.reconcile?.();
     await expect(recovered!.startTurn({
       message: { role: "user", text: "Do not execute twice." },
+    })).resolves.toMatchObject({ turnId: "turn-2" });
+    await expect(recovered!.startTurn({
+      message: { role: "user", text: "Do not start concurrently." },
     })).rejects.toThrow("session cannot start another turn");
-    expect(second.calls.some((call) => call.method === "turn/start")).toBe(false);
+    expect(second.calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
     await recovered!.close({ reason: "test complete" });
   });
 
