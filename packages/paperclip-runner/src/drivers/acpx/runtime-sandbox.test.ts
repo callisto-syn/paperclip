@@ -80,7 +80,7 @@ describe("ACPX runtime sandbox", () => {
     },
   );
 
-  it("is idempotent for an existing private sandbox", async () => {
+  it("re-prepares and re-synchronizes an existing private sandbox", async () => {
     const fixture = await sandboxFixture("claude");
     const first = await prepareAcpxRuntimeSandbox({
       binding: fixture.binding,
