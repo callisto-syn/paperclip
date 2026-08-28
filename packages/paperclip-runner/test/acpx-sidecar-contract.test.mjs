@@ -48,8 +48,26 @@ test("the ACPX sidecar schema fails closed on drift", () => {
   for (const message of [
     { ...messages[0], protocolVersion: 3 },
     { ...messages[0], command: "session.destroy" },
+    { protocolVersion: 2, id: 1, ok: true, result: {}, error: error() },
+    { protocolVersion: 2, id: 1, ok: false },
+    { protocolVersion: 2, id: 1, ok: false, result: {}, error: error() },
     { ...messages[2], unexpected: true },
   ]) {
     assert.equal(validate(message), false);
   }
 });
+
+test("every ACPX sidecar message family declares the same version", () => {
+  const versions = ["request", "response", "event"].map(
+    (family) => schema.$defs[family].properties.protocolVersion.const,
+  );
+  assert.deepEqual(versions, [2, 2, 2]);
+});
+
+function error() {
+  return {
+    code: "runtime_failed",
+    message: "The runtime failed.",
+    retryable: false,
+  };
+}

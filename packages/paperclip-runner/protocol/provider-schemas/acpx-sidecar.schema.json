@@ -49,6 +49,19 @@
     "response": {
       "type": "object",
       "required": ["protocolVersion", "id", "ok"],
+      "oneOf": [
+        {
+          "properties": { "ok": { "const": true }, "error": false }
+        },
+        {
+          "properties": {
+            "ok": { "const": false },
+            "result": false,
+            "error": { "type": "object" }
+          },
+          "required": ["error"]
+        }
+      ],
       "properties": {
         "protocolVersion": { "const": 2 },
         "id": { "type": "integer", "minimum": 1 },

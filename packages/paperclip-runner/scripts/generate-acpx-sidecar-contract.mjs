@@ -11,7 +11,20 @@ const schema = JSON.parse(
 );
 const commands = schema.$defs.command.enum;
 const events = schema.$defs.eventType.enum;
-const protocolVersion = schema.$defs.request.properties.protocolVersion.const;
+const protocolVersions = ["request", "response", "event"].map(
+  (family) => schema.$defs[family]?.properties?.protocolVersion?.const,
+);
+if (
+  protocolVersions.some(
+    (version) => !Number.isSafeInteger(version) || version < 1,
+  ) ||
+  new Set(protocolVersions).size !== 1
+) {
+  throw new Error(
+    "ACPX request, response, and event schemas must use one positive integer protocol version",
+  );
+}
+const [protocolVersion] = protocolVersions;
 const quote = (value) => JSON.stringify(value);
 const rustVariant = (value) =>
   value
