@@ -144,9 +144,15 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"C:Users\\alice\\repo\\src\\main.rs"}]
         }),
     );
+    #[cfg(windows)]
     assert_eq!(
         windows_drive_relative[0].payload["target"],
         serde_json::Value::Null
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        windows_drive_relative[0].payload["target"],
+        "./C:Users\\alice\\repo\\src\\main.rs"
     );
 }
 

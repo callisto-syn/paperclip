@@ -673,11 +673,16 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .or_else(|| value.get("uri"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let path = raw_path.replace('\\', "/");
+    let windows_normalized_path = raw_path.replace('\\', "/");
+    let path = if cfg!(windows) {
+        windows_normalized_path.as_str()
+    } else {
+        raw_path
+    };
     if path.is_empty()
         || path.starts_with('/')
-        || is_absolute_windows_drive_path(&path)
-        || (has_drive_relative_prefix(&path) && (cfg!(windows) || raw_path.contains('\\')))
+        || is_absolute_windows_drive_path(&windows_normalized_path)
+        || (cfg!(windows) && has_drive_relative_prefix(path))
         || path.split('/').any(|segment| segment == "..")
         || path.contains("://")
     {
@@ -726,7 +731,7 @@ mod tests {
             );
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": "C:Users\\alice\\file.txt"}))),
-                Value::Null,
+                Value::String("./C:Users\\alice\\file.txt".to_owned()),
             );
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": "c:Users/alice/file.txt"}))),
@@ -735,6 +740,10 @@ mod tests {
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": "A:b/file.txt"}))),
                 Value::String("./A:b/file.txt".to_owned()),
+            );
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": "a:b\\c"}))),
+                Value::String("./a:b\\c".to_owned()),
             );
         }
         #[cfg(windows)]
