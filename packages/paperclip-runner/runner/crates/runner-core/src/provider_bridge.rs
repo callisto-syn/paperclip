@@ -20,7 +20,6 @@ const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
 const MAX_RETAINED_CALL_RECEIPTS: usize = 32_768;
-const MAX_COMPACTED_CALL_RECEIPTS: usize = 4_096;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +86,7 @@ pub struct ProviderToolBridge {
     #[serde(default)]
     evicted: BTreeMap<String, EvictedToolCall>,
     #[serde(default)]
-    compacted_receipts: BTreeSet<String>,
+    compacted_receipts: BTreeMap<String, EvictedToolCall>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,11 +275,6 @@ impl ProviderToolBridge {
                 "recovered provider tool bridge exceeds its call limit",
             ));
         }
-        if self.compacted_receipts.len() > MAX_COMPACTED_CALL_RECEIPTS {
-            return Err(ProviderBridgeError::invalid(
-                "recovered provider tool bridge exceeds its compacted receipt limit",
-            ));
-        }
         self.validate_retained_value_bytes()?;
         let mut pending_validator = expected.clone();
         for (call_id, call) in &self.pending {
@@ -329,11 +323,14 @@ impl ProviderToolBridge {
                 ));
             }
         }
-        for call_id in &self.compacted_receipts {
+        for (call_id, compacted) in &self.compacted_receipts {
             validate_stable_id(call_id, "compacted tool call id")?;
+            validate_operation_id(&compacted.operation_id)?;
             if self.pending.contains_key(call_id)
                 || self.completed.contains_key(call_id)
                 || self.evicted.contains_key(call_id)
+                || !is_sha256_digest(&compacted.input_digest)
+                || !is_sha256_digest(&compacted.result_digest)
             {
                 return Err(ProviderBridgeError::invalid(
                     "recovered compacted tool call identity is inconsistent",
@@ -375,21 +372,27 @@ impl ProviderToolBridge {
             }
             return Ok(Some(completed.result.clone()));
         }
-        let Some(evicted) = self.evicted.get(call_id) else {
-            return if self.compacted_receipt_contains(call_id) {
-                Ok(Some(evicted_replay_result(call_id, operation_id)))
-            } else {
-                Ok(None)
-            };
-        };
-        if evicted.operation_id != operation_id
-            || evicted.input_digest != semantic_value_digest(input)
-        {
-            return Err(ProviderBridgeError::invalid(
-                "provider replayed an evicted tool call with different input",
-            ));
+        if let Some(evicted) = self.evicted.get(call_id) {
+            if evicted.operation_id != operation_id
+                || evicted.input_digest != semantic_value_digest(input)
+            {
+                return Err(ProviderBridgeError::invalid(
+                    "provider replayed an evicted tool call with different input",
+                ));
+            }
+            return Ok(Some(evicted_replay_result(call_id, operation_id)));
         }
-        Ok(Some(evicted_replay_result(call_id, operation_id)))
+        if let Some(compacted) = self.compacted_receipts.get(call_id) {
+            if compacted.operation_id != operation_id
+                || compacted.input_digest != semantic_value_digest(input)
+            {
+                return Err(ProviderBridgeError::invalid(
+                    "provider replayed a compacted tool call with different input",
+                ));
+            }
+            return Ok(Some(evicted_replay_result(call_id, operation_id)));
+        }
+        Ok(None)
     }
 
     pub fn has_completed_call(&self, call_id: &str) -> bool {
@@ -505,10 +508,17 @@ impl ProviderToolBridge {
                 ))
             };
         }
-        if self.compacted_receipt_contains(&result.call_id) {
-            return Err(ProviderBridgeError::invalid(
-                "duplicate tool result refers to a compacted durable receipt",
-            ));
+        if let Some(existing) = self.compacted_receipts.get(&result.call_id) {
+            return if existing.operation_id == result.operation_id
+                && existing.result_digest == semantic_value_digest(&result.result)
+                && existing.is_error == result.is_error
+            {
+                Ok(result.result)
+            } else {
+                Err(ProviderBridgeError::invalid(
+                    "conflicting duplicate compacted tool result",
+                ))
+            };
         }
         let pending = self.pending.get(&result.call_id).cloned().ok_or_else(|| {
             ProviderBridgeError::invalid("tool result does not match a pending provider call")
@@ -688,11 +698,6 @@ impl ProviderToolBridge {
             .saturating_add(self.evicted.len())
             >= MAX_RETAINED_CALL_RECEIPTS
         {
-            if self.compacted_receipts.len() >= MAX_COMPACTED_CALL_RECEIPTS {
-                return Err(ProviderBridgeError::invalid(
-                    "provider tool receipt capacity is exhausted for the active turn",
-                ));
-            }
             let call_id = self
                 .evicted
                 .keys()
@@ -702,15 +707,27 @@ impl ProviderToolBridge {
             let Some(call_id) = call_id else {
                 break;
             };
-            self.evicted.remove(&call_id);
-            self.completed.remove(&call_id);
-            self.compacted_receipts.insert(call_id);
+            let compacted = self
+                .evicted
+                .remove(&call_id)
+                .or_else(|| {
+                    self.completed
+                        .remove(&call_id)
+                        .map(|completed| EvictedToolCall {
+                            operation_id: completed.call.operation_id,
+                            input_digest: semantic_value_digest(&completed.call.input),
+                            result_digest: semantic_value_digest(&completed.result.result),
+                            is_error: completed.result.is_error,
+                        })
+                })
+                .expect("selected provider tool receipt remains present");
+            self.compacted_receipts.insert(call_id, compacted);
         }
         Ok(())
     }
 
     fn compacted_receipt_contains(&self, call_id: &str) -> bool {
-        self.compacted_receipts.contains(call_id)
+        self.compacted_receipts.contains_key(call_id)
     }
 
     fn validate_retained_value_bytes(&self) -> Result<(), ProviderBridgeError> {
@@ -1005,8 +1022,8 @@ mod tests {
             )
             .expect("compacted receipts preserve capacity for later calls");
         assert!(!bridge.compacted_receipts.is_empty());
-        assert!(bridge.compacted_receipts.contains("call-0"));
-        assert!(!bridge.compacted_receipts.contains("call-new"));
+        assert!(bridge.compacted_receipts.contains_key("call-0"));
+        assert!(!bridge.compacted_receipts.contains_key("call-new"));
         assert!(bridge
             .replay_result("call-0", "get_task_context", &json!({}))
             .unwrap()
@@ -1019,8 +1036,74 @@ mod tests {
             )
             .is_err());
 
+        assert!(bridge
+            .replay_result("call-0", "get_task_context", &json!({"changed": true}))
+            .is_err());
+        bridge
+            .apply_result(ToolResult {
+                call_id: "call-0".to_owned(),
+                operation_id: "get_task_context".to_owned(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .expect("an exact duplicate compacted result remains idempotent");
+        assert!(bridge
+            .apply_result(ToolResult {
+                call_id: "call-0".to_owned(),
+                operation_id: "get_task_context".to_owned(),
+                result: json!({"ok": false}),
+                is_error: false,
+            })
+            .is_err());
+
         let recovered: ProviderToolBridge =
             serde_json::from_str(&serde_json::to_string(&bridge).unwrap()).unwrap();
         recovered.validate_recovered().unwrap();
+    }
+
+    #[test]
+    fn compacted_receipts_do_not_create_a_secondary_active_turn_wall() {
+        let operation = AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Read the active task context.".to_owned(),
+            input_schema: json!({"type": "object"}),
+            response_schema: json!({"type": "object"}),
+        };
+        let mut bridge = ProviderToolBridge::default();
+        bridge
+            .prepare(AuthorizedToolSet {
+                schema: TOOL_SET_SCHEMA.to_owned(),
+                schema_version: 1,
+                catalog_digest: authorized_tool_catalog_digest(std::slice::from_ref(&operation))
+                    .unwrap(),
+                operations: vec![operation],
+            })
+            .unwrap();
+        let receipt = EvictedToolCall {
+            operation_id: "get_task_context".to_owned(),
+            input_digest: semantic_value_digest(&json!({})),
+            result_digest: semantic_value_digest(&json!({"ok": true})),
+            is_error: false,
+        };
+        for index in 0..5_000 {
+            bridge
+                .compacted_receipts
+                .insert(format!("old-call-{index}"), receipt.clone());
+        }
+        for index in 0..MAX_RETAINED_CALL_RECEIPTS {
+            bridge
+                .evicted
+                .insert(format!("recent-call-{index}"), receipt.clone());
+        }
+
+        bridge
+            .begin_call(
+                "call-after-old-cap".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .expect("exact compacted identities do not impose the old 4,096-call wall");
+        assert!(bridge.compacted_receipts.len() > 5_000);
     }
 }
