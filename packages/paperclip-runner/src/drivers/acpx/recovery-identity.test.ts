@@ -117,6 +117,12 @@ describe("ACPX recovery identity", () => {
     expect(() =>
       verifyExpectedAcpxIdentity(legacyExpected, fixture.binding, legacy),
     ).not.toThrow();
+    expect(() =>
+      verifyExpectedAcpxIdentity({
+        ...legacyExpected,
+        profileDigest: fixture.binding.legacyProfileDigest,
+      }, fixture.binding, legacy),
+    ).not.toThrow();
 
     expect(() =>
       verifyExpectedAcpxIdentity(legacyExpected, fixture.binding, {

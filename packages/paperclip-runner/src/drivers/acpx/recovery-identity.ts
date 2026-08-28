@@ -127,10 +127,16 @@ export function verifyExpectedAcpxIdentity(
   persisted: unknown,
 ): void {
   validateExpected(expected);
+  const parsed = persisted === null
+    ? null
+    : parsePersistedRecord(persisted, binding);
   const expectedPermissionMode = expected.permissionMode ?? "approve-reads";
+  const acceptedControllerProfileDigests = parsed?.legacy
+    ? [binding.profileDigest, binding.legacyProfileDigest]
+    : [binding.profileDigest];
   if (
     expected.normalizedSessionId !== binding.normalizedSessionId ||
-    expected.profileDigest !== binding.profileDigest ||
+    !acceptedControllerProfileDigests.includes(expected.profileDigest) ||
     expected.workspaceDigest !== binding.workspaceDigest ||
     expected.requestedModel !== binding.requestedModel ||
     expected.effectiveModel !== binding.effectiveModel ||
@@ -142,9 +148,9 @@ export function verifyExpectedAcpxIdentity(
   }
   if (persisted === null) return;
 
-  const parsed = parsePersistedRecord(persisted, binding);
-  const { record } = parsed;
-  const persistedProfileDigest = parsed.legacy
+  const persistedRecord = parsed!;
+  const { record } = persistedRecord;
+  const persistedProfileDigest = persistedRecord.legacy
     ? binding.legacyProfileDigest
     : binding.profileDigest;
   if (
