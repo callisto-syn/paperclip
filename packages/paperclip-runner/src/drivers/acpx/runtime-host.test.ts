@@ -329,6 +329,9 @@ describe("ACPX runtime host", () => {
       host.startTurn({ text: "Concurrent", requestId: "turn-2" }),
     ).toThrow("already has an active turn");
 
+    await host.interruptActiveTurn("user interrupt");
+    expect(turn.cancel).toHaveBeenCalledWith({ reason: "user interrupt" });
+
     await host.close({ reason: "shutdown" });
     expect(turn.cancel).toHaveBeenCalledWith({ reason: "shutdown" });
     expect(runtime.close).toHaveBeenCalledOnce();

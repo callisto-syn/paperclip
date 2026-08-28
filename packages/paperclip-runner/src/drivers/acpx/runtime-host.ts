@@ -276,6 +276,10 @@ export class AcpxRuntimeHost {
     return Object.freeze({ ...this.#sandbox.persistedEnvironment });
   }
 
+  async status(): Promise<AcpxModelStatus> {
+    return structuredClone(await this.#runtime.getStatus());
+  }
+
   startTurn(input: AcpxRuntimeTurnInput): AcpxRuntimeTurn {
     if (this.#closed || this.#closingStarted) {
       throw new Error("ACPX runtime host is closing");
@@ -302,6 +306,15 @@ export class AcpxRuntimeHost {
       })
       .catch(() => undefined);
     return turn;
+  }
+
+  async interruptActiveTurn(reason: string): Promise<void> {
+    const turn = this.#activeTurn;
+    if (!turn) throw new Error("ACPX runtime host has no active turn");
+    const cancellationError = await boundedCancellation(
+      turn.cancel({ reason: boundedReason(reason) }),
+    );
+    if (cancellationError) throw cancellationError;
   }
 
   async close(input: { reason: string }): Promise<void> {
