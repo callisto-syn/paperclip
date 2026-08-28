@@ -485,6 +485,11 @@ export interface CapabilityMockControlPlanePort extends ControlPlanePort {
     runId: string,
     snapshot: CapabilitySemanticToolRuntimeSnapshot,
   ): void;
+  compareAndSwapSemanticToolRuntime(
+    runId: string,
+    expected: CapabilitySemanticToolRuntimeSnapshot | null,
+    snapshot: CapabilitySemanticToolRuntimeSnapshot,
+  ): boolean;
   decisionRecords(): readonly CapabilityDecisionRecord[];
   serialize(): string;
 }

@@ -209,12 +209,26 @@ export class CapabilitySemanticToolRuntime {
             extensionIdempotencyKey,
             idempotencyRecord,
           );
-          this.#startExtensionExecution(
+          if (!this.#startExtensionExecution(
             extensionIdempotencyKey,
             idempotencyRecord,
             descriptor,
             invocation,
-          );
+          )) {
+            this.#state.extensionIdempotency.delete(extensionIdempotencyKey);
+            const denied = this.#authorization.denyInvocation(
+              invocation.operationId,
+              context,
+              "idempotency_recovery_in_flight",
+            );
+            return {
+              observableResult: this.#denial(
+                invocation.operationId,
+                denied,
+                "operation_unsupported",
+              ),
+            };
+          }
         }
         if (idempotencyRecord.execution === null) {
           const durableState = this.#adapter.loadSemanticToolRuntime(this.#runId);
@@ -252,12 +266,25 @@ export class CapabilitySemanticToolRuntime {
                 ),
               };
             }
-            this.#startExtensionExecution(
+            if (!this.#startExtensionExecution(
               extensionIdempotencyKey,
               idempotencyRecord,
               descriptor,
               invocation,
-            );
+            )) {
+              const denied = this.#authorization.denyInvocation(
+                invocation.operationId,
+                context,
+                "idempotency_recovery_in_flight",
+              );
+              return {
+                observableResult: this.#denial(
+                  invocation.operationId,
+                  denied,
+                  "operation_unsupported",
+                ),
+              };
+            }
           } else {
             if (durableExtension.input !== idempotencyRecord.input) {
               throw new Error("durable extension input changed during recovery");
@@ -319,13 +346,19 @@ export class CapabilitySemanticToolRuntime {
         extensionRecord !== null &&
         extensionRecord.completed === undefined
       ) {
-        if (!this.#ownsExtensionLease(extensionIdempotencyKey, extensionRecord)) {
-          throw new Error("durable extension execution lease was superseded");
-        }
-        extensionRecord.completed = {
+        const completed = {
           resultId,
           value: structuredClone(execution),
         };
+        if (!this.#completeExtensionExecution(
+          extensionIdempotencyKey,
+          extensionRecord,
+          completed,
+          observableValue,
+        )) {
+          throw new Error("durable extension execution lease was superseded");
+        }
+        extensionRecord.completed = completed;
         extensionRecord.execution = Promise.resolve(
           structuredClone(extensionRecord.completed),
         );
@@ -333,7 +366,7 @@ export class CapabilitySemanticToolRuntime {
         extensionRecord.leaseExpiresAtMs = 0;
       }
       this.#state.operationResults.set(resultId, structuredClone(observableValue));
-      this.#persistState();
+      if (extensionIdempotencyKey === null) this.#persistState();
       const observableResult = deepFreeze(success);
       if (!includeModelResult) return { observableResult };
       const modelResult: CapabilityModelToolSuccess = deepFreeze({
@@ -365,35 +398,108 @@ export class CapabilitySemanticToolRuntime {
     record: ExtensionIdempotencyRecord,
     descriptor: CapabilitySemanticToolDescriptor,
     invocation: CapabilityToolInvocation,
-  ): void {
-    record.ownerId = randomUUID();
-    record.leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
+  ): boolean {
+    const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+    const existing = durable?.extensions.find((candidate) => candidate.key === key);
+    if (
+      existing !== undefined &&
+      (existing.status !== "pending" ||
+        existing.input !== record.input ||
+        (existing.leaseExpiresAtMs ?? 0) > this.#now())
+    ) {
+      return false;
+    }
+    const ownerId = randomUUID();
+    const leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
+    const replacement: CapabilitySemanticToolRuntimeSnapshot = durable === null
+      ? {
+          schema: "paperclip.capability.semantic-tool-runtime.v1",
+          resultSequence: this.#state.resultSequence,
+          operationResults: Object.fromEntries(this.#state.operationResults),
+          extensions: [],
+        }
+      : structuredClone(durable);
+    const pending = {
+      key,
+      input: record.input,
+      status: "pending" as const,
+      ownerId,
+      leaseExpiresAtMs,
+    };
+    const existingIndex = replacement.extensions.findIndex(
+      (candidate) => candidate.key === key,
+    );
+    if (existingIndex === -1) replacement.extensions.push(pending);
+    else replacement.extensions[existingIndex] = pending;
+    if (!this.#adapter.compareAndSwapSemanticToolRuntime(
+      this.#runId,
+      durable,
+      replacement,
+    )) {
+      return false;
+    }
+    record.ownerId = ownerId;
+    record.leaseExpiresAtMs = leaseExpiresAtMs;
     const execution = this.#execute(descriptor, invocation).then((value) => ({
       resultId: value.commandResult?.commandId ?? this.#nextResultId(),
       value,
     }));
     record.execution = execution;
-    this.#persistState();
     void execution.catch(() => {
-      if (
-        this.#state.extensionIdempotency.get(key) === record &&
-        this.#ownsExtensionLease(key, record)
-      ) {
+      const current = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const currentExtension = current?.extensions.find(
+        (candidate) => candidate.key === key,
+      );
+      if (current !== null && currentExtension?.status === "pending" &&
+        currentExtension.ownerId === record.ownerId) {
+        const withoutFailedLease = structuredClone(current);
+        withoutFailedLease.extensions = withoutFailedLease.extensions.filter(
+          (candidate) => candidate.key !== key,
+        );
+        if (!this.#adapter.compareAndSwapSemanticToolRuntime(
+          this.#runId,
+          current,
+          withoutFailedLease,
+        )) return;
         this.#state.extensionIdempotency.delete(key);
-        this.#persistState();
       }
     });
+    return true;
   }
 
-  #ownsExtensionLease(
+  #completeExtensionExecution(
     key: string,
     record: ExtensionIdempotencyRecord,
+    completed: { resultId: string; value: ExtensionExecution },
+    observableValue: CapabilityJsonValue,
   ): boolean {
     if (record.ownerId === null) return false;
     const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
     const extension = durable?.extensions.find((candidate) => candidate.key === key);
-    return extension?.status === "pending" &&
-      extension.ownerId === record.ownerId;
+    if (durable === null || extension?.status !== "pending" ||
+      extension.ownerId !== record.ownerId) return false;
+    const replacement = structuredClone(durable);
+    replacement.resultSequence = Math.max(
+      replacement.resultSequence,
+      this.#state.resultSequence,
+    );
+    replacement.operationResults[completed.resultId] = structuredClone(observableValue);
+    replacement.extensions = replacement.extensions.map((candidate) =>
+      candidate.key === key
+        ? {
+            key,
+            input: record.input,
+            status: "completed" as const,
+            resultId: completed.resultId,
+            execution: structuredClone(completed.value),
+          }
+        : candidate,
+    );
+    return this.#adapter.compareAndSwapSemanticToolRuntime(
+      this.#runId,
+      durable,
+      replacement,
+    );
   }
 
   #restoreState(

@@ -53,6 +53,11 @@ export class CapabilityMockControlPlaneError extends Error {
 export interface CapabilitySemanticToolRuntimeStore {
   load(runId: string): CapabilitySemanticToolRuntimeSnapshot | null;
   save(runId: string, snapshot: CapabilitySemanticToolRuntimeSnapshot): void;
+  compareAndSwap(
+    runId: string,
+    expected: CapabilitySemanticToolRuntimeSnapshot | null,
+    snapshot: CapabilitySemanticToolRuntimeSnapshot,
+  ): boolean;
 }
 
 export interface CapabilityMockControlPlaneAdapterOptions {
@@ -648,6 +653,36 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     const durableSnapshot = clone(snapshot);
     this.#semanticToolRuntimeStore?.save(runId, durableSnapshot);
     this.#state.semanticToolRuntimes![runId] = clone(durableSnapshot);
+  }
+
+  compareAndSwapSemanticToolRuntime(
+    runId: string,
+    expected: CapabilitySemanticToolRuntimeSnapshot | null,
+    snapshot: CapabilitySemanticToolRuntimeSnapshot,
+  ): boolean {
+    this.#run(runId);
+    if (
+      (expected !== null && !isSemanticToolRuntimeSnapshot(expected)) ||
+      !isSemanticToolRuntimeSnapshot(snapshot)
+    ) {
+      throw new CapabilityMockControlPlaneError(
+        "fixture_state_invalid",
+        "semantic tool runtime compare-and-swap snapshot is invalid",
+      );
+    }
+    const replacement = clone(snapshot);
+    const swapped = this.#semanticToolRuntimeStore === undefined
+      ? canonicalJson(this.#state.semanticToolRuntimes![runId] ?? null) ===
+        canonicalJson(expected)
+      : this.#semanticToolRuntimeStore.compareAndSwap(
+          runId,
+          expected === null ? null : clone(expected),
+          replacement,
+        );
+    if (swapped) {
+      this.#state.semanticToolRuntimes![runId] = clone(replacement);
+    }
+    return swapped;
   }
 
   decisionRecords(): readonly CapabilityDecisionRecord[] {

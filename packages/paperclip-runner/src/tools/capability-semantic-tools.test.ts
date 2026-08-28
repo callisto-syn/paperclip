@@ -409,7 +409,10 @@ describe("Capability exposure and authorization", () => {
     const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["cases:write"],
     });
-    const saveRuntime = vi.spyOn(adapter, "saveSemanticToolRuntime");
+    const compareAndSwapRuntime = vi.spyOn(
+      adapter,
+      "compareAndSwapSemanticToolRuntime",
+    );
 
     const result = await runtime.invoke({
       operationId: "upsert_case",
@@ -418,11 +421,11 @@ describe("Capability exposure and authorization", () => {
     });
 
     expect(result).toMatchObject({ ok: true });
-    expect(saveRuntime).toHaveBeenCalledTimes(2);
-    expect(saveRuntime.mock.calls[0]![1].extensions).toEqual([
+    expect(compareAndSwapRuntime).toHaveBeenCalledTimes(2);
+    expect(compareAndSwapRuntime.mock.calls[0]![2].extensions).toEqual([
       expect.objectContaining({ status: "pending" }),
     ]);
-    const snapshot = saveRuntime.mock.calls[1]![1];
+    const snapshot = compareAndSwapRuntime.mock.calls[1]![2];
     expect(snapshot.extensions).toHaveLength(1);
     const [extension] = snapshot.extensions;
     expect(extension).toMatchObject({ status: "completed" });
@@ -441,6 +444,13 @@ describe("Capability exposure and authorization", () => {
         durableSnapshot === null ? null : structuredClone(durableSnapshot),
       save: (_runId, snapshot) => {
         durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
       },
     };
     const { adapter, runtime } = await runtimeFor({
@@ -506,6 +516,13 @@ describe("Capability exposure and authorization", () => {
       save: (_runId, snapshot) => {
         durableSnapshot = structuredClone(snapshot);
       },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
     };
     const base = await runtimeFor({ scenarioGrants: ["cases:write"] });
     const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
@@ -540,6 +557,72 @@ describe("Capability exposure and authorization", () => {
       body: "Case body",
       upserted: true,
     });
+  });
+
+  it("allows only one restored runtime to reclaim an expired extension lease", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: `${OPEN.identity.runId}:upsert_case:contended-case`,
+        input: '{"body":"Case body","key":"case-contended"}',
+        status: "pending",
+        ownerId: "terminated-executor",
+        leaseExpiresAtMs: 1_000,
+      }],
+    };
+    let successfulClaims = 0;
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
+      },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        if (snapshot.extensions.some((extension) =>
+          extension.status === "pending" &&
+          extension.ownerId !== "terminated-executor"
+        )) successfulClaims += 1;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const serialized = base.adapter.serialize();
+    const runtimes = [0, 1].map(() => {
+      const adapter = CapabilityMockControlPlaneAdapter.restore(serialized, {
+        semanticToolRuntimeStore: durableStore,
+      });
+      return new CapabilitySemanticToolRuntime({
+        adapter,
+        runId: OPEN.identity.runId,
+        scenarioGrants: ["cases:write"],
+        now: () => 1_001,
+      });
+    });
+    const invocation = {
+      operationId: "upsert_case",
+      input: { key: "case-contended", body: "Case body" },
+      idempotencyKey: "contended-case",
+    } as const;
+
+    const results = await Promise.all(
+      runtimes.map((runtime) => runtime.invoke(invocation)),
+    );
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: "operation_unsupported",
+          reason: "idempotency_recovery_in_flight",
+        }),
+      }),
+    ]);
+    expect(successfulClaims).toBe(1);
   });
 
   it("rejects incomplete or malformed restored extension executions", async () => {
