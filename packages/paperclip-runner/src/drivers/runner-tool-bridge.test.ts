@@ -232,6 +232,31 @@ describe("runner semantic MCP bridge", () => {
     });
   });
 
+  it("returns an explicit tool error instead of truncating oversized JSON", async () => {
+    const bridge = await startRunnerToolBridge({
+      tools: [tool("documents.read")],
+      handler: async () => ({ text: "x".repeat(65 * 1024) }),
+    });
+    bridges.push(bridge);
+
+    expect(
+      await (
+        await rpc(bridge, {
+          id: "large-result",
+          method: "tools/call",
+          params: { name: "documents.read", arguments: {} },
+        })
+      ).json(),
+    ).toMatchObject({
+      result: {
+        isError: true,
+        content: [
+          { text: "Runner tool result exceeded the retained payload limit" },
+        ],
+      },
+    });
+  });
+
   it("prevents catalog ambiguity and reserved schema replacement", async () => {
     await expect(
       startRunnerToolBridge({

@@ -500,10 +500,10 @@ function safeError(error: unknown): string {
 
 function safeJson(value: unknown): string {
   const serialized = JSON.stringify(value) ?? "null";
-  const bytes = Buffer.from(serialized);
-  return bytes.length <= MAX_RESULT_TEXT_BYTES
-    ? serialized
-    : `${bytes.subarray(0, MAX_RESULT_TEXT_BYTES).toString("utf8")}…`;
+  if (Buffer.byteLength(serialized) > MAX_RESULT_TEXT_BYTES) {
+    throw new Error("Runner tool result exceeded the retained payload limit");
+  }
+  return serialized;
 }
 
 function canonicalJson(value: unknown): string {
