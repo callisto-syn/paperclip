@@ -902,7 +902,10 @@ class CodexAcpxSession implements HarnessSession {
           turnId,
           canonicalJson({
             status: "completed",
-            semanticResult: this.#semanticFingerprint,
+            semanticResult:
+              this.#semanticTurnId === turnId
+                ? this.#semanticFingerprint
+                : null,
           }),
         );
         this.#emit(
