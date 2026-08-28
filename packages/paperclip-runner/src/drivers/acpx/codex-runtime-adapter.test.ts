@@ -132,17 +132,19 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("retains protocol cleanup ownership after a runtime close timeout", async () => {
+  it("retains a stalled close while allowing a fresh cleanup attempt", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
-      let resolveRuntimeClose: (() => void) | undefined;
-      vi.mocked(runtime.close).mockImplementation(
-        () =>
-          new Promise<void>((resolve) => {
-            resolveRuntimeClose = resolve;
-          }),
-      );
+      let resolveStalledClose: (() => void) | undefined;
+      vi.mocked(runtime.close)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveStalledClose = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(undefined);
       const child = fakeChild();
       const command = fakeCommand();
       vi.mocked(command.spawn).mockReturnValue(child);
@@ -177,10 +179,13 @@ describe("Codex ACPX runtime adapter", () => {
 
       const retry = port.close({ reason: "cleanup ownership retried" });
       await Promise.resolve();
-      expect(runtime.close).toHaveBeenCalledOnce();
-      resolveRuntimeClose?.();
       await expect(retry).resolves.toBeUndefined();
-      expect(runtime.close).toHaveBeenCalledOnce();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
+
+      // The original protocol attempt is still observed and may settle after
+      // the fresh attempt establishes that runtime cleanup has completed.
+      resolveStalledClose?.();
+      await Promise.resolve();
     } finally {
       vi.useRealTimers();
     }

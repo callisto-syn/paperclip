@@ -237,6 +237,15 @@ function runtimePort(
 ): AcpxRuntimePort {
   let runtimeClosed = false;
   let runtimeCloseAttempt: Promise<unknown | null> | undefined;
+  const ownedRuntimeCloseAttempts = new Set<Promise<unknown | null>>();
+
+  function startRuntimeCloseAttempt(reason: string): Promise<unknown | null> {
+    const attempt = runtimeCloseOutcome(runtime, handle, reason);
+    ownedRuntimeCloseAttempts.add(attempt);
+    void attempt.then(() => ownedRuntimeCloseAttempts.delete(attempt));
+    return attempt;
+  }
+
   return {
     async identity() {
       return structuredClone(identity);
@@ -269,21 +278,22 @@ function runtimePort(
     },
     async close(input) {
       if (!runtimeClosed && !runtimeCloseAttempt) {
-        runtimeCloseAttempt = runtimeCloseOutcome(runtime, handle, input.reason);
+        runtimeCloseAttempt = startRuntimeCloseAttempt(input.reason);
       }
+      const attempt = runtimeCloseAttempt;
       const closeError = runtimeClosed
         ? null
         : await boundedCloseOutcome(
-            runtimeCloseAttempt ??
-              runtimeCloseOutcome(runtime, handle, input.reason),
+            attempt ?? startRuntimeCloseAttempt(input.reason),
             runtimeCloseTimeoutMs,
           );
       if (closeError === null) {
         runtimeClosed = true;
         runtimeCloseAttempt = undefined;
-      } else if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
-        // A settled failure may be retried. A timeout retains the exact pending
-        // close promise so no protocol-level cleanup owner is abandoned.
+      } else if (runtimeCloseAttempt === attempt) {
+        // Retain and observe a timed-out attempt until it settles, but do not
+        // let it permanently prevent a bounded recovery attempt from invoking
+        // the protocol close again. Settled failures are retried the same way.
         runtimeCloseAttempt = undefined;
       }
       const processErrors = await children.terminate();
