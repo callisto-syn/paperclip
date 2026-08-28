@@ -9,6 +9,7 @@ import type { PrpEvent, PrpStructuredRunResult, PrpTerminalState } from "./proto
 import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
+const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -67,6 +68,21 @@ function terminalFromEvent(event: PrpEvent, disposition: PrpTerminalState["repor
         ? { turnTerminalState: "interrupted" as const, runTerminalState: "cancelled" as const }
         : { turnTerminalState: "cancelled" as const, runTerminalState: "cancelled" as const };
   return { schema: "paperclip.prp.terminal.v1", ...states, reportedWorkDisposition: disposition };
+}
+
+async function attemptOptionalSessionCancellation(session: NativeSession, reason: string): Promise<void> {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const attempts = Promise.allSettled([
+    Promise.resolve().then(() => session.interrupt?.({ reason })),
+    Promise.resolve().then(() => session.cancel?.({ reason })),
+  ]);
+  await Promise.race([
+    attempts,
+    new Promise<void>((resolve) => {
+      graceTimer = setTimeout(resolve, OPTIONAL_SESSION_CANCELLATION_GRACE_MS);
+    }),
+  ]);
+  if (graceTimer !== undefined) clearTimeout(graceTimer);
 }
 
 async function consumeTurn(
@@ -196,8 +212,7 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
-    await session.interrupt?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
-    await session.cancel?.({ reason: "Native session event consumption failed." }).catch(() => undefined);
+    await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
     // `close` is the required termination boundary. Unlike optional interrupt
     // and cancel support, it must release a pending event read before it
     // resolves, which makes the teardown waits below bounded by the backend.
