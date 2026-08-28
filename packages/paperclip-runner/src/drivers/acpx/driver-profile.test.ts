@@ -88,5 +88,17 @@ describe("ACPX driver profile", () => {
       ok: false,
       issues: [{ path: "permissionMode", code: "invalid_permission_mode" }],
     });
+    for (const permissionMode of ["", 42]) {
+      expect(
+        validateAcpxDriverConfig({
+          agent: "claude",
+          model: "claude-sonnet-5",
+          permissionMode,
+        }),
+      ).toMatchObject({
+        ok: false,
+        issues: [{ path: "permissionMode", code: "invalid_permission_mode" }],
+      });
+    }
   });
 });
