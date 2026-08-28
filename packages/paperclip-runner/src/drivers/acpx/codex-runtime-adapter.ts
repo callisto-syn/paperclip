@@ -37,7 +37,9 @@ export async function openCodexAcpxRuntime(
   dependencies: CodexAcpxRuntimeDependencies = {},
 ): Promise<AcpxRuntimePort> {
   if (options.profile.agent !== "codex") {
-    throw new Error("The production ACPX runtime currently supports Codex only");
+    throw new Error(
+      "The production ACPX runtime currently supports Codex only",
+    );
   }
 
   const createRegistry = dependencies.createRegistry ?? createAgentRegistry;
@@ -84,11 +86,25 @@ export async function openCodexAcpxRuntime(
       },
     });
   } catch (error) {
+    let runtimeCleanupError: unknown;
+    try {
+      await runtime.close({
+        handle: provisionalPersistentHandle(options),
+        reason: "ACPX session handshake failed",
+        discardPersistentState: false,
+      });
+    } catch (cleanupError) {
+      runtimeCleanupError = cleanupError;
+    }
     const cleanupErrors = await children.terminate();
-    if (cleanupErrors.length > 0) {
+    if (runtimeCleanupError !== undefined || cleanupErrors.length > 0) {
       throw new AggregateError(
-        [error, ...cleanupErrors],
-        "ACPX session handshake and provider cleanup failed",
+        [
+          error,
+          ...(runtimeCleanupError === undefined ? [] : [runtimeCleanupError]),
+          ...cleanupErrors,
+        ],
+        "ACPX session handshake and runtime cleanup failed",
       );
     }
     throw error;
@@ -119,6 +135,18 @@ export async function openCodexAcpxRuntime(
     }
     throw error;
   }
+}
+
+function provisionalPersistentHandle(
+  options: AcpxRuntimePortOpenOptions,
+): AcpRuntimeHandle {
+  return {
+    sessionKey: options.providerSessionKey,
+    backend: "acpx",
+    runtimeSessionName: options.providerSessionKey,
+    cwd: options.cwd,
+    acpxRecordId: options.providerSessionKey,
+  };
 }
 
 function runtimePort(

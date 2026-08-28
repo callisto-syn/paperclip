@@ -152,24 +152,36 @@ describe("Codex ACPX runtime adapter", () => {
     const command = fakeCommand();
     vi.mocked(command.spawn).mockReturnValue(child);
     const failure = new Error("ACP handshake rejected");
+    const runtime = fakeRuntime();
 
     await expect(
       openCodexAcpxRuntime(openOptions(command), {
         createRegistry: () => registry(),
         createStore: () => store(),
-        createRuntime: (options) => ({
-          ...fakeRuntime(),
-          ensureSession: vi.fn(async () => {
+        createRuntime: (options) => {
+          vi.mocked(runtime.ensureSession).mockImplementation(async () => {
             options.spawnAgent?.({
               command: "ignored",
               args: ["--stdio"],
               options: {},
             });
             throw failure;
-          }),
-        }),
+          });
+          return runtime;
+        },
       }),
     ).rejects.toBe(failure);
+    expect(runtime.close).toHaveBeenCalledWith({
+      handle: {
+        sessionKey: "provider-key",
+        backend: "acpx",
+        runtimeSessionName: "provider-key",
+        cwd: "/workspace",
+        acpxRecordId: "provider-key",
+      },
+      reason: "ACPX session handshake failed",
+      discardPersistentState: false,
+    });
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
