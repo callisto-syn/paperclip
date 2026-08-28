@@ -551,7 +551,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
-  it("admits shared approvals linked to the active task and rejects unlinked approvals", async () => {
+  it("allows shared approval comments but keeps decisions inside the active task boundary", async () => {
     const adapter = seeded({
       actors: [
         {
@@ -609,6 +609,19 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       ],
       approvals: [
         {
+          id: "approval-active-task",
+          companyId: "company-1",
+          taskIds: ["task-1"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+        {
           id: "approval-other-task",
           companyId: "company-1",
           taskIds: ["task-1", "task-2"],
@@ -663,6 +676,16 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "Shared approval is in scope.",
       },
+    })).rejects.toMatchObject({ code: "approval_scope_violation" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "active-approval-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-active-task",
+        decision: "approved",
+        note: "Active-task approval is in scope.",
+      },
     })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
@@ -677,8 +700,12 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     expect(adapter.snapshot()).toMatchObject({
       approvals: [
         {
-          id: "approval-other-task",
+          id: "approval-active-task",
           status: "approved",
+        },
+        {
+          id: "approval-other-task",
+          status: "pending",
           comments: [{ body: "Scoped from the active task." }],
         },
         { id: "approval-unlinked", status: "pending" },

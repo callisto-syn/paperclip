@@ -1231,6 +1231,15 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
           "the approval is not linked to the active fixture task",
         );
       }
+      if (approval.taskIds.length !== 1) {
+        this.#deny(run.id, command.kind, "shared_approval_requires_control_plane", [
+          `approval:${approval.id}`,
+        ]);
+        throw new CapabilityMockControlPlaneError(
+          "approval_scope_violation",
+          "shared approvals cannot be decided by a task-scoped fixture run",
+        );
+      }
       if (approval?.requestedByActorId === actor.id) {
         this.#deny(run.id, command.kind, "self_approval_forbidden", [
           `approval:${approval.id}`,
