@@ -13,6 +13,7 @@ import {
   type HarnessDriverConfigValidation,
   type HarnessDriverDescriptor,
   type HarnessSession,
+  type HarnessSessionRecoveryResult,
   type HarnessTranscriptSnapshot,
   type OpenHarnessSessionInput,
   type PersistedHarnessSession,
@@ -46,12 +47,15 @@ import {
   type AcpxRuntimeTurn,
   type OpenAcpxRuntimeHostOptions,
 } from "./runtime-host.js";
+import { readAcpxRecoveryWorkspace } from "./runtime-sandbox.js";
 
 const MAX_BUFFERED_EVENTS = 512;
 const TERMINAL_EVENT_RESERVE = 3;
 const TURN_START_EVENT_COUNT = 3;
 const MAX_TRANSCRIPT_EVENTS = 1_024;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+const MAX_RECOVERY_TERMINAL_TURNS = 4_096;
+const MAX_RECOVERY_TERMINAL_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
@@ -117,6 +121,10 @@ export interface CodexAcpxDriverDependencies {
   closeSettlementTimeoutMs?: number;
   /** Internal test seam; production uses the fixed event-retention bound. */
   maxBufferedEvents?: number;
+  readRecoveryWorkspace?: (input: {
+    runtimeDirectory: string;
+    normalizedSessionId: string;
+  }) => Promise<string>;
 }
 
 /** Codex-only HarnessDriver backed by the admitted ACPX runtime host. */
@@ -127,6 +135,9 @@ export class CodexAcpxDriver implements HarnessDriver {
   readonly #maxBufferedEvents: number;
   readonly #cleanupOwners = new Set<Promise<void>>();
   readonly #quarantinedHostCleanups = new Set<QuarantinedHostCleanup>();
+  readonly #readRecoveryWorkspace: NonNullable<
+    CodexAcpxDriverDependencies["readRecoveryWorkspace"]
+  >;
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -153,6 +164,8 @@ export class CodexAcpxDriver implements HarnessDriver {
       TERMINAL_EVENT_RESERVE + TURN_START_EVENT_COUNT,
       Math.floor(dependencies.maxBufferedEvents ?? MAX_BUFFERED_EVENTS),
     );
+    this.#readRecoveryWorkspace =
+      dependencies.readRecoveryWorkspace ?? readAcpxRecoveryWorkspace;
   }
 
   async descriptor(): Promise<HarnessDriverDescriptor> {
@@ -167,11 +180,10 @@ export class CodexAcpxDriver implements HarnessDriver {
       },
       capabilities: {
         ...descriptor.capabilities,
-        resume: false,
+        resume: true,
         runtimeRequestResolution: false,
         runtimeRequestHandoff: false,
         unsupported: [
-          "resume",
           "steering",
           "runtimeRequestResolution",
           "runtimeRequestHandoff",
@@ -201,6 +213,51 @@ export class CodexAcpxDriver implements HarnessDriver {
 
   async openSession(input: OpenHarnessSessionInput): Promise<HarnessSession> {
     await this.#retryQuarantinedHostCleanups();
+    return await this.#open(input, null);
+  }
+
+  async recoverSession(
+    snapshot: PersistedHarnessSession,
+  ): Promise<HarnessSessionRecoveryResult> {
+    try {
+      await this.#retryQuarantinedHostCleanups();
+      validateRecoverySnapshot(snapshot);
+      const terminalTurnIds = new Set(
+        (snapshot.terminalTurns ?? []).map(({ turnId }) => turnId),
+      );
+      if (
+        snapshot.activeTurnId &&
+        !terminalTurnIds.has(snapshot.activeTurnId)
+      ) {
+        return {
+          recovered: false,
+          reason: "active Codex ACPX turn continuity is unavailable",
+        };
+      }
+      const workingDirectory = await this.#readRecoveryWorkspace({
+        runtimeDirectory: this.#options.runtimeDirectory,
+        normalizedSessionId: snapshot.normalizedSessionId!,
+      });
+      return {
+        recovered: true,
+        session: await this.#open(
+          {
+            runId: snapshot.runId!,
+            normalizedSessionId: snapshot.normalizedSessionId!,
+            workingDirectory,
+          },
+          snapshot,
+        ),
+      };
+    } catch (error) {
+      return { recovered: false, reason: safeMessage(error) };
+    }
+  }
+
+  async #open(
+    input: OpenHarnessSessionInput,
+    snapshot: PersistedHarnessSession | null,
+  ): Promise<HarnessSession> {
     let session: CodexAcpxSession | null = null;
     const host = await this.#openHost({
       runtimeDirectory: this.#options.runtimeDirectory,
@@ -213,6 +270,9 @@ export class CodexAcpxDriver implements HarnessDriver {
       environment: this.#options.environment,
       managedCodexCredentialSourcePath:
         this.#options.managedCodexCredentialSourcePath,
+      ...(snapshot?.providerIdentity?.kind === "acpx"
+        ? { expectedIdentity: snapshot.providerIdentity }
+        : {}),
       semanticTools: {
         tools: this.#options.dynamicTools ?? [],
         handler: (call) => {
@@ -234,6 +294,7 @@ export class CodexAcpxDriver implements HarnessDriver {
         retainCleanup: (cleanup) => this.#retainCleanup(cleanup),
         quarantineCleanup: (hostToRetain, reason) =>
           this.#quarantineHostCleanup(hostToRetain, reason),
+        snapshot,
       });
       return session;
     } catch (error) {
@@ -412,6 +473,9 @@ class CodexAcpxSession implements HarnessSession {
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
+  readonly #providerRecoveryPolicy: NonNullable<
+    PersistedHarnessSession["providerRecoveryPolicy"]
+  >;
   #sourceSequence = 0;
   #activeTurnId: string | null = null;
   #semanticResult: PrpStructuredRunResult | null = null;
@@ -442,6 +506,7 @@ class CodexAcpxSession implements HarnessSession {
     maxBufferedEvents: number;
     retainCleanup: (cleanup: Promise<void>) => void;
     quarantineCleanup: (host: CodexAcpxHost, reason: string) => void;
+    snapshot: PersistedHarnessSession | null;
   }) {
     const identity = input.host.identity();
     if (identity.normalizedSessionId !== input.input.normalizedSessionId) {
@@ -460,6 +525,23 @@ class CodexAcpxSession implements HarnessSession {
       "paperclip-acpx",
       input.input.normalizedSessionId,
     );
+    this.#sourceSequence = input.snapshot?.lastSourceSequence ?? 0;
+    this.#activeTurnId = input.snapshot?.activeTurnId ?? null;
+    this.#providerRecoveryPolicy =
+      input.snapshot?.providerRecoveryPolicy ?? "same_session_only";
+    const semantic = input.snapshot?.semanticResult;
+    if (semantic) {
+      this.#semanticResult = structuredClone(semantic.result);
+      this.#semanticFingerprint = semantic.fingerprint;
+      this.#semanticCallId = semantic.callId ?? null;
+      this.#semanticTurnId = semantic.turnId;
+    }
+    for (const terminal of input.snapshot?.terminalTurns ?? []) {
+      this.#terminalTurns.set(terminal.turnId, terminal.fingerprint);
+    }
+    if (this.#activeTurnId && this.#terminalTurns.has(this.#activeTurnId)) {
+      this.#activeTurnId = null;
+    }
   }
 
   ids() {
@@ -635,6 +717,7 @@ class CodexAcpxSession implements HarnessSession {
       driverKind: "acpx_runtime",
       driverSessionId: identity.acpxRecordId,
       providerSessionId: identity.agentSessionId,
+      providerRecoveryPolicy: this.#providerRecoveryPolicy,
       runId: this.#input.runId,
       normalizedSessionId: this.#input.normalizedSessionId,
       activeTurnId: this.#activeTurnId,
@@ -1041,6 +1124,123 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value) ?? "undefined";
+}
+
+function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
+  if (
+    snapshot.driverKind !== "acpx_runtime" ||
+    !snapshot.runId?.trim() ||
+    !snapshot.normalizedSessionId?.trim() ||
+    snapshot.providerIdentity?.kind !== "acpx"
+  ) {
+    throw new Error("persisted Codex ACPX session identity is incomplete");
+  }
+  const identity = snapshot.providerIdentity;
+  if (
+    !boundedIdentity(snapshot.runId) ||
+    !boundedIdentity(snapshot.normalizedSessionId) ||
+    identity.normalizedSessionId !== snapshot.normalizedSessionId ||
+    identity.acpxRecordId !== snapshot.driverSessionId ||
+    identity.agentSessionId !== snapshot.providerSessionId ||
+    ![
+      identity.normalizedSessionId,
+      identity.acpxRecordId,
+      identity.backendSessionId,
+      identity.agentSessionId,
+      identity.requestedModel,
+      identity.effectiveModel,
+    ].every(boundedIdentity) ||
+    !/^sha256:[a-f0-9]{64}$/.test(identity.profileDigest) ||
+    !/^sha256:[a-f0-9]{64}$/.test(identity.workspaceDigest) ||
+    (identity.permissionMode !== undefined &&
+      !["approve-all", "approve-reads", "deny-all"].includes(
+        identity.permissionMode,
+      ))
+  ) {
+    throw new Error("persisted Codex ACPX session identity is inconsistent");
+  }
+  if (
+    snapshot.providerRecoveryPolicy !== undefined &&
+    snapshot.providerRecoveryPolicy !== "same_session_only"
+  ) {
+    throw new Error("persisted Codex ACPX recovery policy is unsupported");
+  }
+  if (
+    (snapshot.pendingRuntimeRequests?.length ?? 0) > 0 ||
+    (snapshot.lineage?.length ?? 0) > 0 ||
+    snapshot.goal != null
+  ) {
+    throw new Error("persisted Codex ACPX snapshot has unsupported state");
+  }
+  if (
+    snapshot.lastSourceSequence !== undefined &&
+    (!Number.isSafeInteger(snapshot.lastSourceSequence) ||
+      snapshot.lastSourceSequence < 0)
+  ) {
+    throw new Error("persisted Codex ACPX source sequence is invalid");
+  }
+  if (
+    snapshot.terminalTurns !== undefined &&
+    !Array.isArray(snapshot.terminalTurns)
+  ) {
+    throw new Error("persisted Codex ACPX terminal history is invalid");
+  }
+  const terminalTurns = snapshot.terminalTurns ?? [];
+  if (terminalTurns.length > MAX_RECOVERY_TERMINAL_TURNS) {
+    throw new Error("persisted Codex ACPX terminal history exceeds its limit");
+  }
+  const terminalTurnIds = new Set<string>();
+  let terminalBytes = 0;
+  for (const terminal of terminalTurns) {
+    terminalBytes +=
+      Buffer.byteLength(terminal.turnId ?? "") +
+      Buffer.byteLength(terminal.fingerprint ?? "");
+    if (
+      !boundedIdentity(terminal.turnId) ||
+      !terminal.fingerprint ||
+      Buffer.byteLength(terminal.fingerprint) > 256 * 1024 ||
+      terminalBytes > MAX_RECOVERY_TERMINAL_BYTES ||
+      terminalTurnIds.has(terminal.turnId)
+    ) {
+      throw new Error("persisted Codex ACPX terminal turn is invalid");
+    }
+    terminalTurnIds.add(terminal.turnId);
+  }
+  if (
+    snapshot.activeTurnId !== undefined &&
+    snapshot.activeTurnId !== null &&
+    !boundedIdentity(snapshot.activeTurnId)
+  ) {
+    throw new Error("persisted Codex ACPX active turn is invalid");
+  }
+  const semantic = snapshot.semanticResult;
+  if (semantic) {
+    const validation = validatePrpStructuredRunResult(semantic.result);
+    if (
+      !validation.ok ||
+      semantic.fingerprint !== canonicalJson(validation.result) ||
+      !boundedIdentity(semantic.turnId) ||
+      (semantic.callId !== undefined &&
+        semantic.callId !== null &&
+        !boundedIdentity(semantic.callId))
+    ) {
+      throw new Error("persisted Codex ACPX semantic result is invalid");
+    }
+    if (!terminalTurnIds.has(semantic.turnId)) {
+      throw new Error(
+        "persisted Codex ACPX semantic result has no terminal turn",
+      );
+    }
+  }
+}
+
+function boundedIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 240 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 function boundedRecord(value: unknown): Record<string, unknown> {

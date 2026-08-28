@@ -27,7 +27,7 @@ describe("Codex ACPX harness driver", () => {
       kind: "acpx_runtime",
       displayName: "Codex via ACPX",
       capabilities: {
-        resume: false,
+        resume: true,
         interruption: true,
         dynamicTools: true,
         runtimeRequestResolution: false,
@@ -700,6 +700,161 @@ describe("Codex ACPX harness driver", () => {
       ),
     });
   });
+
+  it("recovers a settled session with the exact persisted identity", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.completed");
+    await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+    await fixture.hostOptions!.semanticTools!.handler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-recovery",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await terminalEvents;
+    const snapshot = await session.snapshot();
+    await session.close({ reason: "simulate restart" });
+
+    const recovery = await fixture.driver.recoverSession!(snapshot);
+
+    expect(recovery).toMatchObject({ recovered: true });
+    expect(fixture.readRecoveryWorkspace).toHaveBeenCalledWith({
+      runtimeDirectory: "/runtime",
+      normalizedSessionId: "session-1",
+    });
+    expect(fixture.hostOptions?.expectedIdentity).toEqual(
+      snapshot.providerIdentity,
+    );
+    await expect(recovery.session!.snapshot()).resolves.toMatchObject({
+      driverSessionId: snapshot.driverSessionId,
+      providerSessionId: snapshot.providerSessionId,
+      providerRecoveryPolicy: "same_session_only",
+      lastSourceSequence: snapshot.lastSourceSequence,
+      semanticResult: snapshot.semanticResult,
+      activeTurnId: null,
+    });
+    await recovery.session!.close({ reason: "recovery verified" });
+  });
+
+  it("clears a checkpoint race when the active turn is already terminal", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-terminal-race",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const terminalEvents = collectUntil(session.events(), "turn.completed");
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Complete the task." },
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await terminalEvents;
+    const snapshot = await session.snapshot();
+    snapshot.activeTurnId = turnId;
+    await session.close({ reason: "simulate checkpoint race" });
+
+    const recovery = await fixture.driver.recoverSession!(snapshot);
+
+    expect(recovery).toMatchObject({ recovered: true });
+    await expect(recovery.session!.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      terminalTurns: [expect.objectContaining({ turnId })],
+    });
+    await recovery.session!.close({ reason: "checkpoint race verified" });
+  });
+
+  it("fails closed when a checkpoint contains an unproved active turn", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-active-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    await session.startTurn({
+      message: { role: "user", text: "Continue working." },
+    });
+    const snapshot = await session.snapshot();
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason: "active Codex ACPX turn continuity is unavailable",
+    });
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    expect(fixture.openHost).toHaveBeenCalledOnce();
+    await session.close({ reason: "active recovery rejected" });
+  });
+
+  it("rejects a tampered recovery result before reopening the provider", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-tampered-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const snapshot = await session.snapshot();
+    snapshot.semanticResult = {
+      result: completedResult(),
+      fingerprint: "tampered",
+      turnId: "turn-settled",
+    };
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason: "persisted Codex ACPX semantic result is invalid",
+    });
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    expect(fixture.openHost).toHaveBeenCalledOnce();
+    await session.close({ reason: "tampered recovery rejected" });
+  });
+
+  it("rejects an unimplemented replacement policy before reopening", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-policy-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const snapshot = await session.snapshot();
+    snapshot.providerRecoveryPolicy = "allow_replacement_after_resume_failure";
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason: "persisted Codex ACPX recovery policy is unsupported",
+    });
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    expect(fixture.openHost).toHaveBeenCalledOnce();
+    await session.close({ reason: "replacement recovery rejected" });
+  });
+
+  it("rejects oversized terminal history before reopening", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-bounded-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const snapshot = await session.snapshot();
+    snapshot.terminalTurns = Array.from({ length: 4_097 }, (_, index) => ({
+      turnId: `turn-${index}`,
+      fingerprint: "terminal",
+    }));
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason: "persisted Codex ACPX terminal history exceeds its limit",
+    });
+    expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    expect(fixture.openHost).toHaveBeenCalledOnce();
+    await session.close({ reason: "bounded recovery rejected" });
+  });
 });
 
 function driverFixture(
@@ -714,6 +869,7 @@ function driverFixture(
   driver: CodexAcpxDriver;
   host: ReturnType<typeof fakeHost>;
   openHost: ReturnType<typeof vi.fn>;
+  readRecoveryWorkspace: ReturnType<typeof vi.fn>;
   hostOptions: OpenAcpxRuntimeHostOptions | null;
   finishTurn(result: Awaited<AcpxRuntimeTurn["result"]>): void;
 } {
@@ -753,11 +909,13 @@ function driverFixture(
   );
   let hostOptions: OpenAcpxRuntimeHostOptions | null = null;
   const openHost = vi.fn(async (options: OpenAcpxRuntimeHostOptions) => {
-      hostOptions = options;
-      return host;
+    hostOptions = options;
+    return host;
   });
+  const readRecoveryWorkspace = vi.fn(async () => "/workspace");
   const dependencies: CodexAcpxDriverDependencies = {
     openHost,
+    readRecoveryWorkspace,
     closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
     maxBufferedEvents: fixtureOptions.maxBufferedEvents,
   };
@@ -781,6 +939,7 @@ function driverFixture(
     driver,
     host,
     openHost,
+    readRecoveryWorkspace,
     get hostOptions() {
       return hostOptions;
     },
