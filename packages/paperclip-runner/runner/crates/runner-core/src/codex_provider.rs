@@ -531,7 +531,11 @@ impl CodexProvider {
             )?;
             if method == "turn/completed" {
                 self.active_provider_turn_id = None;
-                self.cancel_pending_requests()?;
+                // The provider terminal is authoritative once received. Clear
+                // local request ownership and attempt courtesy responses, but
+                // a provider that already closed stdin must not turn the
+                // completed turn back into a transport failure.
+                let _ = self.cancel_pending_requests();
             }
             return Ok(Some(CodexProviderEvent::Notification {
                 method: method.to_owned(),
@@ -586,27 +590,30 @@ impl CodexProvider {
     }
 
     fn cancel_pending_requests(&mut self) -> Result<(), LocalRunnerError> {
-        self.cancel_pending_runtime_requests()?;
+        let pending_runtime = std::mem::take(&mut self.pending_runtime_requests);
         let pending = std::mem::take(&mut self.pending_tool_requests);
         self.pending_tool_request_bytes = 0;
-        for request in pending.into_values() {
-            self.process.send(&json!({
-                "id": request.rpc_id,
-                "result": codex_tool_failure("Paperclip stopped the active provider turn"),
-            }))?;
-        }
-        Ok(())
-    }
-
-    fn cancel_pending_runtime_requests(&mut self) -> Result<(), LocalRunnerError> {
-        let pending = std::mem::take(&mut self.pending_runtime_requests);
-        for request in pending.into_values() {
-            self.process.send(&json!({
+        let mut first_error = None;
+        for request in pending_runtime.into_values() {
+            if let Err(error) = self.process.send(&json!({
                 "id": request.rpc_id,
                 "result": {"answers": {}},
-            }))?;
+            })) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        for request in pending.into_values() {
+            if let Err(error) = self.process.send(&json!({
+                "id": request.rpc_id,
+                "result": codex_tool_failure("Paperclip stopped the active provider turn"),
+            })) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, LocalRunnerError> {

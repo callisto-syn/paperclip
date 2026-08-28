@@ -268,6 +268,58 @@ fn codex_completion_cancels_pending_tool_request_before_releasing_capacity() {
 }
 
 #[test]
+fn codex_completion_survives_failed_pending_request_cancellation() {
+    let directory = temporary_directory("completed-tool-call-provider-exit");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--emit-tool-call",
+            "--complete-after-tool-call",
+            "--exit-after-tool-call-completion",
+        ],
+    );
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Complete and exit with a tool call pending.", &config.cwd)
+        .expect("start provider turn");
+
+    let call = (0..32)
+        .find_map(|_| match provider.poll().expect("poll pending tool call") {
+            Some(CodexProviderEvent::ToolCall {
+                call_id,
+                operation_id,
+                ..
+            }) => Some((call_id, operation_id)),
+            _ => None,
+        })
+        .expect("observe the pending semantic tool call");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let completed = (0..32).any(|_| {
+        matches!(
+            provider
+                .poll()
+                .expect("the received completion survives closed provider stdin"),
+            Some(CodexProviderEvent::Notification { method, .. })
+                if method == "turn/completed"
+        )
+    });
+    assert!(completed, "the terminal notification remains authoritative");
+    assert!(provider
+        .deliver_tool_result(&ToolResult {
+            call_id: call.0,
+            operation_id: call.1,
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .is_err());
+
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_rejects_a_tool_call_that_was_not_advertised() {
     let directory = temporary_directory("unauthorized-tool");
     let config = provider_config(&directory, &["--emit-tool-call"]);
