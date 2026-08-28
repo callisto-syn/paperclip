@@ -234,6 +234,8 @@ class CodexAcpxSession implements HarnessSession {
   #activePump: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #hostClosePromise: Promise<void> | null = null;
+  #hostCleanupRecoveryPromise: Promise<void> | null = null;
+  #hostClosed = false;
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
   #transcriptOmitted = false;
@@ -513,11 +515,16 @@ class CodexAcpxSession implements HarnessSession {
     }
     this.#eventStreamClosed = true;
     this.#events.close();
-    if (hostCloseError) throw hostCloseError;
+    if (hostCloseError) {
+      this.#retainHostCleanupOwnership(reason);
+      throw hostCloseError;
+    }
   }
 
   #startHostClose(input: { reason: string }): Promise<void> {
-    const closePromise = this.#host.close(input);
+    const closePromise = this.#host.close(input).then(() => {
+      this.#hostClosed = true;
+    });
     this.#hostClosePromise = closePromise;
     void closePromise.catch(() => {
       if (this.#hostClosePromise === closePromise) {
@@ -525,6 +532,27 @@ class CodexAcpxSession implements HarnessSession {
       }
     });
     return closePromise;
+  }
+
+  #retainHostCleanupOwnership(reason: string): void {
+    if (this.#hostClosed || this.#hostCleanupRecoveryPromise) return;
+    const recovery = (async () => {
+      while (!this.#hostClosed) {
+        const pending =
+          this.#hostClosePromise ?? this.#startHostClose({ reason });
+        try {
+          await pending;
+        } catch {
+          await retryCleanupAfter(this.#closeSettlementTimeoutMs);
+        }
+      }
+    })();
+    this.#hostCleanupRecoveryPromise = recovery;
+    void recovery.finally(() => {
+      if (this.#hostCleanupRecoveryPromise === recovery) {
+        this.#hostCleanupRecoveryPromise = null;
+      }
+    });
   }
 
   async #pumpTurn(turnId: string, turn: AcpxRuntimeTurn): Promise<void> {
@@ -886,4 +914,11 @@ async function settleWithin(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function retryCleanupAfter(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    timer.unref();
+  });
 }

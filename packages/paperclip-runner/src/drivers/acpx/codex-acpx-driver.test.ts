@@ -222,6 +222,32 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
+  it("autonomously retries cleanup that rejects after the close timeout", async () => {
+    const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+    const firstClose = deferred<void>();
+    const recoveredClose = deferred<void>();
+    fixture.host.close
+      .mockImplementationOnce(() => firstClose.promise)
+      .mockImplementationOnce(() => recoveredClose.promise);
+    const session = await fixture.driver.openSession({
+      runId: "run-close-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+
+    await expect(
+      session.close({ reason: "runtime close stalled" }),
+    ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
+    firstClose.reject(new Error("late runtime cleanup failure"));
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
+    recoveredClose.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        session.close({ reason: "cleanup ownership verified" }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   it("bounds lagging streams without introducing source sequence gaps", async () => {
     const fixture = driverFixture(
       {},
@@ -478,8 +504,10 @@ function completedResult() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
     resolve = settle;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
