@@ -24,6 +24,9 @@ pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
 // identity digests. A compacted replay fails closed because its exact result is
 // no longer available, but it can never execute the Paperclip action twice.
 const MAX_RETAINED_CALL_RECEIPTS: usize = 4_096;
+const MAX_DURABLE_CALL_RECEIPTS: usize = 5_120;
+const ACTIVE_TURN_RECEIPT_LIMIT_MESSAGE: &str =
+    "durable provider tool receipt limit reached for the active turn";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +102,14 @@ pub struct ProviderBridgeError(String);
 impl ProviderBridgeError {
     fn invalid(message: impl Into<String>) -> Self {
         Self(message.into())
+    }
+
+    fn active_turn_receipt_limit() -> Self {
+        Self::invalid(ACTIVE_TURN_RECEIPT_LIMIT_MESSAGE)
+    }
+
+    pub fn is_active_turn_receipt_limit(&self) -> bool {
+        self.0 == ACTIVE_TURN_RECEIPT_LIMIT_MESSAGE
     }
 }
 
@@ -272,7 +283,10 @@ impl ProviderToolBridge {
             .len()
             .saturating_add(self.completed.len())
             .saturating_add(self.evicted.len());
-        if self.pending.len() > MAX_PENDING_CALLS || retained_receipts > MAX_RETAINED_CALL_RECEIPTS
+        if self.pending.len() > MAX_PENDING_CALLS
+            || retained_receipts > MAX_RETAINED_CALL_RECEIPTS
+            || retained_receipts.saturating_add(self.compacted_receipts.len())
+                > MAX_DURABLE_CALL_RECEIPTS
         {
             return Err(ProviderBridgeError::invalid(
                 "recovered provider tool bridge exceeds its call limit",
@@ -458,6 +472,9 @@ impl ProviderToolBridge {
             return Err(ProviderBridgeError::invalid(
                 "concurrent provider tool call limit reached",
             ));
+        }
+        if self.total_call_receipts() >= MAX_DURABLE_CALL_RECEIPTS {
+            return Err(ProviderBridgeError::active_turn_receipt_limit());
         }
         self.compact_receipts_to_fit()?;
         let input_bytes = json_size(&call.input, "provider tool input")?;
@@ -735,6 +752,14 @@ impl ProviderToolBridge {
 
     fn compacted_receipt_contains(&self, call_id: &str) -> bool {
         self.compacted_receipts.contains_key(call_id)
+    }
+
+    fn total_call_receipts(&self) -> usize {
+        self.pending
+            .len()
+            .saturating_add(self.completed.len())
+            .saturating_add(self.evicted.len())
+            .saturating_add(self.compacted_receipts.len())
     }
 
     fn validate_retained_value_bytes(&self) -> Result<(), ProviderBridgeError> {
@@ -1066,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_only_receipts_fail_closed_without_exhausting_the_active_turn() {
+    fn digest_only_receipts_are_bounded_and_fail_closed_on_replay() {
         let operation_id = format!("o{}", "p".repeat(159));
         let operation = AuthorizedTool {
             operation_id: operation_id.clone(),
@@ -1096,13 +1121,15 @@ mod tests {
             bridge.compacted_receipts.insert(call_id, receipt.clone());
         }
 
-        bridge
+        let error = bridge
             .begin_call(
                 "call-after-turn-cap".to_owned(),
                 operation_id.clone(),
                 json!({}),
             )
-            .expect("completed receipt history is independent of call admission");
+            .expect_err("the durable receipt quota must stop provider-state growth");
+        assert!(error.is_active_turn_receipt_limit());
+        assert_eq!(bridge.total_call_receipts(), MAX_DURABLE_CALL_RECEIPTS);
         assert!(serde_json::to_vec_pretty(&bridge).unwrap().len() < 4 * 1024 * 1024);
         bridge.validate_recovered().unwrap();
         assert!(bridge

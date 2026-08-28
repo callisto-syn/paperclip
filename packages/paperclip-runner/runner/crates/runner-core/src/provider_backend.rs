@@ -1128,6 +1128,31 @@ impl CodexCommandExecutor {
             })
     }
 
+    fn stop_turn_at_tool_receipt_limit(
+        &mut self,
+        call_id: String,
+        operation_id: String,
+    ) -> Result<(), DurableRunnerError> {
+        self.state
+            .as_mut()
+            .expect("Codex state remains available at its tool receipt limit")
+            .push_event(NormalizedProviderEvent {
+                event_type: "harness.diagnostic".to_owned(),
+                priority: EventPriority::P0,
+                payload: json!({
+                    "provider": "codex",
+                    "code": "semantic_tool_turn_receipt_limit",
+                    "operationId": operation_id,
+                    "callId": call_id,
+                    "message": "The active provider turn reached its durable semantic-tool receipt limit and was interrupted",
+                    "paperclipExecuted": false,
+                }),
+            })?;
+        self.save_state()?;
+        self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
+        Ok(())
+    }
+
     fn handle_tool_call(
         &mut self,
         call_id: String,
@@ -1184,6 +1209,9 @@ impl CodexCommandExecutor {
                 .begin_call(call_id.clone(), operation_id.clone(), input.clone());
         let call = match call {
             Ok(call) => call,
+            Err(error) if error.is_active_turn_receipt_limit() => {
+                return self.stop_turn_at_tool_receipt_limit(call_id, operation_id);
+            }
             Err(error) => {
                 return self.reject_tool_call(call_id, operation_id, error.to_string());
             }
