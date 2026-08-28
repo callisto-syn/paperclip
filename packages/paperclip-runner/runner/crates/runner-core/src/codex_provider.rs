@@ -166,6 +166,7 @@ pub struct CodexProvider {
     pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     runtime_request_scope: [u8; 16],
+    next_runtime_request_sequence: u64,
     expected_shutdown: bool,
     process_generation: u64,
     completed_turn_authority: Option<CompletedTurnAuthority>,
@@ -217,6 +218,7 @@ impl CodexProvider {
             pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
             runtime_request_scope: new_runtime_request_scope()?,
+            next_runtime_request_sequence: 1,
             expected_shutdown: false,
             process_generation,
             completed_turn_authority: None,
@@ -603,30 +605,41 @@ impl CodexProvider {
                 }
                 let (provider_request_id, question_set, option_labels) =
                     codex_question_set(&rpc_id, &params)?;
-                let request_id = scoped_runtime_request_id(
-                    &self.runtime_request_scope,
-                    &active_turn_id,
-                    &provider_request_id,
-                );
                 let pending = PendingRuntimeRequest {
-                    rpc_id,
-                    turn_id: active_turn_id,
+                    rpc_id: rpc_id.clone(),
+                    turn_id: active_turn_id.clone(),
                     method: method.to_owned(),
                     params,
                     question_set: question_set.clone(),
                     option_labels,
                 };
-                if let Some(existing) = self.pending_runtime_requests.get(&request_id) {
+                if let Some(existing) = self
+                    .pending_runtime_requests
+                    .values()
+                    .find(|existing| existing.rpc_id == rpc_id)
+                {
                     if existing != &pending {
                         return Err(LocalRunnerError::invalid(
                             "Codex reused a runtime request id with different input",
                         ));
                     }
                     return Ok(None);
-                } else {
-                    self.pending_runtime_requests
-                        .insert(request_id.clone(), pending);
                 }
+                let request_sequence = self.next_runtime_request_sequence;
+                self.next_runtime_request_sequence = self
+                    .next_runtime_request_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        LocalRunnerError::invalid("Codex runtime request sequence overflowed")
+                    })?;
+                let request_id = scoped_runtime_request_id(
+                    &self.runtime_request_scope,
+                    &active_turn_id,
+                    &provider_request_id,
+                    request_sequence,
+                );
+                self.pending_runtime_requests
+                    .insert(request_id.clone(), pending);
                 return Ok(Some(CodexProviderEvent::RuntimeRequest {
                     request_id,
                     question_set,
@@ -1112,13 +1125,20 @@ fn new_runtime_request_scope() -> Result<[u8; 16], LocalRunnerError> {
     Ok(scope)
 }
 
-fn scoped_runtime_request_id(scope: &[u8; 16], turn_id: &str, provider_request_id: &str) -> String {
+fn scoped_runtime_request_id(
+    scope: &[u8; 16],
+    turn_id: &str,
+    provider_request_id: &str,
+    request_sequence: u64,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(scope);
     digest.update([0]);
     digest.update(turn_id.as_bytes());
     digest.update([0]);
     digest.update(provider_request_id.as_bytes());
+    digest.update([0]);
+    digest.update(request_sequence.to_be_bytes());
     format!("runtime-request-{:x}", digest.finalize())
 }
 
@@ -1290,16 +1310,20 @@ mod tests {
         .is_err());
         let scope = [7u8; 16];
         assert_eq!(
-            scoped_runtime_request_id(&scope, "turn-1", "41"),
-            scoped_runtime_request_id(&scope, "turn-1", "41"),
+            scoped_runtime_request_id(&scope, "turn-1", "41", 1),
+            scoped_runtime_request_id(&scope, "turn-1", "41", 1),
         );
         assert_ne!(
-            scoped_runtime_request_id(&scope, "turn-1", "41"),
-            scoped_runtime_request_id(&scope, "turn-2", "41"),
+            scoped_runtime_request_id(&scope, "turn-1", "41", 1),
+            scoped_runtime_request_id(&scope, "turn-2", "41", 1),
         );
         assert_ne!(
-            scoped_runtime_request_id(&scope, "turn-1", "41"),
-            scoped_runtime_request_id(&[8u8; 16], "turn-1", "41"),
+            scoped_runtime_request_id(&scope, "turn-1", "41", 1),
+            scoped_runtime_request_id(&[8u8; 16], "turn-1", "41", 1),
+        );
+        assert_ne!(
+            scoped_runtime_request_id(&scope, "turn-1", "41", 1),
+            scoped_runtime_request_id(&scope, "turn-1", "41", 2),
         );
         assert!(codex_question_response(
             &pending,

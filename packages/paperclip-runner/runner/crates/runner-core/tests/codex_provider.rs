@@ -715,6 +715,48 @@ fn codex_rejects_a_runtime_response_after_its_turn_terminates() {
 }
 
 #[test]
+fn reused_provider_question_ids_get_unique_controller_identities() {
+    let directory = temporary_directory("reused-question-id");
+    let config = provider_config(&directory, &["--emit-question", "--reuse-question-id"]);
+    let mut provider = CodexProvider::start(&config, None).expect("start Codex provider");
+    provider
+        .start_turn("Ask twice with one provider request id.", &config.cwd)
+        .expect("start provider turn");
+
+    let first_request_id = (0..16)
+        .find_map(|_| match provider.poll().expect("poll first question") {
+            Some(CodexProviderEvent::RuntimeRequest { request_id, .. }) => Some(request_id),
+            _ => None,
+        })
+        .expect("observe first runtime request");
+    let response = json!({
+        "schema": "paperclip.question_response.v1",
+        "answers": {"environment": {"selectedOptionIds": ["option-1"]}}
+    });
+    provider
+        .resolve_runtime_request(&first_request_id, &response)
+        .expect("resolve first runtime request");
+    let second_request_id = (0..16)
+        .find_map(|_| match provider.poll().expect("poll second question") {
+            Some(CodexProviderEvent::RuntimeRequest { request_id, .. }) => Some(request_id),
+            _ => None,
+        })
+        .expect("observe second runtime request");
+
+    assert_ne!(first_request_id, second_request_id);
+    let stale = provider
+        .resolve_runtime_request(&first_request_id, &response)
+        .expect_err("the first controller identity cannot resolve the second question");
+    assert!(stale.to_string().contains("no pending Codex request"));
+    provider
+        .resolve_runtime_request(&second_request_id, &response)
+        .expect("resolve second runtime request");
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_resume_advertises_the_same_authorized_tools() {
     let directory = temporary_directory("dynamic-tool-resume");
     let config = provider_config(&directory, &["--require-dynamic-tool"]);

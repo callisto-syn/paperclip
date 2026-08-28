@@ -336,7 +336,7 @@ fn turn_settlement_releases_completed_call_capacity() {
 }
 
 #[test]
-fn completed_receipts_release_concurrency_without_exhausting_the_turn() {
+fn completed_receipts_are_exact_until_the_controlled_turn_limit() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
     for index in 0..4_096 {
@@ -354,16 +354,18 @@ fn completed_receipts_release_concurrency_without_exhausting_the_turn() {
             .unwrap();
     }
 
-    bridge
+    let error = bridge
         .begin_call(
             "call-after-limit".into(),
             "get_task_context".into(),
             json!({}),
         )
-        .expect("completed calls must not impose an active-turn admission wall");
+        .expect_err("the bounded exact receipt ledger must stop the active turn");
+    assert!(error.is_active_turn_receipt_limit());
     assert!(bridge
         .replay_result("call-0", "get_task_context", &json!({}))
-        .is_err());
+        .unwrap()
+        .is_some());
     assert!(bridge
         .replay_result("call-4095", "get_task_context", &json!({}))
         .unwrap()
@@ -408,7 +410,7 @@ fn turn_settlement_cannot_be_blocked_by_completed_value_pressure() {
 }
 
 #[test]
-fn recovered_turn_compacts_completed_values_to_admit_more_work() {
+fn recovered_turn_preserves_exact_results_at_the_value_boundary() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
     let large = json!({"value": "x".repeat(700 * 1024)});
@@ -432,12 +434,18 @@ fn recovered_turn_compacts_completed_values_to_admit_more_work() {
             .unwrap();
     }
 
-    bridge
+    let error = bridge
         .begin_call("call-next".into(), "get_task_context".into(), large.clone())
-        .expect("completed values compact before they block later calls");
-    assert!(bridge
-        .replay_result("call-0", "get_task_context", &large)
-        .is_err());
+        .expect_err("exact replay values must not be discarded for later work");
+    assert!(error.is_active_turn_receipt_limit());
+    assert_eq!(
+        bridge
+            .replay_result("call-0", "get_task_context", &large)
+            .unwrap()
+            .unwrap()
+            .result,
+        large,
+    );
     bridge
         .apply_result(ToolResult {
             call_id: "call-0".into(),
@@ -445,7 +453,7 @@ fn recovered_turn_compacts_completed_values_to_admit_more_work() {
             result: large.clone(),
             is_error: false,
         })
-        .expect("a matching compacted result receipt remains idempotent");
+        .expect("a matching exact result receipt remains idempotent");
     assert!(bridge
         .apply_result(ToolResult {
             call_id: "call-0".into(),

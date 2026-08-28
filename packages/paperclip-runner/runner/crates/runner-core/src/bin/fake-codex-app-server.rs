@@ -163,16 +163,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let question_before_failed_turn = args
         .iter()
         .any(|value| value == "--question-before-failed-turn");
+    let reuse_question_id = args.iter().any(|value| value == "--reuse-question-id");
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
     let mut state = load_state(&state_path);
     let mut turn_start_count = 0_u64;
+    let mut answered_questions = 0u8;
 
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
         if message.get("method").is_none() && message.get("id") == Some(&json!("runtime-request-1"))
         {
+            if reuse_question_id && answered_questions == 0 {
+                answered_questions = 1;
+                send_question(&state)?;
+                continue;
+            }
             finish_turn(&state_path, &mut state, "completed")?;
             continue;
         }
