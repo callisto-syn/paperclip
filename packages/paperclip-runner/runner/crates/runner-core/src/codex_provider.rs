@@ -165,6 +165,7 @@ pub struct CodexProvider {
     pending_tool_requests: BTreeMap<String, PendingToolRequest>,
     pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
+    runtime_request_scope: [u8; 16],
     expected_shutdown: bool,
     process_generation: u64,
     completed_turn_authority: Option<CompletedTurnAuthority>,
@@ -215,6 +216,7 @@ impl CodexProvider {
             pending_tool_requests: BTreeMap::new(),
             pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
+            runtime_request_scope: new_runtime_request_scope()?,
             expected_shutdown: false,
             process_generation,
             completed_turn_authority: None,
@@ -340,6 +342,7 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completed_turn_authority = None;
+        let runtime_request_scope = new_runtime_request_scope()?;
         let result = self.request(
             "turn/start",
             json!({
@@ -358,6 +361,7 @@ impl CodexProvider {
             .ok_or_else(|| LocalRunnerError::invalid("Codex turn/start omitted turn.id"))?
             .to_owned();
         self.active_provider_turn_id = Some(provider_turn_id);
+        self.runtime_request_scope = runtime_request_scope;
         Ok(result)
     }
 
@@ -599,7 +603,11 @@ impl CodexProvider {
                 }
                 let (provider_request_id, question_set, option_labels) =
                     codex_question_set(&rpc_id, &params)?;
-                let request_id = scoped_runtime_request_id(&active_turn_id, &provider_request_id);
+                let request_id = scoped_runtime_request_id(
+                    &self.runtime_request_scope,
+                    &active_turn_id,
+                    &provider_request_id,
+                );
                 let pending = PendingRuntimeRequest {
                     rpc_id,
                     turn_id: active_turn_id,
@@ -1094,8 +1102,20 @@ fn codex_question_set(
     ))
 }
 
-fn scoped_runtime_request_id(turn_id: &str, provider_request_id: &str) -> String {
+fn new_runtime_request_scope() -> Result<[u8; 16], LocalRunnerError> {
+    let mut scope = [0u8; 16];
+    getrandom::fill(&mut scope).map_err(|error| {
+        LocalRunnerError::invalid(format!(
+            "failed to mint Codex runtime request scope: {error}"
+        ))
+    })?;
+    Ok(scope)
+}
+
+fn scoped_runtime_request_id(scope: &[u8; 16], turn_id: &str, provider_request_id: &str) -> String {
     let mut digest = Sha256::new();
+    digest.update(scope);
+    digest.update([0]);
     digest.update(turn_id.as_bytes());
     digest.update([0]);
     digest.update(provider_request_id.as_bytes());
@@ -1268,9 +1288,18 @@ mod tests {
             }),
         )
         .is_err());
+        let scope = [7u8; 16];
+        assert_eq!(
+            scoped_runtime_request_id(&scope, "turn-1", "41"),
+            scoped_runtime_request_id(&scope, "turn-1", "41"),
+        );
         assert_ne!(
-            scoped_runtime_request_id("turn-1", "41"),
-            scoped_runtime_request_id("turn-2", "41"),
+            scoped_runtime_request_id(&scope, "turn-1", "41"),
+            scoped_runtime_request_id(&scope, "turn-2", "41"),
+        );
+        assert_ne!(
+            scoped_runtime_request_id(&scope, "turn-1", "41"),
+            scoped_runtime_request_id(&[8u8; 16], "turn-1", "41"),
         );
         assert!(codex_question_response(
             &pending,

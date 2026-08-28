@@ -667,6 +667,11 @@ impl CodexCommandExecutor {
             };
             if recovered_turn_ended {
                 state.push_terminal_event(reconciled)?;
+                // A turn that disappeared while runnerd was offline has no
+                // trustworthy success notification to replay. Terminate it
+                // conservatively so the controller cannot wait forever or
+                // mistake an unknown outcome for success.
+                state.extend_terminal_events(terminal_events(state, "turn.failed"))?;
             } else {
                 state.push_event(reconciled)?;
             }

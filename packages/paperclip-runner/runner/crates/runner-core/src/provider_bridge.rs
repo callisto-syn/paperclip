@@ -19,9 +19,10 @@ const MAX_TOOL_VALUE_BYTES: usize = 768 * 1024;
 const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
-// Receipts are turn-scoped and cleared by `settle_turn`. Keep enough exact
-// history to reconcile a very large provider turn while reserving space in the
-// 16 MiB provider-state file for retained values, the catalog, and events.
+// Receipts are turn-scoped and cleared by `settle_turn`. Every newly completed
+// call retains its exact input and result so a provider retry cannot observe a
+// different result. The digest-only maps below are read-only compatibility for
+// state written by an earlier experimental build.
 const MAX_RETAINED_CALL_RECEIPTS: usize = 4_096;
 const MAX_DURABLE_CALL_RECEIPTS: usize = 5_120;
 
@@ -386,7 +387,9 @@ impl ProviderToolBridge {
                     "provider replayed an evicted tool call with different input",
                 ));
             }
-            return Ok(Some(evicted_replay_result(call_id, operation_id)));
+            return Err(ProviderBridgeError::invalid(
+                "legacy tool receipt omitted the exact replay result",
+            ));
         }
         if let Some(compacted) = self.compacted_receipts.get(call_id) {
             if compacted.operation_id != operation_id
@@ -396,7 +399,9 @@ impl ProviderToolBridge {
                     "provider replayed a compacted tool call with different input",
                 ));
             }
-            return Ok(Some(evicted_replay_result(call_id, operation_id)));
+            return Err(ProviderBridgeError::invalid(
+                "legacy tool receipt omitted the exact replay result",
+            ));
         }
         Ok(None)
     }
@@ -463,7 +468,17 @@ impl ProviderToolBridge {
                 "provider tool call limit reached for the active turn",
             ));
         }
-        self.compact_receipts_to_fit()?;
+        if self
+            .pending
+            .len()
+            .saturating_add(self.completed.len())
+            .saturating_add(self.evicted.len())
+            >= MAX_RETAINED_CALL_RECEIPTS
+        {
+            return Err(ProviderBridgeError::invalid(
+                "exact provider tool receipt limit reached for the active turn",
+            ));
+        }
         let input_bytes = json_size(&call.input, "provider tool input")?;
         let pending_bytes = self.pending_value_bytes()?;
         if pending_bytes
@@ -489,7 +504,7 @@ impl ProviderToolBridge {
                 "pending provider tool values exceed the aggregate result reserve",
             ));
         }
-        self.evict_completed_to_fit(input_bytes.saturating_add(result_reserve))?;
+        self.ensure_retained_capacity(input_bytes.saturating_add(result_reserve))?;
         self.pending.insert(call_id, call.clone());
         Ok(call)
     }
@@ -564,7 +579,7 @@ impl ProviderToolBridge {
             }
         }
         let result_bytes = json_size(&result.result, "provider tool result")?;
-        self.evict_completed_to_fit(result_bytes)?;
+        self.ensure_retained_capacity(result_bytes)?;
         let retained_bytes = self.retained_value_bytes()?;
         if retained_bytes
             .checked_add(result_bytes)
@@ -668,73 +683,18 @@ impl ProviderToolBridge {
         })
     }
 
-    fn evict_completed_to_fit(
-        &mut self,
-        additional_bytes: usize,
-    ) -> Result<(), ProviderBridgeError> {
-        loop {
-            let retained_bytes = self.retained_value_bytes()?;
-            if retained_bytes
-                .checked_add(additional_bytes)
-                .is_some_and(|total| total <= MAX_RETAINED_TOOL_VALUE_BYTES)
-            {
-                return Ok(());
-            }
-            let call_id = self.completed.keys().next().cloned().ok_or_else(|| {
-                ProviderBridgeError::invalid(
-                    "retained provider tool values exceed the 8 MiB aggregate limit",
-                )
-            })?;
-            let completed = self
-                .completed
-                .remove(&call_id)
-                .expect("selected completed provider tool call remains present");
-            self.evicted.insert(
-                call_id,
-                EvictedToolCall {
-                    operation_id: completed.call.operation_id,
-                    input_digest: semantic_value_digest(&completed.call.input),
-                    result_digest: semantic_value_digest(&completed.result.result),
-                    is_error: completed.result.is_error,
-                },
-            );
-        }
-    }
-
-    fn compact_receipts_to_fit(&mut self) -> Result<(), ProviderBridgeError> {
-        while self
-            .pending
-            .len()
-            .saturating_add(self.completed.len())
-            .saturating_add(self.evicted.len())
-            >= MAX_RETAINED_CALL_RECEIPTS
+    fn ensure_retained_capacity(&self, additional_bytes: usize) -> Result<(), ProviderBridgeError> {
+        if self
+            .retained_value_bytes()?
+            .checked_add(additional_bytes)
+            .is_some_and(|total| total <= MAX_RETAINED_TOOL_VALUE_BYTES)
         {
-            let call_id = self
-                .evicted
-                .keys()
-                .next()
-                .cloned()
-                .or_else(|| self.completed.keys().next().cloned());
-            let Some(call_id) = call_id else {
-                break;
-            };
-            let compacted = self
-                .evicted
-                .remove(&call_id)
-                .or_else(|| {
-                    self.completed
-                        .remove(&call_id)
-                        .map(|completed| EvictedToolCall {
-                            operation_id: completed.call.operation_id,
-                            input_digest: semantic_value_digest(&completed.call.input),
-                            result_digest: semantic_value_digest(&completed.result.result),
-                            is_error: completed.result.is_error,
-                        })
-                })
-                .expect("selected provider tool receipt remains present");
-            self.compacted_receipts.insert(call_id, compacted);
+            Ok(())
+        } else {
+            Err(ProviderBridgeError::invalid(
+                "retained provider tool values exceed the 8 MiB aggregate limit",
+            ))
         }
-        Ok(())
     }
 
     fn compacted_receipt_contains(&self, call_id: &str) -> bool {
@@ -756,21 +716,6 @@ impl ProviderToolBridge {
             ));
         }
         Ok(())
-    }
-}
-
-fn evicted_replay_result(call_id: &str, operation_id: &str) -> ToolResult {
-    ToolResult {
-        call_id: call_id.to_owned(),
-        operation_id: operation_id.to_owned(),
-        result: serde_json::json!({
-            "error": {
-                "code": "semantic_tool_replay_value_evicted",
-                "message": "The exact prior tool result was evicted after its durable receipt was recorded",
-                "retryable": false,
-            },
-        }),
-        is_error: true,
     }
 }
 
@@ -1003,7 +948,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn compacts_completed_receipts_before_the_exact_limit_blocks_new_calls() {
+    fn retains_exact_completed_results_until_the_turn_receipt_limit() {
         let operation = AuthorizedTool {
             operation_id: "get_task_context".to_owned(),
             version: 1,
@@ -1021,43 +966,13 @@ mod tests {
                 operations: vec![operation],
             })
             .unwrap();
-        for index in 0..MAX_RETAINED_CALL_RECEIPTS {
-            bridge.evicted.insert(
-                format!("call-{index}"),
-                EvictedToolCall {
-                    operation_id: "get_task_context".to_owned(),
-                    input_digest: semantic_value_digest(&json!({})),
-                    result_digest: semantic_value_digest(&json!({"ok": true})),
-                    is_error: false,
-                },
-            );
-        }
-
         bridge
-            .begin_call(
-                "call-new".to_owned(),
-                "get_task_context".to_owned(),
-                json!({}),
-            )
-            .expect("compacted receipts preserve capacity for later calls");
-        assert!(!bridge.compacted_receipts.is_empty());
-        assert!(bridge.compacted_receipts.contains_key("call-0"));
-        assert!(!bridge.compacted_receipts.contains_key("call-new"));
-        assert!(bridge
-            .replay_result("call-0", "get_task_context", &json!({}))
-            .unwrap()
-            .is_some());
-        assert!(bridge
             .begin_call(
                 "call-0".to_owned(),
                 "get_task_context".to_owned(),
                 json!({}),
             )
-            .is_err());
-
-        assert!(bridge
-            .replay_result("call-0", "get_task_context", &json!({"changed": true}))
-            .is_err());
+            .expect("begin the first exact call");
         bridge
             .apply_result(ToolResult {
                 call_id: "call-0".to_owned(),
@@ -1065,7 +980,53 @@ mod tests {
                 result: json!({"ok": true}),
                 is_error: false,
             })
-            .expect("an exact duplicate compacted result remains idempotent");
+            .expect("complete the first exact call");
+        assert_eq!(
+            bridge
+                .replay_result("call-0", "get_task_context", &json!({}))
+                .unwrap()
+                .unwrap()
+                .result,
+            json!({"ok": true})
+        );
+        for index in 1..MAX_RETAINED_CALL_RECEIPTS {
+            let call_id = format!("call-{index}");
+            bridge.completed.insert(
+                call_id.clone(),
+                CompletedToolCall {
+                    call: PendingToolCall {
+                        call_id: call_id.clone(),
+                        operation_id: "get_task_context".to_owned(),
+                        input: json!({}),
+                    },
+                    result: ToolResult {
+                        call_id,
+                        operation_id: "get_task_context".to_owned(),
+                        result: json!({"ok": true}),
+                        is_error: false,
+                    },
+                },
+            );
+        }
+        let error = bridge
+            .begin_call(
+                "call-new".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .expect_err("the active turn cannot discard exact replay results");
+        assert!(error.to_string().contains("exact provider tool receipt"));
+        assert!(bridge.evicted.is_empty());
+        assert!(bridge.compacted_receipts.is_empty());
+
+        bridge
+            .apply_result(ToolResult {
+                call_id: "call-0".to_owned(),
+                operation_id: "get_task_context".to_owned(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .expect("an exact duplicate result remains idempotent");
         assert!(bridge
             .apply_result(ToolResult {
                 call_id: "call-0".to_owned(),
@@ -1074,14 +1035,11 @@ mod tests {
                 is_error: false,
             })
             .is_err());
-
-        let recovered: ProviderToolBridge =
-            serde_json::from_str(&serde_json::to_string(&bridge).unwrap()).unwrap();
-        recovered.validate_recovered().unwrap();
+        bridge.validate_retained_value_bytes().unwrap();
     }
 
     #[test]
-    fn exact_receipts_are_bounded_for_the_active_turn() {
+    fn legacy_digest_only_receipts_are_bounded_and_fail_closed_on_replay() {
         let operation_id = format!("o{}", "p".repeat(159));
         let operation = AuthorizedTool {
             operation_id: operation_id.clone(),
@@ -1122,6 +1080,13 @@ mod tests {
         assert_eq!(bridge.total_call_receipts(), MAX_DURABLE_CALL_RECEIPTS);
         assert!(serde_json::to_vec_pretty(&bridge).unwrap().len() < 4 * 1024 * 1024);
         bridge.validate_recovered().unwrap();
+        assert!(bridge
+            .replay_result(
+                &format!("c{:04}{}", 0, "x".repeat(155)),
+                &operation_id,
+                &json!({}),
+            )
+            .is_err());
 
         bridge.settle_turn("provider_turn_terminated").unwrap();
         bridge

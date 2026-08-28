@@ -908,6 +908,10 @@ fn durable_backend_settles_pending_tools_when_recovery_finds_the_turn_ended() {
             json!({
                 "provider": config,
                 "authorizedTools": task_context_tool_set(),
+                "completionContract": {
+                    "revision": "sha256:offline-recovery-contract",
+                    "criterionIds": ["criterion_offline_recovery"]
+                },
             }),
         ))
         .expect("prepare the recoverable tool bridge");
@@ -957,7 +961,7 @@ fn durable_backend_settles_pending_tools_when_recovery_finds_the_turn_ended() {
                 .into_iter()
                 .map(|event| event.event_type),
         );
-        if observed.iter().any(|event| event == "session.reconciled") {
+        if observed.iter().any(|event| event == "run.terminal") {
             break;
         }
     }
@@ -969,7 +973,12 @@ fn durable_backend_settles_pending_tools_when_recovery_finds_the_turn_ended() {
         .iter()
         .position(|event| event == "session.reconciled")
         .expect("recovery emits a reconciliation event");
+    let terminal = observed
+        .iter()
+        .position(|event| event == "run.terminal")
+        .expect("offline turn recovery terminates the run");
     assert!(semantic_result < reconciled);
+    assert!(reconciled < terminal);
     assert!(recovered
         .execute(&command(
             "late-result",
