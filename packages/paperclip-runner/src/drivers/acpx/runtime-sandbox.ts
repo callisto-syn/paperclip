@@ -202,11 +202,25 @@ async function writePrivateFile(
     await handle.sync();
     await handle.close();
     await rename(temporaryPath, filePath);
+    await syncDirectory(dirname(filePath));
     return;
   } finally {
     bytes.fill(0);
     await handle.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(
+    directory,
+    constants.O_RDONLY | (constants.O_DIRECTORY ?? 0),
+  );
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
 }
 
