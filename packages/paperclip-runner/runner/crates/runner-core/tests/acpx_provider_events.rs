@@ -132,6 +132,22 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         windows_absolute[0].payload["target"],
         serde_json::Value::Null
     );
+
+    let windows_drive_relative = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-3",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"C:Users\\alice\\repo\\src\\main.rs"}]
+        }),
+    );
+    assert_eq!(
+        windows_drive_relative[0].payload["target"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
