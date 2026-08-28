@@ -3327,6 +3327,71 @@ describe("Codex app-server Codex driver", () => {
     await recovered!.close({ reason: "test complete" });
   });
 
+  it("keeps a newer result-bearing recovery turn active beside an older terminal", async () => {
+    const first = new FakeCodexTransport();
+    const second = new FakeCodexTransport();
+    second.readResponse = {
+      thread: {
+        id: "thread-1",
+        sessionId: "provider-session-1",
+        cwd: "/workspace",
+        turns: [
+          { id: "turn-1", status: "completed", items: [] },
+          { id: "turn-2", status: "inProgress", items: [] },
+        ],
+      },
+    };
+    const driver = makeDriver([first, second]);
+    const original = await driver.openSession({
+      runId: "run-result-recovery-loss",
+      normalizedSessionId: "normalized-result-recovery-loss",
+      workingDirectory: "/workspace",
+    });
+    await original.startTurn({ message: { role: "user", text: "Complete." } });
+    expect(await first.invoke({
+      id: "result-before-loss",
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "result-before-loss",
+        tool: "paperclip_finish",
+        arguments: result,
+      },
+    })).toMatchObject({ success: true });
+    first.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "completed", items: [] },
+    });
+    await collectUntilTerminal(original.events());
+    const snapshot = await original.snapshot();
+    if (snapshot.semanticResult === null || snapshot.semanticResult === undefined) {
+      throw new Error("expected persisted semantic result");
+    }
+    snapshot.activeTurnId = "turn-2";
+    snapshot.semanticResult = {
+      ...snapshot.semanticResult,
+      turnId: "turn-2",
+    };
+    await original.close({ reason: "transport lost during recovery turn" });
+
+    const recovery = await driver.recoverSession?.(snapshot);
+    const recovered = recovery?.session;
+    expect(recovered).toBeDefined();
+    const collecting = collectUntilTerminal(recovered!.events());
+    await recovered!.reconcile?.();
+    second.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-2", status: "completed", items: [] },
+    });
+    const events = await collecting;
+    expect(events.at(-1)).toMatchObject({
+      eventType: "turn.completed",
+      turnId: "turn-2",
+    });
+    await recovered!.close({ reason: "test complete" });
+  });
+
   it("fails recovery explicitly when the persisted active turn is missing or replaced", async () => {
     for (const testCase of [
       {

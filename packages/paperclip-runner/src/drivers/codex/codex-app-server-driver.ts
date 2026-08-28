@@ -1024,8 +1024,9 @@ class CodexHarnessSession implements HarnessSession {
     }
     this.#terminal =
       this.#conversationMode === "task"
-      && this.#terminalTurns.size > 0
-      && this.#result !== null;
+      && this.#result !== null
+      && this.#resultTurnId !== null
+      && this.#terminalTurns.has(this.#resultTurnId);
     this.#dispositionOnlyRecoveryAvailable =
       input.resumed &&
       this.#conversationMode === "task" &&
