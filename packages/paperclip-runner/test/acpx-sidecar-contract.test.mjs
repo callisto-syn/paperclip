@@ -49,6 +49,7 @@ test("the ACPX sidecar schema fails closed on drift", () => {
     { ...messages[0], protocolVersion: 3 },
     { ...messages[0], command: "session.destroy" },
     { protocolVersion: 2, id: 1, ok: true, result: {}, error: error() },
+    { protocolVersion: 2, id: 1, ok: true },
     { protocolVersion: 2, id: 1, ok: false },
     { protocolVersion: 2, id: 1, ok: false, result: {}, error: error() },
     { ...messages[2], unexpected: true },
