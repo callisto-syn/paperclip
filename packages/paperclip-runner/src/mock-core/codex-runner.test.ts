@@ -343,6 +343,9 @@ describe("Codex trace conformance", () => {
     });
 
     expect(trace.resultDecision.status).toBe("accepted");
+    expect(trace.events.some((event) => event.eventType === "run.result.accepted")).toBe(false);
+    expect(trace.events.find((event) => event.eventType === "run.result.rejected")?.payload)
+      .toMatchObject({ reasonCode: "provider_turn_did_not_complete" });
     expect(trace.events.find((event) => event.eventType === "run.terminal")?.payload)
       .toMatchObject({
         turnTerminalState: "interrupted",

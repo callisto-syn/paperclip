@@ -448,21 +448,26 @@ export async function runCodexCodexTracer(input: CodexCodexTracerInput): Promise
         message,
       }),
     );
+    const providerTerminal = providerEvents.findLast(isTurnTerminal);
+    if (providerTerminal === undefined) throw new Error("turn terminal invariant failed");
+    const providerRuntime = runtimeTerminal(providerTerminal);
+    const resultAccepted =
+      resultDecision.status === "accepted" && providerRuntime.runTerminalState === "succeeded";
     controlEvents.push(
-      resultDecision.status === "accepted"
+      resultAccepted
         ? controlEvent("run.result.accepted", {
             contractRevision: input.taskEnvelope.completionContract.revision,
             result: resultDecision.result,
           })
         : controlEvent("run.result.rejected", {
-            reasonCode: "semantic_result_rejected",
-            issues: resultDecision.issues,
+            reasonCode:
+              resultDecision.status === "rejected"
+                ? "semantic_result_rejected"
+                : "provider_turn_did_not_complete",
+            issues: resultDecision.status === "rejected" ? resultDecision.issues : [],
             recovery: { required: true, recoverable: true },
           }),
     );
-    const providerTerminal = providerEvents.findLast(isTurnTerminal);
-    if (providerTerminal === undefined) throw new Error("turn terminal invariant failed");
-    const providerRuntime = runtimeTerminal(providerTerminal);
     // A provider may complete its turn after proposing a result that the
     // controller cannot accept. Preserve the provider's turn fact, but never
     // promote a rejected semantic result to a successful run.
