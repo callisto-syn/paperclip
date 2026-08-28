@@ -78,7 +78,7 @@ interface CodexAcpxHost {
     input: Parameters<AcpxRuntimeHost["startTurn"]>[0],
   ): AcpxRuntimeTurn;
   interruptActiveTurn(reason: string): Promise<void>;
-  close(input: { reason: string }): Promise<void>;
+  close(input: { reason: string; retryPending?: boolean }): Promise<void>;
 }
 
 export interface CodexAcpxDriverDependencies {
@@ -243,6 +243,7 @@ class CodexAcpxSession implements HarnessSession {
   #activePump: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #hostClosePromise: Promise<void> | null = null;
+  #hostCloseAttempts = 0;
   #hostCleanupRecoveryPromise: Promise<void> | null = null;
   #hostClosed = false;
   #transcriptBytes = 0;
@@ -545,7 +546,11 @@ class CodexAcpxSession implements HarnessSession {
   }
 
   #startHostClose(input: { reason: string }): Promise<void> {
-    const closePromise = this.#host.close(input).then(() => {
+    const retryPending = this.#hostCloseAttempts > 0;
+    this.#hostCloseAttempts += 1;
+    const closePromise = this.#host.close(
+      retryPending ? { ...input, retryPending: true } : input,
+    ).then(() => {
       this.#hostClosed = true;
     });
     this.#hostClosePromise = closePromise;

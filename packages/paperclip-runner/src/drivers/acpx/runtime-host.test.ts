@@ -302,6 +302,35 @@ describe("ACPX runtime host", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("starts a fresh cleanup attempt when the original close never settles", async () => {
+    const fixture = await hostFixture();
+    const firstClose = new Promise<void>(() => undefined);
+    const runtime = runtimePort({
+      onClose: vi.fn()
+        .mockImplementationOnce(() => firstClose)
+        .mockResolvedValueOnce(undefined),
+    });
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-all",
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      },
+      fixture.dependencies({ openRuntime: async () => runtime }),
+    );
+
+    void host.close({ reason: "first close stalls" });
+    await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledOnce());
+    await expect(host.close({
+      reason: "bounded owner retries",
+      retryPending: true,
+    })).resolves.toBeUndefined();
+    expect(runtime.close).toHaveBeenCalledTimes(2);
+    expect(fixture.commandClose).toHaveBeenCalledOnce();
+  });
+
   it("admits one bounded turn and cancels it before shutdown", async () => {
     const fixture = await hostFixture();
     const turn = runtimeTurn();

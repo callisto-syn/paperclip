@@ -317,9 +317,11 @@ export class AcpxRuntimeHost {
     if (cancellationError) throw cancellationError;
   }
 
-  async close(input: { reason: string }): Promise<void> {
+  async close(input: { reason: string; retryPending?: boolean }): Promise<void> {
     if (this.#closed) return;
-    if (this.#closePromise) return await this.#closePromise;
+    if (this.#closePromise && input.retryPending !== true) {
+      return await this.#closePromise;
+    }
     this.#closingStarted = true;
     const closePromise = this.#close(boundedReason(input.reason));
     this.#closePromise = closePromise;
