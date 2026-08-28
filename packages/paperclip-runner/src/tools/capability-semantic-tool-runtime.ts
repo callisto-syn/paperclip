@@ -205,7 +205,6 @@ export class CapabilitySemanticToolRuntime {
           );
           executionPromise.then((completed) => {
             newRecord.completed = structuredClone(completed);
-            this.#persistState();
           }).catch(() => undefined);
           executionPromise.catch(() => {
             if (

@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import type {
   CapabilityFixtureApproval,
@@ -395,6 +395,27 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("persists extension completion with its inspectable result atomically", async () => {
+    const { adapter, runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+    });
+    const saveRuntime = vi.spyOn(adapter, "saveSemanticToolRuntime");
+
+    const result = await runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-atomic", body: "Case body" },
+      idempotencyKey: "upsert-case-atomic",
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(saveRuntime).toHaveBeenCalledOnce();
+    const snapshot = saveRuntime.mock.calls[0]![1];
+    expect(snapshot.extensions).toHaveLength(1);
+    expect(snapshot.operationResults[snapshot.extensions[0]!.resultId]).toEqual(
+      snapshot.extensions[0]!.execution.value,
+    );
+  });
+
   it("rejects incomplete or malformed restored extension executions", async () => {
     const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["cases:write"],
@@ -425,6 +446,31 @@ describe("Capability exposure and authorization", () => {
         CapabilityMockControlPlaneAdapter.restore(JSON.stringify(snapshot)),
       ).toThrow("semantic tool runtime for run-tools is invalid");
     }
+  });
+
+  it("rejects restored extension receipts that disagree with inspection", async () => {
+    const { adapter, runtime } = await runtimeFor({
+      scenarioGrants: ["cases:write"],
+    });
+    const result = await runtime.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-1", body: "Case body" },
+      idempotencyKey: "upsert-case-1",
+    });
+    if (!result.ok) throw new Error("expected extension success");
+
+    const snapshot = JSON.parse(adapter.serialize()) as {
+      semanticToolRuntimes: Record<
+        string,
+        { operationResults: Record<string, unknown> }
+      >;
+    };
+    snapshot.semanticToolRuntimes[OPEN.identity.runId]!
+      .operationResults[result.operationResultId] = { upserted: false };
+
+    expect(() =>
+      CapabilityMockControlPlaneAdapter.restore(JSON.stringify(snapshot)),
+    ).toThrow("semantic tool runtime for run-tools is invalid");
   });
 
   it("rejects a restored result sequence that can reuse a prior result id", async () => {
