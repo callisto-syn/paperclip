@@ -276,6 +276,7 @@ impl CodexProvider {
                 "Codex turn text is empty or exceeds the 1 MiB limit",
             ));
         }
+        self.expected_shutdown = false;
         let result = self.request(
             "turn/start",
             json!({
@@ -531,6 +532,7 @@ impl CodexProvider {
             )?;
             if method == "turn/completed" {
                 self.active_provider_turn_id = None;
+                self.expected_shutdown = true;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the

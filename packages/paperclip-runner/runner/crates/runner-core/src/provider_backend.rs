@@ -822,7 +822,11 @@ impl CodexCommandExecutor {
                 }
                 CodexProviderEvent::Exited { exit_code, success } => {
                     self.provider = None;
-                    if let Some(state) = self.state.as_mut() {
+                    if !success {
+                        let state = self
+                            .state
+                            .as_mut()
+                            .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
                         state.push_event(NormalizedProviderEvent {
                             event_type: "session.failed".to_owned(),

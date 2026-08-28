@@ -320,6 +320,65 @@ fn codex_completion_survives_failed_pending_request_cancellation() {
 }
 
 #[test]
+fn clean_provider_exit_does_not_refail_a_completed_turn() {
+    let directory = temporary_directory("completion-then-clean-exit");
+    let config = provider_config(&directory, &["--exit-after-turn-completion"]);
+    let mut executor = CodexCommandExecutor::new(&directory);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .expect("prepare Codex provider");
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open Codex session");
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Complete before exiting cleanly."}),
+        ))
+        .expect("start provider turn");
+
+    let mut event_types = Vec::new();
+    for _ in 0..32 {
+        event_types.extend(
+            poll_and_ack(&mut executor)
+                .expect("poll completion and clean exit")
+                .into_iter()
+                .map(|event| event.event_type),
+        );
+        if event_types.iter().any(|event| event == "turn.completed") {
+            break;
+        }
+    }
+    for _ in 0..8 {
+        event_types.extend(
+            poll_and_ack(&mut executor)
+                .expect("poll after provider exit")
+                .into_iter()
+                .map(|event| event.event_type),
+        );
+    }
+
+    assert!(event_types.iter().any(|event| event == "turn.completed"));
+    assert!(!event_types.iter().any(|event| event == "session.failed"));
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(directory.join("codex-provider-state.json"))
+            .expect("read provider state after clean exit"),
+    )
+    .expect("parse provider state after clean exit");
+    assert_eq!(persisted["lifecycle"], "session_open");
+    assert!(persisted["activeProviderTurnId"].is_null());
+
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_rejects_a_tool_call_that_was_not_advertised() {
     let directory = temporary_directory("unauthorized-tool");
     let config = provider_config(&directory, &["--emit-tool-call"]);

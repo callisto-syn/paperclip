@@ -108,6 +108,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let require_dynamic_tool = args.iter().any(|value| value == "--require-dynamic-tool");
     let hold_turn = args.iter().any(|value| value == "--hold-turn");
     let exit_after_turn_start = args.iter().any(|value| value == "--exit-after-turn-start");
+    let exit_after_turn_completion = args
+        .iter()
+        .any(|value| value == "--exit-after-turn-completion");
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
@@ -245,6 +248,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
+                    if exit_after_turn_completion {
+                        return Ok(());
+                    }
                 }
             }
             "turn/steer" => send(json!({"id": id, "result": {"accepted": true}}))?,
