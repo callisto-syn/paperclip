@@ -336,10 +336,10 @@ fn turn_settlement_releases_completed_call_capacity() {
 }
 
 #[test]
-fn completed_receipts_do_not_consume_the_concurrent_call_budget() {
+fn completed_receipts_release_concurrency_but_keep_an_exact_turn_budget() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
-    for index in 0..=4_096 {
+    for index in 0..4_096 {
         let call_id = format!("call-{index}");
         bridge
             .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
@@ -353,6 +353,23 @@ fn completed_receipts_do_not_consume_the_concurrent_call_budget() {
             })
             .unwrap();
     }
+
+    let error = bridge
+        .begin_call(
+            "call-after-limit".into(),
+            "get_task_context".into(),
+            json!({}),
+        )
+        .expect_err("completed calls retain exact replay results until settlement");
+    assert!(error.to_string().contains("exact provider tool receipt"));
+    assert_eq!(
+        bridge
+            .replay_result("call-0", "get_task_context", &json!({}))
+            .unwrap()
+            .unwrap()
+            .result,
+        json!({"ok": true}),
+    );
 
     let recovered: ProviderToolBridge =
         serde_json::from_str(&serde_json::to_string(&bridge).unwrap()).unwrap();
@@ -393,7 +410,7 @@ fn turn_settlement_cannot_be_blocked_by_completed_value_pressure() {
 }
 
 #[test]
-fn recovered_turn_compacts_exact_values_without_reexecuting_evicted_calls() {
+fn recovered_turn_retains_exact_values_and_rejects_value_pressure() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
     let large = json!({"value": "x".repeat(700 * 1024)});
@@ -417,18 +434,16 @@ fn recovered_turn_compacts_exact_values_without_reexecuting_evicted_calls() {
             .unwrap();
     }
 
-    bridge
+    let error = bridge
         .begin_call("call-next".into(), "get_task_context".into(), large.clone())
-        .expect("completed values are compacted to admit recovered-turn work");
+        .expect_err("exact prior results cannot be discarded to admit more work");
+    assert!(error.to_string().contains("8 MiB aggregate limit"));
     let replay = bridge
         .replay_result("call-0", "get_task_context", &large)
         .unwrap()
-        .expect("an evicted call keeps a no-reexecution receipt");
-    assert!(replay.is_error);
-    assert_eq!(
-        replay.result["error"]["code"],
-        "semantic_tool_replay_value_evicted"
-    );
+        .expect("the exact completed result remains replayable");
+    assert!(!replay.is_error);
+    assert_eq!(replay.result, large);
     bridge
         .apply_result(ToolResult {
             call_id: "call-0".into(),
