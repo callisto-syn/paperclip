@@ -19,7 +19,7 @@ use crate::durable::{
 };
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, semantic_value_digest, AuthorizedToolSet, PendingToolCall,
-    ProviderToolBridge, ToolResult, MAX_RETAINED_CALLS, TOOL_SET_SCHEMA,
+    ProviderToolBridge, ToolResult, MAX_PENDING_CALLS, TOOL_SET_SCHEMA,
 };
 use crate::provider_events::{normalize_codex_notification, NormalizedProviderEvent};
 
@@ -30,8 +30,8 @@ const MAX_EVENTS_PER_POLL: usize = 128;
 // One accepted semantic call can produce an input and a result event. Normal
 // traffic cannot consume the additional capacity required to settle every
 // retained call and record the provider plus run terminal events.
-const MAX_REGULAR_QUEUED_PROVIDER_EVENTS: usize = 2 * MAX_RETAINED_CALLS + 3;
-const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_RETAINED_CALLS + 3;
+const MAX_REGULAR_QUEUED_PROVIDER_EVENTS: usize = 2 * MAX_PENDING_CALLS + 3;
+const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_PENDING_CALLS + 3;
 const MAX_QUEUED_PROVIDER_EVENTS: usize =
     MAX_REGULAR_QUEUED_PROVIDER_EVENTS + MAX_TERMINAL_SETTLEMENT_EVENTS;
 
@@ -1728,7 +1728,7 @@ mod tests {
         );
         assert!(state.push_event(ordinary_event()).is_err());
 
-        for index in 0..MAX_RETAINED_CALLS {
+        for index in 0..MAX_PENDING_CALLS {
             state
                 .push_terminal_event(semantic_result_event(
                     &identity,

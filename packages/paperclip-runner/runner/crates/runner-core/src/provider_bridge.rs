@@ -18,7 +18,8 @@ const MAX_TOOL_SET_BYTES: usize = 768 * 1024;
 const MAX_TOOL_VALUE_BYTES: usize = 768 * 1024;
 const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_RETAINED_CALLS: usize = 4_096;
+pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
+const MAX_RETAINED_CALL_RECEIPTS: usize = 32_768;
 const MAX_SETTLED_CALL_IDS: usize = 65_536;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -263,12 +264,13 @@ impl ProviderToolBridge {
                 "recovered provider tool bridge changed its authorized catalog",
             ));
         }
-        if self
-            .pending
-            .len()
-            .saturating_add(self.completed.len())
-            .saturating_add(self.evicted.len())
-            > MAX_RETAINED_CALLS
+        if self.pending.len() > MAX_PENDING_CALLS
+            || self
+                .pending
+                .len()
+                .saturating_add(self.completed.len())
+                .saturating_add(self.evicted.len())
+                > MAX_RETAINED_CALL_RECEIPTS
         {
             return Err(ProviderBridgeError::invalid(
                 "recovered provider tool bridge exceeds its call limit",
@@ -452,12 +454,17 @@ impl ProviderToolBridge {
                 "provider reused a completed tool call id",
             ));
         }
+        if self.pending.len() >= MAX_PENDING_CALLS {
+            return Err(ProviderBridgeError::invalid(
+                "concurrent provider tool call limit reached",
+            ));
+        }
         if self
             .pending
             .len()
             .saturating_add(self.completed.len())
             .saturating_add(self.evicted.len())
-            >= MAX_RETAINED_CALLS
+            >= MAX_RETAINED_CALL_RECEIPTS
         {
             return Err(ProviderBridgeError::invalid(
                 "provider tool receipt limit reached for the active turn",

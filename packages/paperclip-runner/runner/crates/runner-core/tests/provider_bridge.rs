@@ -336,6 +336,30 @@ fn turn_settlement_releases_completed_call_capacity() {
 }
 
 #[test]
+fn completed_receipts_do_not_consume_the_concurrent_call_budget() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    for index in 0..=4_096 {
+        let call_id = format!("call-{index}");
+        bridge
+            .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
+            .expect("a completed call must release concurrent capacity");
+        bridge
+            .apply_result(ToolResult {
+                call_id,
+                operation_id: "get_task_context".into(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .unwrap();
+    }
+
+    let recovered: ProviderToolBridge =
+        serde_json::from_str(&serde_json::to_string(&bridge).unwrap()).unwrap();
+    recovered.validate_recovered().unwrap();
+}
+
+#[test]
 fn turn_settlement_cannot_be_blocked_by_completed_value_pressure() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
