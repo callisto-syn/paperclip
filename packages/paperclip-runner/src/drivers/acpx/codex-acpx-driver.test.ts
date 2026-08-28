@@ -744,6 +744,68 @@ describe("Codex ACPX harness driver", () => {
     await recovery.session!.close({ reason: "recovery verified" });
   });
 
+  it("transfers an identical semantic retry from a failed turn to its successful turn", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-semantic-retry",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+    const bridgeHandler = fixture.hostOptions!.semanticTools!.handler;
+
+    const firstTerminal = collectUntil(session.events(), "turn.failed");
+    const first = await session.startTurn({
+      message: { role: "user", text: "Attempt the task." },
+    });
+    await bridgeHandler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-failed-attempt",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    });
+    fixture.finishTurn({
+      status: "failed",
+      error: { code: "provider_retry", message: "Retry the turn", retryable: true },
+    });
+    await firstTerminal;
+
+    const secondTerminal = collectUntil(session.events(), "turn.completed");
+    const second = await session.startTurn({
+      message: { role: "user", text: "Record the successful retry." },
+    });
+    await bridgeHandler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-successful-retry",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await secondTerminal;
+
+    const snapshot = await session.snapshot();
+    expect(snapshot.semanticResult).toMatchObject({
+      callId: "finish-successful-retry",
+      turnId: second.turnId,
+    });
+    expect(snapshot.semanticResult?.turnId).not.toBe(first.turnId);
+    expect(snapshot.terminalTurns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ turnId: first.turnId }),
+      expect.objectContaining({ turnId: second.turnId }),
+    ]));
+    const successfulTerminal = snapshot.terminalTurns?.find(
+      (terminal) => terminal.turnId === second.turnId,
+    );
+    expect(JSON.parse(successfulTerminal!.fingerprint)).toEqual({
+      status: "completed",
+      semanticResult: snapshot.semanticResult!.fingerprint,
+    });
+    await session.close({ reason: "simulate successful retry recovery" });
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toMatchObject({
+      recovered: true,
+    });
+  });
+
   it("clears a checkpoint race when the active turn is already terminal", async () => {
     const fixture = driverFixture();
     const session = await fixture.driver.openSession({
@@ -940,39 +1002,43 @@ function driverFixture(
   hostOptions: OpenAcpxRuntimeHostOptions | null;
   finishTurn(result: Awaited<AcpxRuntimeTurn["result"]>): void;
 } {
-  const result = deferred<Awaited<AcpxRuntimeTurn["result"]>>();
-  const turn: AcpxRuntimeTurn = {
-    requestId: "provider-turn-1",
-    promptStarted: Promise.resolve(),
-    events: {
-      async *[Symbol.asyncIterator]() {
-        yield* fixtureOptions.runtimeEvents ?? [
-          {
-            type: "text_delta" as const,
-            text: "Task complete.",
-            stream: "output" as const,
-          },
-          {
-            type: "tool_call" as const,
-            toolCallId: "provider-tool-1",
-            title: "Read",
-            kind: "read" as const,
-            status: "pending",
-            tag: "tool_call",
-            text: "Reading",
-          },
-        ];
-        if (fixtureOptions.runtimeEventFailure) {
-          await fixtureOptions.runtimeEventFailure;
-        }
+  let turnCount = 0;
+  let activeResult: ReturnType<typeof deferred<Awaited<AcpxRuntimeTurn["result"]>>> | null = null;
+  const createTurn = (): AcpxRuntimeTurn => {
+    activeResult = deferred<Awaited<AcpxRuntimeTurn["result"]>>();
+    return {
+      requestId: `provider-turn-${++turnCount}`,
+      promptStarted: Promise.resolve(),
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield* fixtureOptions.runtimeEvents ?? [
+            {
+              type: "text_delta" as const,
+              text: "Task complete.",
+              stream: "output" as const,
+            },
+            {
+              type: "tool_call" as const,
+              toolCallId: "provider-tool-1",
+              title: "Read",
+              kind: "read" as const,
+              status: "pending",
+              tag: "tool_call",
+              text: "Reading",
+            },
+          ];
+          if (fixtureOptions.runtimeEventFailure) {
+            await fixtureOptions.runtimeEventFailure;
+          }
+        },
       },
-    },
-    result: result.promise,
-    cancel: vi.fn(async () => undefined),
-    closeStream: vi.fn(async () => undefined),
+      result: activeResult.promise,
+      cancel: vi.fn(async () => undefined),
+      closeStream: vi.fn(async () => undefined),
+    };
   };
-  const host = fakeHost(turn, () =>
-    result.resolve({ status: "cancelled", stopReason: "session_closed" }),
+  const host = fakeHost(createTurn, () =>
+    activeResult?.resolve({ status: "cancelled", stopReason: "session_closed" }),
   );
   let hostOptions: OpenAcpxRuntimeHostOptions | null = null;
   const openHost = vi.fn(async (options: OpenAcpxRuntimeHostOptions) => {
@@ -1010,11 +1076,14 @@ function driverFixture(
     get hostOptions() {
       return hostOptions;
     },
-    finishTurn: result.resolve,
+    finishTurn(result) {
+      if (!activeResult) throw new Error("No active fixture turn");
+      activeResult.resolve(result);
+    },
   };
 }
 
-function fakeHost(turn: AcpxRuntimeTurn, onClose: () => void) {
+function fakeHost(createTurn: () => AcpxRuntimeTurn, onClose: () => void) {
   return {
     identity: () => ({
       schema: "paperclip.runner.acpx-identity.v1" as const,
@@ -1046,7 +1115,7 @@ function fakeHost(turn: AcpxRuntimeTurn, onClose: () => void) {
         availableModelIds: ["gpt-5.6-sol"],
       },
     })),
-    startTurn: vi.fn(() => turn),
+    startTurn: vi.fn(createTurn),
     interruptActiveTurn: vi.fn(async () => undefined),
     close: vi.fn(async () => {
       onClose();

@@ -647,7 +647,16 @@ class CodexAcpxSession implements HarnessSession {
       ) {
         throw new Error("A different semantic result is already committed");
       }
-      if (this.#semanticFingerprint === null) {
+      const ownerTerminal = this.#semanticTurnId === null
+        ? null
+        : this.#terminalTurns.get(this.#semanticTurnId) ?? null;
+      const ownerCompletedWithResult = ownerTerminal !== null &&
+        terminalFingerprintOwnsResult(ownerTerminal, fingerprint);
+      const claimsUnsettledRetry =
+        this.#semanticFingerprint === fingerprint &&
+        this.#semanticTurnId !== turnId &&
+        !ownerCompletedWithResult;
+      if (this.#semanticFingerprint === null || claimsUnsettledRetry) {
         if (!this.#emit("run.result.proposed", validation.result, {
           turnId,
           itemId: call.callId,
@@ -1127,6 +1136,23 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value) ?? "undefined";
+}
+
+function terminalFingerprintOwnsResult(
+  terminalFingerprint: string,
+  semanticFingerprint: string,
+): boolean {
+  try {
+    const terminal = JSON.parse(terminalFingerprint) as unknown;
+    if (typeof terminal !== "object" || terminal === null || Array.isArray(terminal)) {
+      return false;
+    }
+    const record = terminal as Record<string, unknown>;
+    return record.status === "completed" &&
+      record.semanticResult === semanticFingerprint;
+  } catch {
+    return false;
+  }
 }
 
 function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
