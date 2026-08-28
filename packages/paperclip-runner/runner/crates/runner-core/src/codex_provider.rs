@@ -184,20 +184,7 @@ impl CodexProvider {
         Self::start_with_tools_for_generation(config, authorized_tools, resume_thread_id, 1)
     }
 
-    pub(crate) fn start_for_generation(
-        config: &CodexProviderConfig,
-        resume_thread_id: Option<&str>,
-        process_generation: u64,
-    ) -> Result<Self, LocalRunnerError> {
-        Self::start_with_tools_for_generation(
-            config,
-            std::iter::empty(),
-            resume_thread_id,
-            process_generation,
-        )
-    }
-
-    fn start_with_tools_for_generation(
+    pub(crate) fn start_with_tools_for_generation(
         config: &CodexProviderConfig,
         authorized_tools: impl IntoIterator<Item = AuthorizedTool>,
         resume_thread_id: Option<&str>,
@@ -645,19 +632,28 @@ impl CodexProvider {
                 self.active_provider_turn_id.as_deref(),
                 &params,
             )?;
-            if method == "turn/completed" {
-                let provider_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
-                    LocalRunnerError::invalid(
-                        "Codex completion arrived outside an active provider turn",
-                    )
-                })?;
+            if matches!(
+                method,
+                "turn/completed" | "turn/failed" | "turn/cancelled" | "turn/interrupted"
+            ) {
+                let completed_turn_authority = if method == "turn/completed" {
+                    let provider_turn_id =
+                        self.active_provider_turn_id.clone().ok_or_else(|| {
+                            LocalRunnerError::invalid(
+                                "Codex completion arrived outside an active provider turn",
+                            )
+                        })?;
+                    Some(CompletedTurnAuthority {
+                        process_generation: self.process_generation,
+                        provider_turn_id,
+                        observed_idle: false,
+                    })
+                } else {
+                    None
+                };
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
-                self.completed_turn_authority = Some(CompletedTurnAuthority {
-                    process_generation: self.process_generation,
-                    provider_turn_id,
-                    observed_idle: false,
-                });
+                self.completed_turn_authority = completed_turn_authority;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
@@ -891,7 +887,14 @@ fn codex_dynamic_tools(
 
 fn bounded_identifier(value: Option<&str>, label: &str) -> Result<String, LocalRunnerError> {
     let value = value.ok_or_else(|| LocalRunnerError::invalid(format!("{label} is required")))?;
-    if value.is_empty() || value.len() > 160 || value.chars().any(char::is_control) {
+    let mut characters = value.chars();
+    let valid_first = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric());
+    let valid_rest = characters.all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
+    });
+    if value.len() > 160 || !valid_first || !valid_rest {
         return Err(LocalRunnerError::invalid(format!("{label} is invalid")));
     }
     Ok(value.to_owned())

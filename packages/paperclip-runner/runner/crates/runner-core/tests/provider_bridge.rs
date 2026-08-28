@@ -74,6 +74,13 @@ fn rejects_unknown_tools_and_conflicting_duplicate_results() {
     bridge.apply_result(result.clone()).unwrap();
     bridge.apply_result(result).unwrap();
     assert!(bridge
+        .replay_result("call-1", "get_task_context", &json!({}))
+        .unwrap()
+        .is_some());
+    assert!(bridge
+        .replay_result("call-1", "get_task_context", &json!({"changed": true}))
+        .is_err());
+    assert!(bridge
         .apply_result(ToolResult {
             call_id: "call-1".to_owned(),
             operation_id: "get_task_context".to_owned(),
@@ -109,6 +116,29 @@ fn catalog_digest_matches_the_typescript_canonical_json_contract() {
 }
 
 #[test]
+fn catalog_digest_normalizes_json_numbers_like_javascript() {
+    let operation = AuthorizedTool {
+        operation_id: "get_task_context".into(),
+        version: 1,
+        description: "Read the active task context.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "number", "default": 1.0 },
+                "epsilon": { "type": "number", "default": 1e-6 },
+            },
+        }),
+        response_schema: json!({ "type": "object" }),
+    };
+    let digest = authorized_tool_catalog_digest(&[operation]).unwrap();
+
+    assert_eq!(
+        digest,
+        "sha256:1c93693d9b5b48b46c83cd1c11d1ea329774f1b9b0ae741197cb2b8e992c4b8d"
+    );
+}
+
+#[test]
 fn validates_the_operation_value_inside_a_semantic_dispatch_envelope() {
     let mut set = tools("sha256:catalog-a");
     set.operations[0].response_schema = json!({
@@ -120,7 +150,7 @@ fn validates_the_operation_value_inside_a_semantic_dispatch_envelope() {
     let mut bridge = ProviderToolBridge::default();
     set.catalog_digest = digest('a');
     set.catalog_digest = authorized_tool_catalog_digest(&set.operations).unwrap();
-    bridge.prepare(set).unwrap();
+    bridge.prepare(set.clone()).unwrap();
     bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .unwrap();
@@ -139,6 +169,25 @@ fn validates_the_operation_value_inside_a_semantic_dispatch_envelope() {
         })
         .unwrap();
     assert_eq!(bridge.pending_calls().count(), 0);
+
+    let mut second = ProviderToolBridge::default();
+    second.prepare(set).unwrap();
+    second
+        .begin_call("call-2".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+    second
+        .apply_result(ToolResult {
+            call_id: "call-2".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({
+                "ok": true,
+                "operationId": "get_task_context",
+                "callId": "call-2",
+                "value": { "value": "accepted" }
+            }),
+            is_error: false,
+        })
+        .unwrap();
 }
 
 #[test]
@@ -157,6 +206,24 @@ fn rejects_noncanonical_digests_and_oversized_contract_values() {
             "call-large".into(),
             "get_task_context".into(),
             json!({ "value": "x".repeat(1024 * 1024) }),
+        )
+        .is_err());
+
+    let retained = json!({"value": "x".repeat(700 * 1024)});
+    for index in 0..5 {
+        bridge
+            .begin_call(
+                format!("call-{index}"),
+                "get_task_context".into(),
+                retained.clone(),
+            )
+            .unwrap();
+    }
+    assert!(bridge
+        .begin_call(
+            "call-over-aggregate-limit".into(),
+            "get_task_context".into(),
+            retained,
         )
         .is_err());
 }
@@ -203,10 +270,161 @@ fn recovery_preserves_completed_call_replay_identities() {
 
     let encoded = serde_json::to_string(&bridge).unwrap();
     let mut recovered: ProviderToolBridge = serde_json::from_str(&encoded).unwrap();
+    recovered.validate_recovered().unwrap();
     recovered.attach_existing_run().unwrap();
     assert!(recovered
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .is_err());
+}
+
+#[test]
+fn recovered_bridge_rejects_tampered_authorization_state() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    let mut encoded = serde_json::to_value(&bridge).unwrap();
+    encoded["authorized"]["get_task_context"]["description"] = json!("Tampered");
+    let recovered: ProviderToolBridge = serde_json::from_value(encoded).unwrap();
+    assert!(recovered.validate_recovered().is_err());
+}
+
+#[test]
+fn cancellation_completes_pending_calls_and_rejects_late_results() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+    let cancelled = bridge
+        .cancel_pending_calls("provider_turn_stopped")
+        .unwrap();
+    assert_eq!(cancelled.len(), 1);
+    assert!(cancelled[0].is_error);
+    assert_eq!(bridge.pending_calls().count(), 0);
+    assert!(bridge
+        .apply_result(ToolResult {
+            call_id: "call-1".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .is_err());
+}
+
+#[test]
+fn turn_settlement_releases_completed_call_capacity() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+    bridge
+        .apply_result(ToolResult {
+            call_id: "call-1".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .unwrap();
+
+    assert!(bridge
+        .settle_turn("provider_turn_terminated")
+        .unwrap()
+        .is_empty());
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .expect("a new turn can reuse a provider-scoped call id");
+}
+
+#[test]
+fn turn_settlement_cannot_be_blocked_by_completed_value_pressure() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    let large = json!({"value": "x".repeat(700 * 1024)});
+    for index in 0..5 {
+        bridge
+            .begin_call(
+                format!("call-{index}"),
+                "get_task_context".into(),
+                large.clone(),
+            )
+            .unwrap();
+    }
+    for index in 0..4 {
+        bridge
+            .apply_result(ToolResult {
+                call_id: format!("call-{index}"),
+                operation_id: "get_task_context".into(),
+                result: large.clone(),
+                is_error: false,
+            })
+            .unwrap();
+    }
+
+    let settled = bridge.settle_turn("provider_turn_terminated").unwrap();
+    assert_eq!(settled.len(), 1);
+    assert!(settled[0].is_error);
+    bridge
+        .begin_call("call-0".into(), "get_task_context".into(), json!({}))
+        .expect("settlement releases all prior turn retention");
+}
+
+#[test]
+fn recovered_turn_compacts_exact_values_without_reexecuting_evicted_calls() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    let large = json!({"value": "x".repeat(700 * 1024)});
+    for index in 0..5 {
+        bridge
+            .begin_call(
+                format!("call-{index}"),
+                "get_task_context".into(),
+                large.clone(),
+            )
+            .unwrap();
+    }
+    for index in 0..5 {
+        bridge
+            .apply_result(ToolResult {
+                call_id: format!("call-{index}"),
+                operation_id: "get_task_context".into(),
+                result: large.clone(),
+                is_error: false,
+            })
+            .unwrap();
+    }
+
+    bridge
+        .begin_call("call-next".into(), "get_task_context".into(), large.clone())
+        .expect("completed values are compacted to admit recovered-turn work");
+    let replay = bridge
+        .replay_result("call-0", "get_task_context", &large)
+        .unwrap()
+        .expect("an evicted call keeps a no-reexecution receipt");
+    assert!(replay.is_error);
+    assert_eq!(
+        replay.result["error"]["code"],
+        "semantic_tool_replay_value_evicted"
+    );
+    bridge
+        .apply_result(ToolResult {
+            call_id: "call-0".into(),
+            operation_id: "get_task_context".into(),
+            result: large.clone(),
+            is_error: false,
+        })
+        .expect("an exact delayed result receipt remains idempotent");
+    assert!(bridge
+        .apply_result(ToolResult {
+            call_id: "call-0".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({"value": "changed"}),
+            is_error: false,
+        })
+        .is_err());
+
+    let recovered: ProviderToolBridge =
+        serde_json::from_str(&serde_json::to_string(&bridge).unwrap()).unwrap();
+    recovered.validate_recovered().unwrap();
 }
 
 #[test]

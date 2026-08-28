@@ -5,9 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use paperclip_runner_core::codex_provider::{
     CodexProvider, CodexProviderConfig, CodexProviderEvent,
 };
-use paperclip_runner_core::durable::{Command, CommandExecutor, DurableRunnerError, PolledEvent};
+use paperclip_runner_core::durable::{
+    Command, CommandExecutor, DurableRunnerConfig, DurableRunnerError, PolledEvent,
+};
 use paperclip_runner_core::provider_backend::CodexCommandExecutor;
-use paperclip_runner_core::provider_bridge::{AuthorizedTool, ToolResult};
+use paperclip_runner_core::provider_bridge::{
+    authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
+};
 use paperclip_runner_core::provider_events::normalize_codex_notification;
 use serde_json::{json, Value};
 
@@ -59,6 +63,36 @@ fn task_context_tool() -> AuthorizedTool {
         description: "Read task context.".to_owned(),
         input_schema: json!({"type": "object"}),
         response_schema: json!({"type": "object"}),
+    }
+}
+
+fn task_context_tool_set() -> AuthorizedToolSet {
+    let operations = vec![task_context_tool()];
+    AuthorizedToolSet {
+        schema: TOOL_SET_SCHEMA.to_owned(),
+        schema_version: 1,
+        catalog_digest: authorized_tool_catalog_digest(&operations).unwrap(),
+        operations,
+    }
+}
+
+fn durable_config(directory: &Path) -> DurableRunnerConfig {
+    DurableRunnerConfig {
+        connect_url: "ws://127.0.0.1:3000/runner".to_owned(),
+        state_dir: directory.to_path_buf(),
+        runner_instance_id: "runner-1".to_owned(),
+        environment_lease_id: "lease-1".to_owned(),
+        run_id: "run-1".to_owned(),
+        normalized_session_id: "session-1".to_owned(),
+        turn_id: "turn-1".to_owned(),
+        item_id: "item-1".to_owned(),
+        runner_version: "test-1".to_owned(),
+        runner_digest: format!("sha256:{}", "a".repeat(64)),
+        max_outbox_bytes: 16 * 1024 * 1024,
+        p0_reserve_bytes: 1024 * 1024,
+        max_frame_bytes: 1024 * 1024,
+        reconnect_delay: std::time::Duration::from_millis(1),
+        max_runtime: std::time::Duration::from_secs(5),
     }
 }
 
@@ -605,6 +639,39 @@ fn codex_rejects_a_tool_call_that_was_not_advertised() {
 }
 
 #[test]
+fn codex_rejects_delayed_calls_after_every_terminal_notification() {
+    let directory = temporary_directory("delayed-tool-after-failure");
+    let config = provider_config(&directory, &["--delayed-tool-after-failed-turn"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Fail before invoking a tool.", &config.cwd)
+        .expect("start provider turn");
+
+    let terminal = (0..16)
+        .find_map(
+            |_| match provider.poll().expect("poll terminal notification") {
+                Some(CodexProviderEvent::Notification { method, .. })
+                    if method == "turn/failed" =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            },
+        )
+        .expect("observe failed terminal notification");
+    assert_eq!(terminal, "turn/failed");
+    assert_eq!(provider.active_provider_turn_id(), None);
+    let error = (0..16)
+        .find_map(|_| provider.poll().err())
+        .expect("a delayed call for the failed turn is rejected");
+    assert!(error.to_string().contains("outside an active turn"));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn codex_resume_advertises_the_same_authorized_tools() {
     let directory = temporary_directory("dynamic-tool-resume");
     let config = provider_config(&directory, &["--require-dynamic-tool"]);
@@ -614,6 +681,279 @@ fn codex_resume_advertises_the_same_authorized_tools() {
     assert_eq!(provider.thread_id(), "codex-thread-1");
     provider.shutdown().expect("stop provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_routes_a_semantic_tool_result_back_to_codex() {
+    let directory = temporary_directory("durable-dynamic-tool");
+    let config = provider_config(&directory, &["--require-dynamic-tool", "--emit-tool-call"]);
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare the durable Codex tool set");
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open the Codex session");
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Inspect the durable fake task."}),
+        ))
+        .expect("start the Codex turn");
+
+    let mut semantic_input = None;
+    for _ in 0..32 {
+        let events = poll_and_ack(&mut executor).expect("poll semantic input");
+        semantic_input = events
+            .iter()
+            .find(|event| event.event_type == "semantic_tool.input")
+            .cloned()
+            .or(semantic_input);
+        if semantic_input.is_some() {
+            break;
+        }
+    }
+    let semantic_input = semantic_input.expect("durable semantic input is emitted");
+    assert_eq!(
+        semantic_input.payload["semantic_tool"]["correlation"]["runId"],
+        "run-1"
+    );
+    assert_eq!(
+        semantic_input.payload["semantic_tool"]["operationId"],
+        "get_task_context"
+    );
+
+    let delivered = executor
+        .execute(&command(
+            "tool-result",
+            4,
+            "semantic_tool.result",
+            json!({
+                "callId": "semantic-call-1",
+                "operationId": "get_task_context",
+                "result": {"ok": true, "task": {"id": "task-1"}},
+                "isError": false,
+            }),
+        ))
+        .expect("deliver the durable semantic result");
+    assert_eq!(delivered.result["status"], "delivered");
+
+    let mut result_seen = false;
+    let mut terminal_seen = false;
+    for _ in 0..32 {
+        let events = poll_and_ack(&mut executor).expect("poll result and completion");
+        result_seen |= events
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.result");
+        terminal_seen |= events
+            .iter()
+            .any(|event| event.event_type == "turn.completed");
+        if result_seen && terminal_seen {
+            break;
+        }
+    }
+    assert!(result_seen);
+    assert!(terminal_seen);
+    executor.shutdown().expect("stop provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_reconciles_a_replayed_pending_tool_call() {
+    let directory = temporary_directory("durable-tool-recovery");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--emit-tool-call",
+            "--emit-tool-call-on-resume",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut first = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    first
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare the recoverable tool bridge");
+    first
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open the first provider");
+    first
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Hold the tool call across recovery."}),
+        ))
+        .expect("start the first turn");
+    let mut input_seen = false;
+    for _ in 0..32 {
+        input_seen |= poll_and_ack(&mut first)
+            .expect("poll first tool input")
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.input");
+        if input_seen {
+            break;
+        }
+    }
+    assert!(input_seen);
+    drop(first);
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    let mut reconciled = false;
+    let mut duplicate_input = false;
+    for _ in 0..32 {
+        let events = poll_and_ack(&mut recovered).expect("poll replayed tool call");
+        reconciled |= events
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.reconciled");
+        duplicate_input |= events
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.input");
+        if reconciled {
+            break;
+        }
+    }
+    assert!(reconciled);
+    assert!(!duplicate_input);
+    recovered
+        .execute(&command(
+            "tool-result",
+            4,
+            "semantic_tool.result",
+            json!({
+                "callId": "semantic-call-1",
+                "operationId": "get_task_context",
+                "result": {"ok": true, "task": {"id": "task-1"}},
+                "isError": false,
+            }),
+        ))
+        .expect("complete the replayed tool call");
+    recovered.shutdown().expect("stop recovered provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_rejects_tool_catalog_drift_during_attach() {
+    let directory = temporary_directory("durable-tool-attach-drift");
+    let config = provider_config(&directory, &[]);
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare the durable tool catalog");
+
+    let mut changed = task_context_tool_set();
+    changed.operations[0].description = "Changed after recovery.".to_owned();
+    changed.catalog_digest = authorized_tool_catalog_digest(&changed.operations).unwrap();
+    let error = executor
+        .execute(&command(
+            "attach",
+            2,
+            "run.attach",
+            json!({"authorizedTools": changed}),
+        ))
+        .expect_err("attach must reject tool catalog drift");
+    assert!(error.to_string().contains("tool contract changed"));
+
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_settles_tools_before_a_natural_terminal_event() {
+    let directory = temporary_directory("durable-tool-terminal");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--emit-tool-call",
+            "--finish-turn-with-pending-tool",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .unwrap();
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .unwrap();
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Terminate with a pending tool."}),
+        ))
+        .unwrap();
+
+    let mut observed = Vec::new();
+    for _ in 0..32 {
+        let events = poll_and_ack(&mut executor).unwrap();
+        observed.extend(events.into_iter().map(|event| event.event_type));
+        if observed.iter().any(|event| event == "turn.completed") {
+            break;
+        }
+    }
+    let semantic_result = observed
+        .iter()
+        .position(|event| event == "semantic_tool.result")
+        .expect("terminal settlement emits a failed semantic result");
+    let terminal = observed
+        .iter()
+        .position(|event| event == "turn.completed")
+        .expect("provider terminal event is emitted");
+    assert!(semantic_result < terminal);
+    assert!(executor
+        .execute(&command(
+            "late-result",
+            4,
+            "semantic_tool.result",
+            json!({
+                "callId": "semantic-call-1",
+                "operationId": "get_task_context",
+                "result": {"ok": true},
+                "isError": false,
+            }),
+        ))
+        .is_err());
+
+    executor.shutdown().unwrap();
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

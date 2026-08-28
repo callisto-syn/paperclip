@@ -1078,7 +1078,7 @@ fn sensitive_key(key: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
-fn sanitize_value(value: &Value) -> Value {
+pub(crate) fn sanitize_value(value: &Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
             object
