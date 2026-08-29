@@ -63,6 +63,8 @@ export interface CodexAcpxRuntimeDependencies {
   runtimeCloseTimeoutMs?: number;
   /** Internal test seam for the provider-session admission deadline. */
   sessionHandshakeTimeoutMs?: number;
+  /** Retains autonomous cleanup ownership across the sidecar lifecycle. */
+  retainCleanup?: (cleanup: Promise<void>) => void;
 }
 
 /**
@@ -207,12 +209,16 @@ export async function openCodexAcpxRuntime(
     );
   } catch (error) {
     if (error instanceof AcpxSessionHandshakeTimeoutError) {
-      retainLateHandshakeCleanup(
+      const lateCleanup = lateHandshakeCleanup(
         runtime,
         handshake,
         children,
         runtimeCloseTimeoutMs,
       );
+      dependencies.retainCleanup?.(lateCleanup);
+      // The adapter remains safe for non-sidecar callers: cleanup still runs,
+      // and its eventual rejection is observed even without an owner hook.
+      void lateCleanup.catch(() => undefined);
     }
     const cleanupErrors = await cleanupFailedRuntimeOpen(
       runtime,
@@ -277,21 +283,27 @@ async function boundedSessionHandshake(
   }
 }
 
-function retainLateHandshakeCleanup(
+function lateHandshakeCleanup(
   runtime: AcpRuntime,
   handshake: Promise<AcpRuntimeHandle>,
   children: SpawnedChildSet,
   runtimeCloseTimeoutMs: number,
-): void {
-  void handshake.then(
+): Promise<void> {
+  return handshake.then(
     async (lateHandle) => {
-      await cleanupFailedRuntimeOpen(
+      const errors = await cleanupFailedRuntimeOpen(
         runtime,
         lateHandle,
         children,
         "ACPX session handshake completed after its admission deadline",
         runtimeCloseTimeoutMs,
       );
+      if (errors.length > 0) {
+        throw new AggregateError(
+          errors,
+          "ACPX late-handshake runtime cleanup failed",
+        );
+      }
     },
     () => undefined,
   );

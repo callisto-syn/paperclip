@@ -822,6 +822,7 @@ describe("Codex ACPX runtime adapter", () => {
     const command = fakeCommand();
     vi.mocked(command.spawn).mockReturnValue(child);
     const runtime = fakeRuntime();
+    const retainCleanup = vi.fn<(cleanup: Promise<void>) => void>();
     let runtimeOptions: AcpRuntimeOptions | undefined;
     let resolveHandshake: ((handle: AcpRuntimeHandle) => void) | undefined;
     vi.mocked(runtime.ensureSession).mockImplementation(
@@ -836,12 +837,17 @@ describe("Codex ACPX runtime adapter", () => {
         createRegistry: () => registry(),
         createStore: () => store(),
         sessionHandshakeTimeoutMs: 1,
+        retainCleanup,
         createRuntime: (options) => {
           runtimeOptions = options;
           return runtime;
         },
       }),
     ).rejects.toThrow("session handshake exceeded its admission deadline");
+
+    expect(retainCleanup).toHaveBeenCalledOnce();
+    const retainedCleanup = retainCleanup.mock.calls[0]?.[0];
+    expect(retainedCleanup).toBeDefined();
 
     runtimeOptions?.spawnAgent?.({
       command: "ignored",
@@ -850,13 +856,12 @@ describe("Codex ACPX runtime adapter", () => {
     });
     resolveHandshake?.(HANDLE);
 
-    await vi.waitFor(() => {
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      expect(runtime.close).toHaveBeenCalledWith({
-        handle: HANDLE,
-        reason: "ACPX session handshake completed after its admission deadline",
-        discardPersistentState: false,
-      });
+    await retainedCleanup;
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(runtime.close).toHaveBeenCalledWith({
+      handle: HANDLE,
+      reason: "ACPX session handshake completed after its admission deadline",
+      discardPersistentState: false,
     });
   });
 

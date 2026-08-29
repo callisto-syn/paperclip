@@ -209,7 +209,12 @@ async function dispatch(
           handler: waitForTool,
         },
       },
-      { openRuntime: openCodexAcpxRuntime },
+      {
+        openRuntime: (options) =>
+          openCodexAcpxRuntime(options, {
+            retainCleanup: retainFailedAdmissionCleanup,
+          }),
+      },
     );
     const opened = await verifyOpenedAcpxSidecarHost(
       openedHost,
