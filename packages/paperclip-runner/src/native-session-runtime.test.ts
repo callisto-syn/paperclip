@@ -174,7 +174,7 @@ describe("executeNativeSession recovery", () => {
     void asynchronousResolver;
   });
 
-  it("keeps quarantined cleanup scheduled at a bounded rate without later admission", async () => {
+  it("preserves durable success while quarantined cleanup stays bounded", async () => {
     vi.useFakeTimers();
     try {
       const close = vi.fn().mockRejectedValue(new Error("persistent close failure"));
@@ -231,7 +231,7 @@ describe("executeNativeSession recovery", () => {
         controlPlaneInstanceId: "control-recovery",
       });
 
-      await expect(execute()).rejects.toThrow("persistent close failure");
+      await expect(execute()).resolves.toMatchObject({ result });
       expect(close).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(6_000);
       expect(close).toHaveBeenCalledTimes(7);
