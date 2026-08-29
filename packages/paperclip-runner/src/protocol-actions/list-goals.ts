@@ -41,7 +41,7 @@ export const listGoalsAction = {
       "result": {
         "schema": "paperclip.capability.tool-result.v1",
         "ok": true,
-        "operationId": "example",
+        "operationId": "list_goals",
         "operationResultId": "example",
         "value": "example",
         "commandResult": "example",
@@ -76,8 +76,7 @@ export const listGoalsAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "list_goals"
           },
           "operationResultId": {
             "type": "string",

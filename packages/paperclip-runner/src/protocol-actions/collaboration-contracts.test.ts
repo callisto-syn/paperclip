@@ -54,6 +54,7 @@ describe("collaboration Paperclip protocol action contracts", () => {
             commandResult: null,
             authorization: {},
           };
+        expect(scenarioOutput.operationId).toBe(operationId);
 
         expect(
           ajv.validate(action.scenario.descriptor.inputSchema, scenarioInput),
