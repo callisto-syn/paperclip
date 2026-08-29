@@ -8,6 +8,7 @@ import {
   awaitSidecarCleanupWithin,
   closeActiveSidecarHostWithin,
   parseAcpxRunAttachment,
+  readSidecarHostStatusWithin,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
 
@@ -100,8 +101,18 @@ describe("Codex ACPX runtime sidecar", () => {
 
     await expect(
       verifyOpenedAcpxSidecarHost(host, () => ({}), 1),
-    ).rejects.toThrow("status verification exceeded its timeout");
+    ).rejects.toThrow("status read exceeded its timeout");
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("bounds ordinary status reads so serialized shutdown can proceed", async () => {
+    const host = {
+      status: vi.fn(() => new Promise<never>(() => undefined)),
+    };
+
+    await expect(readSidecarHostStatusWithin(host, 1)).rejects.toThrow(
+      "status read exceeded its timeout",
+    );
   });
 
   it("validates a complete run attachment before it can be committed", () => {

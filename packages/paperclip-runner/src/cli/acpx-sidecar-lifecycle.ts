@@ -6,6 +6,27 @@ export interface OpenedAcpxSidecarHost {
 
 const FAILED_ADMISSION_CLOSE_TIMEOUT_MS = 8_000;
 
+export async function readSidecarHostStatusWithin(
+  host: Pick<OpenedAcpxSidecarHost, "status">,
+  timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      host.status(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("ACPX session status read exceeded its timeout")),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function awaitSidecarCleanupWithin(
   cleanup: Promise<void>,
   timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
@@ -47,7 +68,7 @@ export async function verifyOpenedAcpxSidecarHost(
   try {
     const identity = host.identity();
     const status = sanitizeStatus(
-      await boundedOpenedHostStatus(host.status(), closeTimeoutMs),
+      await readSidecarHostStatusWithin(host, closeTimeoutMs),
     );
     return { identity, status };
   } catch (error) {
@@ -69,32 +90,6 @@ export async function verifyOpenedAcpxSidecarHost(
       );
     }
     throw error;
-  }
-}
-
-async function boundedOpenedHostStatus(
-  status: Promise<unknown>,
-  timeoutMs: number,
-): Promise<unknown> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      status,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new Error(
-                "ACPX session status verification exceeded its timeout",
-              ),
-            ),
-          timeoutMs,
-        );
-        timer.unref();
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 

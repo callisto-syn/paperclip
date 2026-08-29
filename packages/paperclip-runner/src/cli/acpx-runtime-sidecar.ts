@@ -55,6 +55,7 @@ import {
   boundedIdentity,
   closeActiveSidecarHostWithin,
   parseAcpxRunAttachment,
+  readSidecarHostStatusWithin,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
 
@@ -347,14 +348,14 @@ async function dispatch(
     const activeHost = requireHost();
     return {
       identity: activeHost.identity(),
-      status: sanitizeRuntimeStatus(await activeHost.status()),
+      status: sanitizeRuntimeStatus(await readSidecarHostStatusWithin(activeHost)),
     };
   }
   if (request.command === "session.snapshot") {
     const activeHost = requireHost();
     return {
       identity: activeHost.identity(),
-      status: sanitizeRuntimeStatus(await activeHost.status()),
+      status: sanitizeRuntimeStatus(await readSidecarHostStatusWithin(activeHost)),
       runId,
       turnId,
       sequence,
