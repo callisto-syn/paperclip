@@ -64,14 +64,12 @@ describe("collaboration Paperclip protocol action contracts", () => {
           ajv.validate(action.scenario.descriptor.outputSchema, scenarioOutput),
           JSON.stringify(ajv.errors),
         ).toBe(true);
-        if (action.live !== null) {
-          expect(
-            ajv.validate(action.scenario.descriptor.outputSchema, {
-              ...scenarioOutput,
-              operationId: `${operationId}_mismatch`,
-            }),
-          ).toBe(false);
-        }
+        expect(
+          ajv.validate(action.scenario.descriptor.outputSchema, {
+            ...scenarioOutput,
+            operationId: `${operationId}_mismatch`,
+          }),
+        ).toBe(false);
       }
     },
   );
