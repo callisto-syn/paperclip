@@ -1409,7 +1409,7 @@ describe("executeNativeSession recovery", () => {
     });
   });
 
-  it("starts a continuation after the driver clears a stale active terminal turn", async () => {
+  it("retries disposition recovery when its bound provider turn is absent", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",
       sessionId: "driver-recovery",
@@ -1418,6 +1418,8 @@ describe("executeNativeSession recovery", () => {
       cursor: "1",
       activeTurnId: "turn-already-terminal",
       terminalTurns: [{ turnId: "turn-already-terminal", fingerprint: "terminal-fingerprint" }],
+      dispositionOnlyRecoveryConsumed: true,
+      dispositionOnlyRecoveryTurnId: "turn-missing-disposition",
       pendingRuntimeRequests: [],
       lineage: [],
     };
@@ -1809,9 +1811,7 @@ describe("executeNativeSession recovery", () => {
       async capabilities() {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
-      async *events() {
-        throw new Error("a checkpointed terminal must not consume the closed provider stream");
-      },
+      async *events() {},
       startTurn,
       async result() { return null; },
       async snapshot() { return structuredClone(checkpoint); },
@@ -1830,7 +1830,7 @@ describe("executeNativeSession recovery", () => {
       async recoverSession() { return { recovered: true, session }; },
     };
     const bySource = new Map<string, PrpEvent[]>([
-      ["runner-recovery", [workProposal, workTerminal, dispositionTerminal]],
+      ["runner-recovery", [workProposal, workTerminal]],
     ]);
     const completeRun = vi.fn(async () => undefined);
     const port: ControlPlanePort = {
@@ -1857,7 +1857,7 @@ describe("executeNativeSession recovery", () => {
       completeRun,
     };
 
-    await expect(executeNativeSession({
+    const execute = () => executeNativeSession({
       input,
       backend,
       controlPlane: port,
@@ -1867,7 +1867,18 @@ describe("executeNativeSession recovery", () => {
         expect(terminalEvent).toEqual(dispositionTerminal);
         return result;
       },
-    })).resolves.toMatchObject({
+    });
+    await expect(execute()).rejects.toThrow(
+      "native event stream closed before a turn terminal fact",
+    );
+    expect(startTurn).not.toHaveBeenCalled();
+
+    bySource.set("runner-recovery", [
+      workProposal,
+      workTerminal,
+      dispositionTerminal,
+    ]);
+    await expect(execute()).resolves.toMatchObject({
       result,
       turnId: "turn-disposition",
     });

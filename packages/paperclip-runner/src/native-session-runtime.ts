@@ -738,9 +738,23 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         && !recoveredSnapshot.semanticResult
         && !recoveredActiveTurnId
       );
+      const dispositionRecoveryTurnId =
+        persistedSession?.dispositionOnlyRecoveryTurnId
+        ?? recoveredSnapshot.dispositionOnlyRecoveryTurnId
+        ?? null;
+      const recoveredDispositionTurnObserved = Boolean(
+        dispositionRecoveryTurnId
+        && recoveredSnapshot.terminalTurns?.some(
+          (terminal) => terminal.turnId === dispositionRecoveryTurnId,
+        )
+      );
       const dispositionRecoveryStillOwned = Boolean(
         dispositionRecoveryWasSubmitted
         && recoveredSnapshot.dispositionOnlyRecoveryConsumed
+        && (
+          dispositionRecoveryTurnId === null
+          || recoveredDispositionTurnObserved
+        )
       );
       const replayedDisposition = dispositionRecoveryWasSubmitted
         ? await replayCheckpointedTurnTerminal({
@@ -749,16 +763,16 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             sourceInstanceId: options.runnerInstanceId,
             priorTerminalTurnIds: (persistedSession?.terminalTurns ?? [])
               .map((terminal) => terminal.turnId),
-            expectedTurnId:
-              persistedSession?.dispositionOnlyRecoveryTurnId
-              ?? recoveredSnapshot.dispositionOnlyRecoveryTurnId
-              ?? null,
+            expectedTurnId: dispositionRecoveryTurnId,
           })
         : null;
       // The consumed marker proves only that the recovery turn was submitted,
-      // not that its terminal was durably appended. If replay cannot find a
-      // terminal newer than the prior task, keep consuming the recovered
-      // provider session without submitting a duplicate turn.
+      // not that its terminal was durably appended. A bound marker keeps
+      // ownership only while recovery still exposes that exact provider turn;
+      // otherwise a missing durable terminal proves that submission never
+      // became observable and the one-shot recovery may be retried. Legacy
+      // unbound markers remain fail-closed unless the driver explicitly clears
+      // them.
       const checkpointedDispositionTerminal = replayedDisposition !== null;
       const replayedTerminal = replayedDisposition?.terminal ?? null;
       const consumptionAbort = new AbortController();
