@@ -397,6 +397,38 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
   });
 
+  it("retains a provider error after close removes the child", async () => {
+    const runtime = fakeRuntime();
+    const command = fakeCommand();
+    const child = fakeChild();
+    const providerError = new Error("provider spawn failed");
+    let runtimeOptions: AcpRuntimeOptions | undefined;
+    vi.mocked(command.spawn).mockReturnValue(child);
+    const port = await openCodexAcpxRuntime(openOptions(command), {
+      createRegistry: () => registry(),
+      createStore: () => store(),
+      createRuntime: (options) => {
+        runtimeOptions = options;
+        return runtime;
+      },
+    });
+    runtimeOptions?.spawnAgent?.({
+      command: "ignored",
+      args: ["--stdio"],
+      options: {},
+    });
+
+    child.emit("error", providerError);
+    child.emit("close", 1, null);
+
+    await expect(port.close({ reason: "test complete" })).rejects.toMatchObject(
+      {
+        errors: [providerError],
+      },
+    );
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
   it("rejects non-Codex profiles before constructing ACPX", async () => {
     const createRuntime = vi.fn();
     await expect(

@@ -274,16 +274,13 @@ async function closeRuntimeWithin(
 }
 
 class SpawnedChildSet {
-  readonly #children = new Set<{
-    child: ChildProcess;
-    errors: unknown[];
-  }>();
+  readonly #children = new Set<ChildProcess>();
+  readonly #errors = new Set<unknown>();
 
   add(child: ChildProcess): ChildProcess {
-    const tracked = { child, errors: [] as unknown[] };
-    this.#children.add(tracked);
-    const onError = (error: unknown) => tracked.errors.push(error);
-    const forget = () => this.#children.delete(tracked);
+    this.#children.add(child);
+    const onError = (error: unknown) => this.#errors.add(error);
+    const forget = () => this.#children.delete(child);
     const forgetAndDetach = () => {
       forget();
       child.off("error", onError);
@@ -301,8 +298,7 @@ class SpawnedChildSet {
     const errors: unknown[] = [];
     const children = [...this.#children];
     await Promise.all(
-      children.map(async (tracked) => {
-        const { child } = tracked;
+      children.map(async (child) => {
         if (running(child)) {
           const terminateOutcome = await signalAndWaitForExit(
             child,
@@ -328,11 +324,14 @@ class SpawnedChildSet {
             }
           }
         }
-        for (const error of tracked.errors) {
-          pushUnique(errors, error);
-        }
       }),
     );
+    // A failed spawn or signal can emit `error` and then `close` before this
+    // method snapshots the live children. Keep those errors independently of
+    // child membership, report each object once, and drain them only after all
+    // in-flight termination attempts have had a chance to emit.
+    for (const error of this.#errors) pushUnique(errors, error);
+    this.#errors.clear();
     return errors;
   }
 }
