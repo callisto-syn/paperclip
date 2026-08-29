@@ -56,10 +56,59 @@ fn has_task_context_tool(message: &Value) -> bool {
         .is_some_and(|tools| {
             tools.iter().any(|tool| {
                 tool.get("name").and_then(Value::as_str) == Some("get_task_context")
-                    && tool.get("description").and_then(Value::as_str) == Some("Read task context.")
+                    && tool
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|description| !description.trim().is_empty())
                     && tool.pointer("/inputSchema/type").and_then(Value::as_str) == Some("object")
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread_start(tool: Value) -> Value {
+        json!({
+            "method": "thread/start",
+            "params": {"dynamicTools": [tool]},
+        })
+    }
+
+    #[test]
+    fn task_context_tool_accepts_any_non_empty_description() {
+        let message = thread_start(json!({
+            "name": "get_task_context",
+            "description": "Read the active task, actor, wake context, ancestors, and budget summary.",
+            "inputSchema": {"type": "object"},
+        }));
+
+        assert!(has_task_context_tool(&message));
+    }
+
+    #[test]
+    fn task_context_tool_rejects_blank_descriptions_and_wrong_schemas() {
+        for tool in [
+            json!({
+                "name": "get_task_context",
+                "description": "   ",
+                "inputSchema": {"type": "object"},
+            }),
+            json!({
+                "name": "get_task_context",
+                "description": "Read task context.",
+                "inputSchema": {"type": "string"},
+            }),
+            json!({
+                "name": "get_task_history",
+                "description": "Read task context.",
+                "inputSchema": {"type": "object"},
+            }),
+        ] {
+            assert!(!has_task_context_tool(&thread_start(tool)));
+        }
+    }
 }
 
 fn finish_turn(state_path: &Path, state: &mut FakeState, status: &str) -> io::Result<()> {
