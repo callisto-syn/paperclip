@@ -3,7 +3,6 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { PassThrough } from "node:stream";
 
 import type {
   AcpAgentRegistry,
@@ -411,41 +410,21 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
-  it("hands an unresponsive Windows process tree to a detached taskkill reaper", async () => {
-    const child = stubbornChild();
-    Object.defineProperty(child, "pid", { value: 4_242 });
-    const output = new PassThrough();
-    const reaper = new EventEmitter() as ChildProcess;
-    Object.defineProperty(reaper, "stdout", { value: output });
-    reaper.kill = vi.fn(() => true);
-    reaper.unref = vi.fn(() => reaper);
-    const spawnProcess = vi.fn(() => reaper);
+  it("rejects Windows before runtime construction or provider spawn", async () => {
+    const command = fakeCommand();
+    const createRuntime = vi.fn(() => fakeRuntime());
 
-    const handoff = launchUnresponsiveProviderReaper(child, {
-      platform: "win32",
-      spawnProcess: spawnProcess as unknown as typeof spawnChildProcess,
-      windowsSystemRoot: String.raw`C:\Windows`,
-    });
-    output.write("owned\n");
-    await handoff;
+    await expect(
+      openCodexAcpxRuntime(openOptions(command), {
+        platform: "win32",
+        createRuntime,
+      }),
+    ).rejects.toThrow(
+      "The production ACPX runtime is unavailable on Windows because verified provider launch requires atomic no-follow file opening",
+    );
 
-    expect(spawnProcess).toHaveBeenCalledOnce();
-    const [command, args, options] = spawnProcess.mock.calls[0]!;
-    expect(command).toBe(process.execPath);
-    expect(args).toEqual([
-      "--eval",
-      expect.stringContaining("taskkill"),
-      "4242",
-      String.raw`C:\Windows\System32\taskkill.exe`,
-    ]);
-    expect(options).toMatchObject({
-      detached: true,
-      env: {},
-      shell: false,
-      windowsHide: true,
-    });
-    expect(reaper.kill).not.toHaveBeenCalled();
-    expect(reaper.unref).toHaveBeenCalledOnce();
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(command.spawn).not.toHaveBeenCalled();
   });
 
   it("rejects and independently cleans providers spawned during termination", async () => {

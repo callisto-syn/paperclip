@@ -2,7 +2,6 @@ import {
   spawn as spawnChildProcess,
   type ChildProcess,
 } from "node:child_process";
-import { win32 as win32Path } from "node:path";
 
 import {
   createAcpRuntime,
@@ -60,49 +59,6 @@ const reap = () => {
 };
 reap();
 `;
-const WINDOWS_UNRESPONSIVE_REAPER_SOURCE = `
-const { spawnSync } = require("node:child_process");
-const processId = Number.parseInt(process.argv[1] ?? "", 10);
-const taskkillPath = process.argv[2] ?? "";
-if (!Number.isSafeInteger(processId) || processId <= 0 || !taskkillPath) process.exit(2);
-let announced = false;
-const reap = () => {
-  const result = spawnSync(
-    taskkillPath,
-    ["/PID", String(processId), "/T", "/F"],
-    { windowsHide: true, stdio: "ignore" },
-  );
-  if (result.error) {
-    process.stdout.write(
-      "error:" + String(result.error.code || "taskkill") + "\\n",
-      () => process.exit(1),
-    );
-    return;
-  }
-  if (result.status !== 0) {
-    try {
-      process.kill(processId, 0);
-    } catch (error) {
-      if (error && error.code === "ESRCH") {
-        if (!announced) process.stdout.write("gone\\n", () => process.exit(0));
-        else process.exit(0);
-        return;
-      }
-    }
-    process.stdout.write(
-      "error:taskkill-status-" + String(result.status) + "\\n",
-      () => process.exit(1),
-    );
-    return;
-  }
-  if (!announced) {
-    announced = true;
-    process.stdout.write("owned\\n");
-  }
-  setTimeout(reap, 250);
-};
-reap();
-`;
 // Production shutdown waits for the protocol close bound before beginning the
 // sequential TERM/KILL verification windows and a bounded external-reaper
 // ownership transfer. Keep this exported package-local bound aligned with the
@@ -146,6 +102,8 @@ export interface CodexAcpxRuntimeDependencies {
   retainCleanup?: (cleanup: Promise<void>) => void;
   /** Internal test seam for transferring an unresponsive process group. */
   reapUnresponsiveChild?: (child: ChildProcess) => Promise<void>;
+  /** Internal test seam for the fail-closed platform admission boundary. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -157,6 +115,17 @@ export async function openCodexAcpxRuntime(
   options: AcpxRuntimePortOpenOptions,
   dependencies: CodexAcpxRuntimeDependencies = {},
 ): Promise<AcpxRuntimePort> {
+  // Verified ACPX command admission already fails closed on Windows because
+  // Node cannot atomically open the provider executable with O_NOFOLLOW there.
+  // Reject at the adapter boundary too: allowing a fabricated command lease to
+  // start a provider would create a cleanup state that cannot guarantee both a
+  // bounded sidecar exit and retained ownership of an unresponsive process
+  // tree when the Windows reaper cannot start.
+  if ((dependencies.platform ?? process.platform) === "win32") {
+    throw new Error(
+      "The production ACPX runtime is unavailable on Windows because verified provider launch requires atomic no-follow file opening",
+    );
+  }
   if (options.profile.agent !== "codex") {
     throw new Error(
       "The production ACPX runtime currently supports Codex only",
@@ -775,7 +744,6 @@ async function handoffUnresponsiveChild(
 interface UnresponsiveProviderReaperOptions {
   platform?: NodeJS.Platform;
   spawnProcess?: typeof spawnChildProcess;
-  windowsSystemRoot?: string;
 }
 
 export async function launchUnresponsiveProviderReaper(
@@ -787,25 +755,15 @@ export async function launchUnresponsiveProviderReaper(
     throw new Error("ACPX provider omitted its process-group identity");
   }
   const platform = options.platform ?? process.platform;
-  const windowsSystemRoot = platform === "win32"
-    ? options.windowsSystemRoot ?? process.env.SystemRoot
-    : undefined;
-  if (
-    platform === "win32" &&
-    (!windowsSystemRoot || !win32Path.isAbsolute(windowsSystemRoot))
-  ) {
-    throw new Error("ACPX provider reaper could not resolve the Windows system directory");
+  if (platform === "win32") {
+    throw new Error(
+      "The production ACPX runtime does not admit Windows providers",
+    );
   }
-  const reaperSource = platform === "win32"
-    ? WINDOWS_UNRESPONSIVE_REAPER_SOURCE
-    : UNRESPONSIVE_REAPER_SOURCE;
   const reaperArguments = [
     "--eval",
-    reaperSource,
+    UNRESPONSIVE_REAPER_SOURCE,
     String(processGroupId),
-    ...(windowsSystemRoot
-      ? [win32Path.join(windowsSystemRoot, "System32", "taskkill.exe")]
-      : []),
   ];
   const reaper = (options.spawnProcess ?? spawnChildProcess)(
     process.execPath,
