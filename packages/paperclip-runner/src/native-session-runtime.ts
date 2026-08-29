@@ -18,6 +18,7 @@ const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 interface QuarantinedSessionCleanup {
   session: NativeSession;
   attempt: Promise<void> | null;
+  recovery: Promise<void> | null;
 }
 
 const quarantinedSessionCleanups = new Set<QuarantinedSessionCleanup>();
@@ -150,24 +151,40 @@ function quarantineSessionCleanup(session: NativeSession): void {
   if ([...quarantinedSessionCleanups].some((entry) => entry.session === session)) {
     return;
   }
-  quarantinedSessionCleanups.add({ session, attempt: null });
+  const cleanup: QuarantinedSessionCleanup = {
+    session,
+    attempt: null,
+    recovery: null,
+  };
+  quarantinedSessionCleanups.add(cleanup);
+  const recovery = (async () => {
+    while (quarantinedSessionCleanups.has(cleanup)) {
+      await waitForSessionCloseRetry();
+      const attempt = Promise.resolve().then(() => cleanup.session.close({
+        reason: "native session quarantined cleanup recovery",
+      }));
+      cleanup.attempt = attempt;
+      try {
+        await attempt;
+        quarantinedSessionCleanups.delete(cleanup);
+      } catch {
+        // Retain the quarantine and retry without overlapping this attempt.
+      } finally {
+        if (cleanup.attempt === attempt) cleanup.attempt = null;
+      }
+    }
+  })();
+  cleanup.recovery = recovery;
+  failedSessionCleanupOwners.add(recovery);
+  void recovery.finally(() => {
+    failedSessionCleanupOwners.delete(recovery);
+    if (cleanup.recovery === recovery) cleanup.recovery = null;
+  }).catch(() => undefined);
 }
 
 async function retryQuarantinedSessionCleanups(): Promise<void> {
   const observations: Promise<unknown>[] = [];
   for (const cleanup of quarantinedSessionCleanups) {
-    if (cleanup.attempt === null) {
-      const attempt = Promise.resolve().then(() => cleanup.session.close({
-        reason: "native session quarantined cleanup retry",
-      }));
-      cleanup.attempt = attempt;
-      void attempt.then(
-        () => quarantinedSessionCleanups.delete(cleanup),
-        () => {
-          if (cleanup.attempt === attempt) cleanup.attempt = null;
-        },
-      );
-    }
     if (cleanup.attempt) {
       observations.push(
         settlesWithin(

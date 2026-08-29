@@ -87,6 +87,7 @@ interface QuarantinedHostCleanup {
   host: CodexAcpxHost;
   reason: string;
   attempt: Promise<void> | null;
+  recovery: Promise<void> | null;
 }
 
 export interface CodexAcpxDriverDependencies {
@@ -237,25 +238,39 @@ export class CodexAcpxDriver implements HarnessDriver {
     if ([...this.#quarantinedHostCleanups].some((entry) => entry.host === host)) {
       return;
     }
-    this.#quarantinedHostCleanups.add({ host, reason, attempt: null });
+    const cleanup: QuarantinedHostCleanup = {
+      host,
+      reason,
+      attempt: null,
+      recovery: null,
+    };
+    this.#quarantinedHostCleanups.add(cleanup);
+    const recovery = (async () => {
+      while (this.#quarantinedHostCleanups.has(cleanup)) {
+        await waitForCleanupRetry(
+          Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
+        );
+        const attempt = Promise.resolve().then(() => cleanup.host.close({
+          reason: `${cleanup.reason} (quarantined cleanup recovery)`,
+        }));
+        cleanup.attempt = attempt;
+        try {
+          await attempt;
+          this.#quarantinedHostCleanups.delete(cleanup);
+        } catch {
+          // Keep the autonomous owner alive and retry sequentially.
+        } finally {
+          if (cleanup.attempt === attempt) cleanup.attempt = null;
+        }
+      }
+    })();
+    cleanup.recovery = recovery;
+    this.#retainCleanup(recovery);
   }
 
   async #retryQuarantinedHostCleanups(): Promise<void> {
     const observations: Promise<unknown>[] = [];
     for (const cleanup of this.#quarantinedHostCleanups) {
-      if (cleanup.attempt === null) {
-        const attempt = Promise.resolve().then(() => cleanup.host.close({
-          reason: `${cleanup.reason} (quarantined cleanup retry)`,
-        }));
-        cleanup.attempt = attempt;
-        this.#retainCleanup(attempt);
-        void attempt.then(
-          () => this.#quarantinedHostCleanups.delete(cleanup),
-          () => {
-            if (cleanup.attempt === attempt) cleanup.attempt = null;
-          },
-        );
-      }
       if (cleanup.attempt) {
         observations.push(
           settleWithin(cleanup.attempt, this.#closeSettlementTimeoutMs).catch(

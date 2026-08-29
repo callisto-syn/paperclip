@@ -237,10 +237,12 @@ describe("executeNativeSession recovery", () => {
       expect(close).toHaveBeenCalledTimes(4);
 
       await expect(execute()).rejects.toThrow("native_session_cleanup_quarantined");
-      expect(close).toHaveBeenCalledTimes(5);
+      expect(close).toHaveBeenCalledTimes(4);
       expect(openSession).toHaveBeenCalledOnce();
 
       close.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(close).toHaveBeenCalledTimes(5);
       await expect(execute()).resolves.toMatchObject({ result });
       expect(openSession).toHaveBeenCalledTimes(2);
     } finally {

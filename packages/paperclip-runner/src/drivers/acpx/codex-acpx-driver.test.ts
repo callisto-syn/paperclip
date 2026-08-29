@@ -316,7 +316,7 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledTimes(3);
   });
 
-  it("bounds autonomous host cleanup recovery after repeated failure", async () => {
+  it("keeps an autonomous owner after bounded foreground cleanup retries", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
     fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
     const session = await fixture.driver.openSession({
@@ -328,9 +328,7 @@ describe("Codex ACPX harness driver", () => {
     await expect(
       session.close({ reason: "runtime close persistently failed" }),
     ).rejects.toThrow("persistent cleanup failure");
-    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(4));
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledTimes(4);
+    await vi.waitFor(() => expect(fixture.host.close.mock.calls.length).toBeGreaterThanOrEqual(4));
     await expect(
       fixture.driver.openSession({
         runId: "run-after-quarantine",
@@ -338,7 +336,17 @@ describe("Codex ACPX harness driver", () => {
         workingDirectory: "/workspace",
       }),
     ).rejects.toThrow("quarantined host cleanup remains incomplete");
-    expect(fixture.host.close).toHaveBeenCalledTimes(5);
+    const callsBeforeRecovery = fixture.host.close.mock.calls.length;
+    fixture.host.close.mockResolvedValue(undefined);
+    await vi.waitFor(() => expect(fixture.host.close.mock.calls.length).toBeGreaterThan(callsBeforeRecovery));
+    expect(fixture.host.close).toHaveBeenLastCalledWith({
+      reason: "runtime close persistently failed (quarantined cleanup recovery)",
+    });
+    await expect(fixture.driver.openSession({
+      runId: "run-after-recovery",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    })).resolves.toBeDefined();
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {
