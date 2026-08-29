@@ -39,7 +39,23 @@ export interface LiveConsoleConformanceFixture {
   goals: LiveConsoleGoalFixture[];
   lineage: {
     rootThreadId: string;
-    childThread: Record<string, unknown> & { id: string; sessionId: string };
+    childThread: Record<string, unknown> & {
+      id: string;
+      sessionId: string;
+      agentNickname: string;
+      agentRole: string;
+      source: {
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: string;
+            depth: number;
+            agent_path: string[];
+            agent_nickname: string;
+            agent_role: string;
+          };
+        };
+      };
+    };
   };
   controls: {
     sameTurnSteer: LiveConsoleControlFixture & { turnId: string };
@@ -179,12 +195,29 @@ export async function loadLiveConsoleConformanceFixture(
   }
   const lineage = record(fixture.lineage);
   const child = record(lineage?.childThread);
+  const childSource = record(child?.source);
+  const childSubAgent = record(childSource?.subAgent);
+  const childSpawn = record(childSubAgent?.thread_spawn);
+  const childAgentPath = childSpawn?.agent_path;
   const controls = record(fixture.controls);
   const reconnect = record(fixture.reconnect);
   if (
     !nonEmpty(lineage?.rootThreadId) ||
     !nonEmpty(child?.id) ||
     !nonEmpty(child.sessionId) ||
+    child.id === lineage.rootThreadId ||
+    childSpawn === null ||
+    childSpawn.parent_thread_id !== lineage.rootThreadId ||
+    !Number.isSafeInteger(childSpawn.depth) ||
+    (childSpawn.depth as number) < 1 ||
+    !Array.isArray(childAgentPath) ||
+    childAgentPath.length === 0 ||
+    childAgentPath.length > 64 ||
+    !childAgentPath.every(nonEmpty) ||
+    !nonEmpty(childSpawn.agent_nickname) ||
+    !nonEmpty(childSpawn.agent_role) ||
+    child.agentNickname !== childSpawn.agent_nickname ||
+    child.agentRole !== childSpawn.agent_role ||
     !nonEmpty(reconnect?.runId) ||
     !nonEmpty(reconnect.normalizedSessionId) ||
     !nonEmpty(reconnect.driverSessionId) ||

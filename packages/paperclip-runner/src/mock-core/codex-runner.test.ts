@@ -260,6 +260,19 @@ describe("Codex trace conformance", () => {
       await writeFile(candidatePath, JSON.stringify(source));
       await expect(loadLiveConsoleConformanceFixture(candidatePath))
         .rejects.toThrow("controls are invalid");
+
+      source.controls.sameTurnSteer.turnId = "turn-active";
+      const spawn = source.lineage.childThread.source.subAgent.thread_spawn;
+      delete spawn.parent_thread_id;
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("identity or lineage is incomplete");
+
+      spawn.parent_thread_id = source.lineage.rootThreadId;
+      spawn.agent_path = [""];
+      await writeFile(candidatePath, JSON.stringify(source));
+      await expect(loadLiveConsoleConformanceFixture(candidatePath))
+        .rejects.toThrow("identity or lineage is incomplete");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
