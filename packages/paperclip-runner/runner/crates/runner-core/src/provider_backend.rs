@@ -1699,6 +1699,7 @@ mod tests {
                 approval_policy: "never".to_owned(),
             },
             None,
+            ProviderToolBridge::default(),
         );
         state.thread_id = Some("thread-1".to_owned());
         state.lifecycle = "session_open".to_owned();
