@@ -96,9 +96,10 @@ describe("Codex structured question adapter", () => {
         id: "target",
         question: "Where?",
         options: [
-          { id: "question-1", label: "First" },
-          { id: "option-1", label: "Second" },
-          { label: "Third" },
+          { id: "option-2", label: "First" },
+          { label: "Second" },
+          { id: "question-1", label: "Third" },
+          { id: "option-1", label: "Fourth" },
         ],
       }],
     }, responseContext)!;
@@ -116,9 +117,10 @@ describe("Codex structured question adapter", () => {
     };
 
     expect(input.questions[0]?.options?.map((option) => option.id)).toEqual([
+      "option-2",
+      "option-3",
       "question-1",
       "option-1",
-      "option-3",
     ]);
     expect(runtimeRequestResponseWithContext(request, {
       action: "submit",
@@ -127,7 +129,7 @@ describe("Codex structured question adapter", () => {
         answers: { target: { selectedOptionIds: ["question-1", "option-1"] } },
       },
     }, responseContext)).toEqual({
-      answers: { target: { answers: ["First", "Second"] } },
+      answers: { target: { answers: ["Third", "Fourth"] } },
     });
   });
 

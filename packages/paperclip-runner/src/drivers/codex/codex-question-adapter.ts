@@ -165,6 +165,18 @@ function exactRedactedQuestionText(
 function codexOptions(value: unknown): NormalizedQuestionOptions | undefined {
   if (!Array.isArray(value)) return undefined;
   if (value.length > 128) throw new Error("Codex question exceeds 128 options");
+  const explicitIds = value.map((rawOption, index) => {
+    const optionId = text(record(rawOption).id).trim();
+    return optionId.length > 0 ? stableQuestionId(optionId, index) : null;
+  });
+  const usedIds = new Set<string>();
+  for (const id of explicitIds) {
+    if (id === null) continue;
+    if (usedIds.has(id)) {
+      throw new Error("Codex option identifiers must be unique");
+    }
+    usedIds.add(id);
+  }
   const nativeValues = new Map<string, unknown>();
   const options = value.map((rawOption, index) => {
     const option = record(rawOption);
@@ -172,9 +184,16 @@ function codexOptions(value: unknown): NormalizedQuestionOptions | undefined {
       option.label,
       text(option.value, text(rawOption, `Option ${index + 1}`)),
     );
-    const id = text(option.id).trim().length > 0
-      ? stableQuestionId(option.id, index)
-      : `option-${index + 1}`;
+    let id = explicitIds[index];
+    if (id === null || id === undefined) {
+      let generatedIndex = index + 1;
+      id = `option-${generatedIndex}`;
+      while (usedIds.has(id)) {
+        generatedIndex += 1;
+        id = `option-${generatedIndex}`;
+      }
+      usedIds.add(id);
+    }
     nativeValues.set(id, nativeLabel);
     return {
       id,
