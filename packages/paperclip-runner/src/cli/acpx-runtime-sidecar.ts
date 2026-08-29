@@ -57,6 +57,7 @@ import {
   closeSidecarHostForCommand,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
+  recoverSidecarHostCleanup,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
 
@@ -935,6 +936,9 @@ function writeFrame(value: AcpxSidecarEvent | AcpxSidecarResponse): void {
 
 function requireHost(): AcpxRuntimeHost {
   if (!host) throw new Error("ACPX session is not open");
+  if (activeHostCleanup) {
+    throw new Error("ACPX session cleanup is in progress");
+  }
   return host;
 }
 
@@ -1075,21 +1079,31 @@ function retainActiveHostCleanup(
   activeHost: AcpxRuntimeHost,
   cleanup: Promise<void>,
 ): void {
-  let succeeded = false;
-  const retained = cleanup.then(
-    () => { succeeded = true; },
-    () => undefined,
-  );
+  if (activeHostCleanup) return;
+  const retained = closing
+    ? cleanup
+    : recoverSidecarHostCleanup(activeHost, cleanup);
   activeHostCleanup = retained;
-  void retained.finally(() => {
-    if (activeHostCleanup === retained) activeHostCleanup = null;
-    if (succeeded && host === activeHost) {
-      host = null;
-      openParams = null;
-      runId = null;
-      turnId = null;
-    }
-  });
+  void retained
+    .then(
+      () => {
+        if (host === activeHost) {
+          host = null;
+          openParams = null;
+          runId = null;
+          turnId = null;
+        }
+      },
+      (error: unknown) => {
+        if (!closing) {
+          diagnostic("active_host_cleanup_failed", safeMessage(error));
+          requestShutdown("ACPX active-host cleanup could not recover");
+        }
+      },
+    )
+    .finally(() => {
+      if (activeHostCleanup === retained) activeHostCleanup = null;
+    });
 }
 
 function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {

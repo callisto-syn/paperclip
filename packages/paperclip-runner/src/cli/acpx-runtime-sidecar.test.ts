@@ -10,6 +10,7 @@ import {
   closeSidecarHostForCommand,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
+  recoverSidecarHostCleanup,
   verifyOpenedAcpxSidecarHost,
 } from "./acpx-sidecar-lifecycle.js";
 
@@ -120,6 +121,33 @@ describe("Codex ACPX runtime sidecar", () => {
       "session close",
       10,
     )).rejects.toThrow("runtime close failed");
+  });
+
+  it("recovers a rejected active-host cleanup sequentially", async () => {
+    const close = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("first close failed"))
+      .mockResolvedValue(undefined);
+    const host = { close };
+    const initialCleanup = host.close();
+
+    await expect(
+      recoverSidecarHostCleanup(host, initialCleanup),
+    ).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds repeated active-host cleanup failures", async () => {
+    const close = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValue(new Error("close failed"));
+    const host = { close };
+    const initialCleanup = host.close();
+
+    await expect(
+      recoverSidecarHostCleanup(host, initialCleanup),
+    ).rejects.toThrow("close failed");
+    expect(close).toHaveBeenCalledTimes(4);
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {

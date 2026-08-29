@@ -5,6 +5,7 @@ export interface OpenedAcpxSidecarHost {
 }
 
 const FAILED_ADMISSION_CLOSE_TIMEOUT_MS = 8_000;
+const ACTIVE_HOST_CLEANUP_ATTEMPTS = 4;
 
 export async function readSidecarHostStatusWithin(
   host: Pick<OpenedAcpxSidecarHost, "status">,
@@ -74,6 +75,26 @@ export async function closeSidecarHostForCommand(
   // The bounded wait only reports settlement; preserve the exact close error
   // for the command response and keep the host available for a later retry.
   await cleanup;
+}
+
+export async function recoverSidecarHostCleanup(
+  host: Pick<OpenedAcpxSidecarHost, "close">,
+  initialCleanup: Promise<void>,
+  maxAttempts = ACTIVE_HOST_CLEANUP_ATTEMPTS,
+): Promise<void> {
+  let cleanup = initialCleanup;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await cleanup;
+      return;
+    } catch (error) {
+      if (attempt >= maxAttempts) throw error;
+      // AcpxRuntimeHost releases its failed close promise before propagating
+      // the rejection, so this starts a new sequential cleanup attempt rather
+      // than reusing or overlapping the rejected operation.
+      cleanup = host.close({ reason: "Paperclip cleanup recovery" });
+    }
+  }
 }
 
 export async function verifyOpenedAcpxSidecarHost(
