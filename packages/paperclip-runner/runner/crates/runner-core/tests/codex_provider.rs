@@ -126,6 +126,21 @@ fn poll_and_ack(
     Ok(events)
 }
 
+fn wait_for_notification(provider: &mut CodexProvider, expected_method: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if let Some(CodexProviderEvent::Notification { method, params }) =
+            provider.poll().expect("poll provider notification")
+        {
+            if method == expected_method {
+                return params;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("did not observe Codex {expected_method} notification before the deadline");
+}
+
 fn saturate_provider_tool_receipts(directory: &Path) {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(task_context_tool_set()).unwrap();
@@ -674,35 +689,108 @@ fn codex_rejects_delayed_calls_after_every_terminal_notification() {
         .start_turn("Fail before invoking a tool.", &config.cwd)
         .expect("start provider turn");
 
-    let terminal = (0..16)
-        .find_map(
-            |_| match provider.poll().expect("poll terminal notification") {
-                Some(CodexProviderEvent::Notification { method, .. })
-                    if method == "turn/failed" =>
-                {
-                    Some(method)
-                }
-                _ => None,
-            },
-        )
-        .expect("observe failed terminal notification");
-    assert_eq!(terminal, "turn/failed");
+    wait_for_notification(&mut provider, "turn/failed");
     assert_eq!(provider.active_provider_turn_id(), None);
-    let warning = (0..16)
-        .find_map(
-            |_| match provider.poll().expect("reject delayed call non-fatally") {
-                Some(CodexProviderEvent::Notification { method, params })
-                    if method == "warning" =>
-                {
-                    Some(params)
-                }
-                _ => None,
-            },
-        )
-        .expect("a delayed call for the failed turn is rejected");
+    let warning = wait_for_notification(&mut provider, "warning");
     assert!(warning["message"]
         .as_str()
         .is_some_and(|message| message.contains("after the Codex turn terminated")));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_rejects_a_delayed_prior_turn_call_while_the_next_turn_is_active() {
+    let directory = temporary_directory("delayed-tool-after-next-turn-start");
+    let config = provider_config(&directory, &["--delayed-tool-after-next-turn-start"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Complete the first turn.", &config.cwd)
+        .expect("start first provider turn");
+    wait_for_notification(&mut provider, "turn/completed");
+
+    provider
+        .start_turn("Keep the second turn active.", &config.cwd)
+        .expect("start second provider turn");
+    assert_eq!(provider.active_provider_turn_id(), Some("provider-turn-2"));
+    let warning = wait_for_notification(&mut provider, "warning");
+    assert!(warning["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("after the Codex turn terminated")));
+    assert_eq!(provider.active_provider_turn_id(), Some("provider-turn-2"));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_rejects_a_two_turn_old_call_while_fresh_work_is_active() {
+    let directory = temporary_directory("delayed-tool-after-third-turn-start");
+    let config = provider_config(&directory, &["--delayed-tool-after-third-turn-start"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+
+    for message in ["Complete turn one.", "Complete turn two."] {
+        provider
+            .start_turn(message, &config.cwd)
+            .expect("start completed provider turn");
+        wait_for_notification(&mut provider, "turn/completed");
+    }
+    provider
+        .start_turn("Keep turn three active.", &config.cwd)
+        .expect("start third provider turn");
+    assert_eq!(provider.active_provider_turn_id(), Some("provider-turn-3"));
+
+    let warning = wait_for_notification(&mut provider, "warning");
+    assert_eq!(warning["providerMethod"], "item/tool/call");
+    assert_eq!(provider.active_provider_turn_id(), Some("provider-turn-3"));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_fails_closed_when_a_provider_reuses_a_settled_turn_id() {
+    let directory = temporary_directory("tool-after-reused-turn-start");
+    let config = provider_config(&directory, &["--tool-after-reused-turn-start"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+    provider
+        .start_turn("Complete the first turn.", &config.cwd)
+        .expect("start first provider turn");
+    wait_for_notification(&mut provider, "turn/completed");
+
+    provider
+        .start_turn("Reuse the settled provider identity.", &config.cwd)
+        .expect("start provider turn with a reused identity");
+    let warning = wait_for_notification(&mut provider, "warning");
+    assert_eq!(warning["providerMethod"], "item/tool/call");
+    assert_eq!(provider.active_provider_turn_id(), Some("provider-turn-1"));
+
+    let _ = provider.shutdown();
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn codex_rejects_a_two_turn_old_call_while_idle() {
+    let directory = temporary_directory("delayed-tool-after-second-turn-completion");
+    let config = provider_config(&directory, &["--delayed-tool-after-second-turn-completion"]);
+    let mut provider = CodexProvider::start_with_tools(&config, [task_context_tool()], None)
+        .expect("start Codex with an authorized tool");
+
+    for message in ["Complete turn one.", "Complete turn two."] {
+        provider
+            .start_turn(message, &config.cwd)
+            .expect("start completed provider turn");
+        wait_for_notification(&mut provider, "turn/completed");
+    }
+    assert_eq!(provider.active_provider_turn_id(), None);
+
+    let warning = wait_for_notification(&mut provider, "warning");
+    assert_eq!(warning["providerMethod"], "item/tool/call");
+    assert_eq!(provider.active_provider_turn_id(), None);
 
     let _ = provider.shutdown();
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");

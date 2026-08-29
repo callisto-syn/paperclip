@@ -95,12 +95,13 @@ fn finish_turn(state_path: &Path, state: &mut FakeState, status: &str) -> io::Re
 }
 
 fn send_question(state: &FakeState) -> io::Result<()> {
+    let turn_id = state.active_turn_id.as_deref().unwrap_or("provider-turn-1");
     send(json!({
         "id": "runtime-request-1",
         "method": "item/tool/requestUserInput",
         "params": {
             "threadId": state.thread_id,
-            "turnId": "provider-turn-1",
+            "turnId": turn_id,
             "itemId": "question-item-1",
             "isBlocking": true,
             "title": "Deployment input",
@@ -170,6 +171,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let delayed_tool_after_failed_turn = args
         .iter()
         .any(|value| value == "--delayed-tool-after-failed-turn");
+    let delayed_tool_after_next_turn_start = args
+        .iter()
+        .any(|value| value == "--delayed-tool-after-next-turn-start");
+    let delayed_tool_after_third_turn_start = args
+        .iter()
+        .any(|value| value == "--delayed-tool-after-third-turn-start");
+    let delayed_tool_after_second_turn_completion = args
+        .iter()
+        .any(|value| value == "--delayed-tool-after-second-turn-completion");
+    let tool_after_reused_turn_start = args
+        .iter()
+        .any(|value| value == "--tool-after-reused-turn-start");
     let question_before_failed_turn = args
         .iter()
         .any(|value| value == "--question-before-failed-turn");
@@ -288,15 +301,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "turn/start" => {
                 turn_start_count += 1;
-                state.active_turn_id = Some("provider-turn-1".to_owned());
+                let provider_turn_id = if tool_after_reused_turn_start {
+                    "provider-turn-1".to_owned()
+                } else {
+                    format!("provider-turn-{turn_start_count}")
+                };
+                state.active_turn_id = Some(provider_turn_id.clone());
                 save_state(&state_path, &state)?;
                 send(json!({
                     "id": id,
-                    "result": {"turn": {"id": "provider-turn-1", "status": "inProgress"}}
+                    "result": {"turn": {"id": provider_turn_id, "status": "inProgress"}}
                 }))?;
                 send(json!({
                     "method": "turn/started",
-                    "params": {"turn": {"id": "provider-turn-1"}}
+                    "params": {"turn": {"id": provider_turn_id}}
                 }))?;
                 if fail_after_second_turn_start && turn_start_count == 2 {
                     return Err("configured failure after second turn start".into());
@@ -306,7 +324,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "method": "turn/completed",
                         "params": {
                             "threadId": state.thread_id,
-                            "turn": {"id": "provider-turn-1", "status": "failed"}
+                            "turn": {"id": provider_turn_id, "status": "failed"}
                         }
                     }))?;
                     state.active_turn_id = None;
@@ -316,7 +334,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "method": "turn/failed",
                         "params": {
                             "threadId": state.thread_id,
-                            "turn": {"id": "provider-turn-1", "status": "failed"}
+                            "turn": {"id": provider_turn_id, "status": "failed"}
                         }
                     }))?;
                     state.active_turn_id = None;
@@ -326,8 +344,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "method": "item/tool/call",
                         "params": {
                             "threadId": state.thread_id,
+                            "turnId": provider_turn_id,
+                            "callId": "semantic-call-delayed",
+                            "tool": "get_task_context",
+                            "arguments": {}
+                        }
+                    }))?;
+                } else if delayed_tool_after_next_turn_start && turn_start_count == 2 {
+                    send(json!({
+                        "id": "tool-request-delayed",
+                        "method": "item/tool/call",
+                        "params": {
+                            "threadId": state.thread_id,
                             "turnId": "provider-turn-1",
                             "callId": "semantic-call-delayed",
+                            "tool": "get_task_context",
+                            "arguments": {}
+                        }
+                    }))?;
+                } else if delayed_tool_after_third_turn_start && turn_start_count == 3 {
+                    send(json!({
+                        "id": "tool-request-two-turns-delayed",
+                        "method": "item/tool/call",
+                        "params": {
+                            "threadId": state.thread_id,
+                            "turnId": "provider-turn-1",
+                            "callId": "semantic-call-two-turns-delayed",
+                            "tool": "get_task_context",
+                            "arguments": {}
+                        }
+                    }))?;
+                } else if tool_after_reused_turn_start && turn_start_count == 2 {
+                    send(json!({
+                        "id": "tool-request-reused-turn",
+                        "method": "item/tool/call",
+                        "params": {
+                            "threadId": state.thread_id,
+                            "turnId": "provider-turn-1",
+                            "callId": "semantic-call-reused-turn",
                             "tool": "get_task_context",
                             "arguments": {}
                         }
@@ -340,7 +394,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "method": "item/tool/call",
                         "params": {
                             "threadId": state.thread_id,
-                            "turnId": "provider-turn-1",
+                            "turnId": provider_turn_id,
                             "callId": "semantic-call-1",
                             "tool": "get_task_context",
                             "arguments": {}
@@ -356,6 +410,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     send_question(&state)?;
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
+                    if delayed_tool_after_second_turn_completion && turn_start_count == 2 {
+                        send(json!({
+                            "id": "tool-request-idle-two-turns-delayed",
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": state.thread_id,
+                                "turnId": "provider-turn-1",
+                                "callId": "semantic-call-idle-two-turns-delayed",
+                                "tool": "get_task_context",
+                                "arguments": {}
+                            }
+                        }))?;
+                    }
                     if emit_post_completion_warning {
                         send(json!({
                             "method": "warning",

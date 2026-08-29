@@ -351,7 +351,6 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completed_turn_authority = None;
-        self.settled_provider_turn_id = None;
         let runtime_request_scope = new_runtime_request_scope()?;
         let result = self.request(
             "turn/start",
@@ -370,6 +369,9 @@ impl CodexProvider {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| LocalRunnerError::invalid("Codex turn/start omitted turn.id"))?
             .to_owned();
+        // Retain the prior settled identity while the next turn runs. Besides
+        // recognizing delayed prior-turn requests, this fails closed if a
+        // provider ambiguously reuses the same turn id for fresh work.
         self.active_provider_turn_id = Some(provider_turn_id);
         self.runtime_request_scope = runtime_request_scope;
         Ok(result)
@@ -537,12 +539,11 @@ impl CodexProvider {
                         "Codex tool call named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none()
-                    && request_targets_settled_turn(
-                        self.settled_provider_turn_id.as_deref(),
-                        &params,
-                    )
-                {
+                if request_targets_non_active_turn(
+                    self.active_provider_turn_id.as_deref(),
+                    self.settled_provider_turn_id.as_deref(),
+                    &params,
+                ) {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.as_deref().ok_or_else(|| {
@@ -639,12 +640,11 @@ impl CodexProvider {
                         "Codex runtime request named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none()
-                    && request_targets_settled_turn(
-                        self.settled_provider_turn_id.as_deref(),
-                        &params,
-                    )
-                {
+                if request_targets_non_active_turn(
+                    self.active_provider_turn_id.as_deref(),
+                    self.settled_provider_turn_id.as_deref(),
+                    &params,
+                ) {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
@@ -711,27 +711,30 @@ impl CodexProvider {
 
         if let Some(method) = message.get("method").and_then(Value::as_str) {
             let params = message.get("params").cloned().unwrap_or(Value::Null);
+            let terminal_event_type = normalized_codex_terminal_event_type(method, &params);
+            let notification_turn_id = params
+                .get("turnId")
+                .or_else(|| params.pointer("/turn/id"))
+                .and_then(Value::as_str);
+            if terminal_event_type.is_some()
+                && notification_turn_id.is_some()
+                && notification_turn_id != self.active_provider_turn_id.as_deref()
+            {
+                return Ok(Some(CodexProviderEvent::Notification {
+                    method: "warning".to_owned(),
+                    params: json!({
+                        "message": "ignored a terminal notification for a non-active Codex turn",
+                        "providerMethod": bounded_method(method),
+                    }),
+                }));
+            }
             validate_notification_binding(
                 &self.thread_id,
                 self.active_provider_turn_id.as_deref(),
                 &params,
             )?;
-            if let Some(terminal_event_type) = normalized_codex_terminal_event_type(method, &params)
-            {
-                let notification_turn_id = params
-                    .get("turnId")
-                    .or_else(|| params.pointer("/turn/id"))
-                    .and_then(Value::as_str);
+            if let Some(terminal_event_type) = terminal_event_type {
                 if self.active_provider_turn_id.is_none() {
-                    if notification_turn_id == self.settled_provider_turn_id.as_deref() {
-                        return Ok(Some(CodexProviderEvent::Notification {
-                            method: "warning".to_owned(),
-                            params: json!({
-                                "message": "ignored a duplicate terminal notification for the settled Codex turn",
-                                "providerMethod": bounded_method(method),
-                            }),
-                        }));
-                    }
                     return Err(LocalRunnerError::invalid(
                         "Codex terminal arrived outside an active provider turn",
                     ));
@@ -1048,9 +1051,15 @@ fn validate_notification_binding(
     Ok(())
 }
 
-fn request_targets_settled_turn(settled_turn_id: Option<&str>, params: &Value) -> bool {
-    settled_turn_id
-        .is_some_and(|settled| params.get("turnId").and_then(Value::as_str) == Some(settled))
+fn request_targets_non_active_turn(
+    active_turn_id: Option<&str>,
+    settled_turn_id: Option<&str>,
+    params: &Value,
+) -> bool {
+    let requested_turn_id = params.get("turnId").and_then(Value::as_str);
+    requested_turn_id.is_some_and(|requested| {
+        settled_turn_id == Some(requested) || active_turn_id != Some(requested)
+    })
 }
 
 fn latest_active_turn_id(snapshot: &Value) -> Option<String> {
