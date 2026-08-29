@@ -2274,15 +2274,33 @@ describe("executeNativeSession recovery", () => {
       async completeRun() {},
     };
 
-    await expect(executeNativeSession({
-      input,
-      backend,
-      controlPlane: port,
-      runnerInstanceId: "runner-recovery",
-      controlPlaneInstanceId: "control-recovery",
-      runtimeInputLiveWindowMs: 1,
-    })).resolves.toMatchObject({ result });
-    expect(handoffRuntimeRequest).not.toHaveBeenCalled();
-    expect(appended.some((event) => event.eventType === "runtime_request.expired")).toBe(false);
+    const originalSetTimeout = globalThis.setTimeout;
+    let queuedHandoffCallback: (() => void) | null = null;
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, delay, ...args) => {
+      if (delay === 123_456) {
+        queuedHandoffCallback = () => callback(...args);
+        const handle = originalSetTimeout(() => undefined, 60_000);
+        handle.unref?.();
+        return handle;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    }) as typeof setTimeout);
+    try {
+      await expect(executeNativeSession({
+        input,
+        backend,
+        controlPlane: port,
+        runnerInstanceId: "runner-recovery",
+        controlPlaneInstanceId: "control-recovery",
+        runtimeInputLiveWindowMs: 123_456,
+      })).resolves.toMatchObject({ result });
+      expect(queuedHandoffCallback).not.toBeNull();
+      queuedHandoffCallback?.();
+      await Promise.resolve();
+      expect(handoffRuntimeRequest).not.toHaveBeenCalled();
+      expect(appended.some((event) => event.eventType === "runtime_request.expired")).toBe(false);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 });

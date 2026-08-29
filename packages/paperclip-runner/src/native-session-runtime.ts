@@ -203,16 +203,26 @@ async function consumeTurn(
               clearInputTimer(requestId);
               const inputTimer = setTimeout(() => {
                 inputTimers.delete(requestId);
+                // A timer callback can already be queued when teardown clears
+                // its handle. Re-check the live-turn authority inside the
+                // callback before starting or registering durable work.
+                if (stopConsumer || appendAbort.signal.aborted) return;
                 if (session.handoffRuntimeRequest === undefined) {
                   rejectHandoff?.(new Error("native_runtime_request_handoff_unavailable"));
                   return;
                 }
-                const handoff = session.handoffRuntimeRequest({
-                  requestId,
-                  turnId,
-                  reason: "durable_handoff",
-                  signal: appendAbort.signal,
-                });
+                let handoff: Promise<unknown>;
+                try {
+                  handoff = session.handoffRuntimeRequest({
+                    requestId,
+                    turnId,
+                    reason: "durable_handoff",
+                    signal: appendAbort.signal,
+                  });
+                } catch (error) {
+                  rejectHandoff?.(error);
+                  return;
+                }
                 handoffOperations.add(handoff);
                 void handoff
                   .catch((error) => rejectHandoff?.(error))
