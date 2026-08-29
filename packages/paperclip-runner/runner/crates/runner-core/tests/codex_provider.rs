@@ -463,7 +463,7 @@ fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(!recovered_event_types
+    assert!(recovered_event_types
         .iter()
         .any(|event| event == "session.failed"));
 

@@ -269,10 +269,11 @@ impl CodexProvider {
     }
 
     pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
-        self.completed_turn_authoritative = authoritative;
-        // A freshly resumed, already-completed thread may shut down cleanly
-        // without emitting the old terminal again. This never blesses a
-        // nonzero exit, and start_turn revokes both flags.
+        // Completion authority belongs to the provider process that emitted
+        // the terminal. A freshly resumed idle process may exit cleanly after
+        // thread/read, but it must not inherit authority that would mask its
+        // own later nonzero exit as reconciliation.
+        self.completed_turn_authoritative = false;
         self.expected_shutdown = authoritative;
     }
 
