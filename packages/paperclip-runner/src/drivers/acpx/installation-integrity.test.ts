@@ -18,7 +18,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
-import { verifyQualifiedAcpxInstallation } from "./installation-integrity.js";
+import {
+  verifiedExecutableOpenFlags,
+  verifyQualifiedAcpxInstallation,
+} from "./installation-integrity.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -31,6 +34,16 @@ afterEach(async () => {
 });
 
 describe("ACPX installation integrity", () => {
+  it("fails closed when the platform cannot atomically open without following symlinks", () => {
+    expect(() => verifiedExecutableOpenFlags("win32", 0x20000)).toThrow(
+      "requires atomic no-follow",
+    );
+    expect(() => verifiedExecutableOpenFlags("linux", undefined)).toThrow(
+      "requires atomic no-follow",
+    );
+    expect(verifiedExecutableOpenFlags("linux", 0x20000)).not.toBe(0);
+  });
+
   it("accepts the exact package, version, executable, and runtime", async () => {
     const fixture = await installationFixture();
     const installation = await verifyQualifiedAcpxInstallation(

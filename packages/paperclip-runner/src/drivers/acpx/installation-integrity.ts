@@ -209,10 +209,10 @@ async function inspectCommand(
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
-    handle = await open(
-      commandPath,
-      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-    );
+    handle = await open(commandPath, verifiedExecutableOpenFlags(
+      process.platform,
+      constants.O_NOFOLLOW,
+    ));
   } catch {
     throw new Error(
       `ACPX ${agent} executable could not be opened as a no-follow regular file`,
@@ -259,6 +259,23 @@ async function inspectCommand(
   } finally {
     await handle.close();
   }
+}
+
+/** Fail closed where Node cannot atomically refuse a final symlink component. */
+export function verifiedExecutableOpenFlags(
+  platform: NodeJS.Platform,
+  noFollowFlag: number | undefined,
+): number {
+  if (
+    platform === "win32"
+    || typeof noFollowFlag !== "number"
+    || noFollowFlag === 0
+  ) {
+    throw new Error(
+      "ACPX verified executable launch requires atomic no-follow file opening",
+    );
+  }
+  return constants.O_RDONLY | noFollowFlag;
 }
 
 async function readHandleAtStart(
