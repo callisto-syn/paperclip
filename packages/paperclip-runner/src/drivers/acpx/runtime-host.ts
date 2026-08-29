@@ -38,7 +38,7 @@ import {
 } from "./runtime-sandbox.js";
 import type { AcpxExpectedSessionIdentity } from "./sidecar-protocol.js";
 
-const TURN_CANCELLATION_TIMEOUT_MS = 2_000;
+export const ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS = 2_000;
 
 export interface AcpxRuntimePortIdentity {
   acpxRecordId: string;
@@ -385,7 +385,7 @@ async function boundedCancellation(
               "ACPX turn cancellation exceeded its shutdown timeout",
             ),
           }),
-        TURN_CANCELLATION_TIMEOUT_MS,
+        ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS,
       );
       timer.unref();
     }),

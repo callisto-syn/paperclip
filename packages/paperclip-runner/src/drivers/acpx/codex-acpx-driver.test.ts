@@ -339,7 +339,9 @@ describe("Codex ACPX harness driver", () => {
 
       fixture.host.close.mockImplementation(({ reason }) =>
         reason.includes("scheduled quarantined cleanup recovery")
-          ? new Promise<void>((resolve) => setTimeout(resolve, 6_500))
+          // Exercise the complete production host bound: two seconds for
+          // active-turn cancellation plus six seconds for protocol/TERM/KILL.
+          ? new Promise<void>((resolve) => setTimeout(resolve, 8_500))
           : Promise.resolve()
       );
       await vi.advanceTimersToNextTimerAsync();
@@ -358,7 +360,7 @@ describe("Codex ACPX harness driver", () => {
         reason:
           "runtime close persistently failed (scheduled quarantined cleanup recovery)",
       });
-      await vi.advanceTimersByTimeAsync(6_499);
+      await vi.advanceTimersByTimeAsync(8_499);
       expect(admissionSettled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await expect(admission).resolves.toBeDefined();
@@ -395,7 +397,7 @@ describe("Codex ACPX harness driver", () => {
         workingDirectory: "/workspace",
       });
       void admission.finally(() => { admissionSettled = true; }).catch(() => undefined);
-      await vi.advanceTimersByTimeAsync(6_999);
+      await vi.advanceTimersByTimeAsync(8_999);
       expect(admissionSettled).toBe(false);
       await vi.advanceTimersByTimeAsync(2);
       await expect(admission).rejects.toThrow("exceeded the admission grace");

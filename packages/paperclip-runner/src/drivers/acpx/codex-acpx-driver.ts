@@ -32,12 +32,16 @@ import {
   canonicalRunnerToolName,
   type RunnerToolCall,
 } from "../runner-tool-bridge.js";
-import { openCodexAcpxRuntime } from "./codex-runtime-adapter.js";
+import {
+  DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS,
+  openCodexAcpxRuntime,
+} from "./codex-runtime-adapter.js";
 import {
   acpxDriverDescriptor,
   validateAcpxDriverConfig,
 } from "./driver-profile.js";
 import {
+  ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS,
   AcpxRuntimeHost,
   type AcpxRuntimeTurn,
   type OpenAcpxRuntimeHostOptions,
@@ -52,10 +56,13 @@ const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
 const QUARANTINED_HOST_CLOSE_RETRY_MS = 60_000;
-// The adapter may legitimately spend two seconds on protocol close, then two
-// seconds each verifying TERM and KILL. Preserve one additional second for
-// scheduling so admission does not reject cleanup that remains within bounds.
-const QUARANTINED_HOST_ADMISSION_GRACE_MS = 7_000;
+// Host shutdown first bounds active-turn cancellation and then performs the
+// adapter's bounded protocol/TERM/KILL cleanup. Preserve one additional second
+// for scheduling so admission does not reject that complete valid sequence.
+const QUARANTINED_HOST_ADMISSION_GRACE_MS =
+  ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS +
+  DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS +
+  1_000;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;

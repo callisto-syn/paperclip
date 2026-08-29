@@ -22,6 +22,16 @@ import { decideAcpxPermission } from "./permission-policy.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
 const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 2_000;
+const PROVIDER_TERM_EXIT_TIMEOUT_MS = 2_000;
+const PROVIDER_KILL_EXIT_TIMEOUT_MS = 2_000;
+// Production shutdown waits for the protocol close bound before beginning the
+// sequential TERM/KILL verification windows. Keep this exported package-local
+// bound aligned with the implementation so admission can include the complete
+// provider cleanup path instead of accounting for only part of it.
+export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
+  DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS +
+  PROVIDER_TERM_EXIT_TIMEOUT_MS +
+  PROVIDER_KILL_EXIT_TIMEOUT_MS;
 // A close may outlive its caller-facing wait bound. Keeping the exact promise
 // here prevents a timed-out protocol cleanup from being garbage-collected or
 // replaced by a fresh attempt whose success could hide the older outcome.
@@ -408,7 +418,7 @@ class SpawnedChildSet {
           const terminateOutcome = await signalAndWaitForExit(
             child,
             "SIGTERM",
-            2_000,
+            PROVIDER_TERM_EXIT_TIMEOUT_MS,
           );
           if (terminateOutcome.error !== undefined) {
             pushUnique(errors, terminateOutcome.error);
@@ -417,7 +427,7 @@ class SpawnedChildSet {
             const killOutcome = await signalAndWaitForExit(
               child,
               "SIGKILL",
-              2_000,
+              PROVIDER_KILL_EXIT_TIMEOUT_MS,
             );
             if (killOutcome.error !== undefined) {
               pushUnique(errors, killOutcome.error);
