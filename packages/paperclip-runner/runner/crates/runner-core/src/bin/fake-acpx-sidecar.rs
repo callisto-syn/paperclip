@@ -90,6 +90,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-tool-terminal"
             | "turns-tool-result-terminal"
             | "turns-tool-error-result-terminal"
+            | "turns-multiple-tool-results-terminal"
             | "turns-reserved-result-terminal"
             | "turns-reserved-yielded-terminal"
             | "turns-reserved-block-terminal"
@@ -174,6 +175,49 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     next_sequence += 1;
                 }
                 if command == "turn.start" && mode == "turns-tool-terminal" {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.turn_terminal",
+                        "run-1",
+                        turn_id,
+                        json!({"status":"completed"}),
+                    )?;
+                    next_sequence += 1;
+                }
+                if command == "turn.start" && mode == "turns-multiple-tool-results-terminal" {
+                    for index in 1..=2 {
+                        write_turn_event(
+                            &mut stdout,
+                            next_sequence,
+                            "runtime.tool_called",
+                            "run-1",
+                            turn_id,
+                            json!({
+                                "callId":format!("call-{index}"),
+                                "operationId":"issues.read",
+                                "input":{"id":format!("issue-{index}")},
+                            }),
+                        )?;
+                        next_sequence += 1;
+                    }
+                    for index in 1..=2 {
+                        write_turn_event(
+                            &mut stdout,
+                            next_sequence,
+                            "runtime.event",
+                            "run-1",
+                            turn_id,
+                            json!({
+                                "type":"semantic_result",
+                                "callId":format!("call-{index}"),
+                                "operationId":"issues.read",
+                                "ok":true,
+                                "result":{"id":format!("issue-{index}")},
+                            }),
+                        )?;
+                        next_sequence += 1;
+                    }
                     write_turn_event(
                         &mut stdout,
                         next_sequence,

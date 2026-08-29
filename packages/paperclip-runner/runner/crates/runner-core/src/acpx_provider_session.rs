@@ -374,24 +374,32 @@ impl AcpxProviderSession {
                                 "ACPX reserved terminal result reconciliation failed: {error}"
                             ))));
                         }
-                    } else if let Err(error) =
-                        next_bridge.apply_result(crate::provider_bridge::ToolResult {
-                            call_id: result.call_id.clone(),
-                            operation_id: result.operation_id.clone(),
-                            result: result.result.clone(),
-                            is_error: !result.ok,
-                        })
-                    {
-                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                            "ACPX provider tool result reconciliation failed: {error}"
-                        ))));
+                    } else {
+                        let replayed = next_bridge.has_completed_call(&result.call_id);
+                        if let Err(error) =
+                            next_bridge.apply_result(crate::provider_bridge::ToolResult {
+                                call_id: result.call_id.clone(),
+                                operation_id: result.operation_id.clone(),
+                                result: result.result.clone(),
+                                is_error: !result.ok,
+                            })
+                        {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX provider tool result reconciliation failed: {error}"
+                            ))));
+                        }
+                        if replayed {
+                            expose_event = false;
+                        }
                     }
-                    if let Err(error) =
-                        next_state.complete_tool(&result.call_id, &result.operation_id)
-                    {
-                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                            "ACPX provider tool completion reconciliation failed: {error}"
-                        ))));
+                    if next_state.pending_tool(&result.call_id).is_some() {
+                        if let Err(error) =
+                            next_state.complete_tool(&result.call_id, &result.operation_id)
+                        {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX provider tool completion reconciliation failed: {error}"
+                            ))));
+                        }
                     }
                 }
                 AcpxProviderStateEvent::TurnTerminal { .. } => {

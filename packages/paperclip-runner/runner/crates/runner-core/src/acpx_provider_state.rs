@@ -16,6 +16,8 @@ const MAX_PENDING_TOOLS: usize = 4_096;
 const MAX_PENDING_TOOL_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PENDING_RUNTIME_REQUESTS: usize = 1_024;
 const MAX_PENDING_RUNTIME_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const PRP_COMPLETION_TOOL_NAME: &str = "paperclip_finish";
+const PRP_BLOCK_TOOL_NAME: &str = "paperclip_block";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AcpxPendingTool {
@@ -360,16 +362,25 @@ impl AcpxProviderState {
                     .expect("decoded ACPX semantic result has a result")
                     .clone(),
             };
-            return match self.semantic_result.as_ref() {
-                None => {
-                    self.semantic_result = Some(result.clone());
-                    Ok(vec![AcpxProviderStateEvent::SemanticResult(result)])
-                }
-                Some(existing) if existing == &result => Ok(Vec::new()),
-                Some(_) => Err(LocalRunnerError::invalid(
-                    "ACPX emitted conflicting semantic results for one turn",
-                )),
-            };
+            if matches!(
+                result.operation_id.as_str(),
+                PRP_COMPLETION_TOOL_NAME | PRP_BLOCK_TOOL_NAME
+            ) {
+                return match self.semantic_result.as_ref() {
+                    None => {
+                        self.semantic_result = Some(result.clone());
+                        Ok(vec![AcpxProviderStateEvent::SemanticResult(result)])
+                    }
+                    Some(existing) if existing == &result => Ok(Vec::new()),
+                    Some(_) => Err(LocalRunnerError::invalid(
+                        "ACPX emitted conflicting terminal semantic results for one turn",
+                    )),
+                };
+            }
+            // Dynamic results are independently authorized and deduplicated
+            // by call ID in ProviderToolBridge. They must not compete for the
+            // turn-wide terminal-result slot.
+            return Ok(vec![AcpxProviderStateEvent::SemanticResult(result)]);
         }
         let turn_id = event
             .turn_id

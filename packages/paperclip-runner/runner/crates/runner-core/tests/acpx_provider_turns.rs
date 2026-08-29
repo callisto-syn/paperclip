@@ -213,6 +213,45 @@ fn completed_tool_results_are_not_cancelled_when_the_turn_terminates() {
 }
 
 #[test]
+fn completes_multiple_distinct_dynamic_tool_results_in_one_turn() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-multiple-tool-results-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+
+    for index in 1..=2 {
+        let tool = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(matches!(
+            &tool[0],
+            AcpxProviderStateEvent::ToolCall { call_id, .. }
+                if call_id == &format!("call-{index}")
+        ));
+    }
+    for index in 1..=2 {
+        let result = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(matches!(
+            &result[0],
+            AcpxProviderStateEvent::SemanticResult(result)
+                if result.call_id == format!("call-{index}")
+                    && result.result["id"] == format!("issue-{index}")
+        ));
+        assert!(session
+            .state()
+            .pending_tool(&format!("call-{index}"))
+            .is_none());
+    }
+
+    let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert!(matches!(
+        &terminal[0],
+        AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
+    ));
+    session.shutdown("test complete").unwrap();
+}
+
+#[test]
 fn failed_semantic_results_preserve_error_status_and_release_pending_capacity() {
     let mut session =
         AcpxProviderSession::start(&config("turns-tool-error-result-terminal")).unwrap();
