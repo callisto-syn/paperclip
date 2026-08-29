@@ -1546,6 +1546,8 @@ describe("executeNativeSession recovery", () => {
       payload: {},
     };
     const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
+    let dispositionTerminalCommitted = false;
+    let prematureDispositionCheckpoint = false;
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -1573,9 +1575,17 @@ describe("executeNativeSession recovery", () => {
     const port: ControlPlanePort = {
       async openRun() {},
       async loadSessionCheckpoint() { return structuredClone(checkpoint); },
-      async checkpointSession() {},
+      async checkpointSession(snapshot) {
+        if (
+          snapshot.terminalTurns?.some((turn) => turn.turnId === "turn-disposition")
+          && !dispositionTerminalCommitted
+        ) prematureDispositionCheckpoint = true;
+      },
       async appendEvent(event) {
         events.push(structuredClone(event));
+        if (event.eventType === "turn.completed" && event.turnId === "turn-disposition") {
+          dispositionTerminalCommitted = true;
+        }
         return {
           cursor: events.length,
           highestContiguousSourceSeq: highestContiguous(events),
@@ -1606,6 +1616,7 @@ describe("executeNativeSession recovery", () => {
       turnId: "turn-disposition",
     });
     expect(startTurn).not.toHaveBeenCalled();
+    expect(prematureDispositionCheckpoint).toBe(false);
     expect(events.map((event) => event.eventType)).toEqual([
       "turn.completed",
       "run.result.accepted",

@@ -675,6 +675,16 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       await options.onCheckpoint?.(snapshot);
     };
     const recoveredSnapshot = await session.snapshot();
+    const recoveredActiveTurnId = recovered
+      ? recoveredSnapshot.activeTurnId ?? null
+      : persistedSession?.activeTurnId ?? null;
+    const adoptedDispositionTerminal = Boolean(
+      recovered
+      && recoveredSnapshot.dispositionOnlyRecoveryConsumed
+      && !recoveredActiveTurnId
+      && (recoveredSnapshot.terminalTurns?.length ?? 0)
+        > (persistedSession?.terminalTurns?.length ?? 0)
+    );
     if (continuityBreak) {
       await options.onContinuityBreak?.({
         ...continuityBreak,
@@ -683,8 +693,16 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
           recoveredSnapshot.providerSessionId ?? null,
       });
     }
-    await options.controlPlane.checkpointSession?.(recoveredSnapshot);
-    await options.onCheckpoint?.(recoveredSnapshot);
+    // recoverSession may adopt a provider terminal and enqueue its normalized
+    // event before returning. Do not checkpoint that terminal fingerprint
+    // until consumeTurn has durably appended the event: if this process dies
+    // first, retaining the older checkpoint lets the next recovery adopt and
+    // emit the same provider terminal again instead of reconstructing a closed
+    // session with no event to finalize.
+    if (!adoptedDispositionTerminal) {
+      await options.controlPlane.checkpointSession?.(recoveredSnapshot);
+      await options.onCheckpoint?.(recoveredSnapshot);
+    }
 
     let consumed = {
       event: null as PrpEvent | null,
@@ -709,16 +727,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       // cleared. Falling back to the older control-plane checkpoint here
       // resurrects that terminal turn and waits forever for an event that was
       // already consumed.
-      const recoveredActiveTurnId = recovered
-        ? recoveredSnapshot.activeTurnId ?? null
-        : persistedSession?.activeTurnId ?? null;
-      const adoptedDispositionTerminal = Boolean(
-        recovered
-        && recoveredSnapshot.dispositionOnlyRecoveryConsumed
-        && !recoveredActiveTurnId
-        && (recoveredSnapshot.terminalTurns?.length ?? 0)
-          > (persistedSession?.terminalTurns?.length ?? 0)
-      );
       const dispositionRecoveryAlreadySubmitted = Boolean(
         recovered
         && recoveredSnapshot.dispositionOnlyRecoveryConsumed
