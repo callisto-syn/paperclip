@@ -28,6 +28,8 @@ import type { QualifiedAcpxProfile } from "./qualified-profiles.js";
 
 const MAX_PACKAGE_JSON_BYTES = 256 * 1024;
 const MAX_AGENT_COMMAND_BYTES = 16 * 1024 * 1024;
+const COMMAND_SOURCE_FD = 3;
+const COMMAND_DIRECTORY_FD = 4;
 
 export type AcpxPackageJsonResolver = (packageName: string) => string;
 
@@ -52,6 +54,11 @@ interface VerifiedAcpxCommandIdentity {
   size: string;
   modifiedNanoseconds: string;
   changedNanoseconds: string;
+}
+
+interface VerifiedAcpxDirectoryIdentity {
+  device: string;
+  inode: string;
 }
 
 type AcpxCommandFormat = "commonjs" | "module";
@@ -95,6 +102,12 @@ export async function verifyQualifiedAcpxInstallation(
     commandDirectory,
     basename(unresolvedCommandPath),
   );
+  const verifiedDirectory = await openVerifiedCommandDirectory(
+    commandDirectory,
+    profile.agent,
+  );
+  const commandDirectoryIdentity = verifiedDirectory.identity;
+  await verifiedDirectory.handle.close();
   const command = await inspectCommand(
     commandPath,
     profile.commandDigest,
@@ -129,18 +142,44 @@ export async function verifyQualifiedAcpxInstallation(
     agentServerPackageJsonPath: serverPackageJsonPath,
     agentRuntimePackageJsonPath: runtimePackageJsonPath,
     async openCommand(): Promise<VerifiedAcpxCommandLease> {
-      const current = await inspectCommand(
-        commandPath,
-        commandDigest,
+      const currentDirectory = await openVerifiedCommandDirectory(
+        commandDirectory,
         "provider",
       );
-      if (!sameIdentity(current.identity, commandIdentity)) {
-        current.bytes.fill(0);
+      if (
+        !sameDirectoryIdentity(
+          currentDirectory.identity,
+          commandDirectoryIdentity,
+        )
+      ) {
+        await currentDirectory.handle.close();
         throw new Error(
-          "ACPX provider executable identity changed after verification",
+          "ACPX provider executable directory identity changed after verification",
         );
       }
-      return commandLease(commandPath, commandFormat, current.bytes);
+      try {
+        const current = await inspectCommand(
+          commandPath,
+          commandDigest,
+          "provider",
+        );
+        if (!sameIdentity(current.identity, commandIdentity)) {
+          current.bytes.fill(0);
+          throw new Error(
+            "ACPX provider executable identity changed after verification",
+          );
+        }
+        return commandLease(
+          commandDirectory,
+          basename(commandPath),
+          commandFormat,
+          current.bytes,
+          currentDirectory.handle,
+        );
+      } catch (error) {
+        await currentDirectory.handle.close();
+        throw error;
+      }
     },
   });
 }
@@ -203,16 +242,14 @@ async function inspectCommand(
     lexicalBefore.isSymbolicLink() ||
     !lexicalBefore.isFile()
   ) {
-    throw new Error(
-      `ACPX ${agent} executable must be a real regular file`,
-    );
+    throw new Error(`ACPX ${agent} executable must be a real regular file`);
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
-    handle = await open(commandPath, verifiedExecutableOpenFlags(
-      process.platform,
-      constants.O_NOFOLLOW,
-    ));
+    handle = await open(
+      commandPath,
+      verifiedExecutableOpenFlags(process.platform, constants.O_NOFOLLOW),
+    );
   } catch {
     throw new Error(
       `ACPX ${agent} executable could not be opened as a no-follow regular file`,
@@ -267,15 +304,95 @@ export function verifiedExecutableOpenFlags(
   noFollowFlag: number | undefined,
 ): number {
   if (
-    platform === "win32"
-    || typeof noFollowFlag !== "number"
-    || noFollowFlag === 0
+    platform === "win32" ||
+    typeof noFollowFlag !== "number" ||
+    noFollowFlag === 0
   ) {
     throw new Error(
       "ACPX verified executable launch requires atomic no-follow file opening",
     );
   }
   return constants.O_RDONLY | noFollowFlag;
+}
+
+async function openVerifiedCommandDirectory(
+  commandDirectory: string,
+  agent: string,
+): Promise<{
+  handle: FileHandle;
+  identity: VerifiedAcpxDirectoryIdentity;
+}> {
+  const lexicalBefore = await lstat(commandDirectory, { bigint: true }).catch(
+    () => null,
+  );
+  if (
+    lexicalBefore === null ||
+    lexicalBefore.isSymbolicLink() ||
+    !lexicalBefore.isDirectory()
+  ) {
+    throw new Error(
+      `ACPX ${agent} executable directory must be a real directory`,
+    );
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      commandDirectory,
+      verifiedDirectoryOpenFlags(
+        process.platform,
+        constants.O_NOFOLLOW,
+        constants.O_DIRECTORY,
+      ),
+    );
+  } catch {
+    throw new Error(
+      `ACPX ${agent} executable directory could not be opened as a no-follow directory`,
+    );
+  }
+  try {
+    const opened = await handle.stat({ bigint: true });
+    const lexicalAfter = await lstat(commandDirectory, { bigint: true }).catch(
+      () => null,
+    );
+    const beforeIdentity = directoryIdentity(lexicalBefore);
+    const openedIdentity = directoryIdentity(opened);
+    if (
+      !opened.isDirectory() ||
+      lexicalAfter === null ||
+      lexicalAfter.isSymbolicLink() ||
+      !lexicalAfter.isDirectory() ||
+      !sameDirectoryIdentity(beforeIdentity, directoryIdentity(lexicalAfter)) ||
+      !sameDirectoryIdentity(directoryIdentity(lexicalAfter), openedIdentity)
+    ) {
+      throw new Error(
+        `ACPX ${agent} executable directory changed while it was verified`,
+      );
+    }
+    return { handle, identity: openedIdentity };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+/** Fail closed where Node cannot atomically pin a real directory inode. */
+function verifiedDirectoryOpenFlags(
+  platform: NodeJS.Platform,
+  noFollowFlag: number | undefined,
+  directoryFlag: number | undefined,
+): number {
+  if (
+    platform === "win32" ||
+    typeof noFollowFlag !== "number" ||
+    noFollowFlag === 0 ||
+    typeof directoryFlag !== "number" ||
+    directoryFlag === 0
+  ) {
+    throw new Error(
+      "ACPX verified executable launch requires atomic no-follow directory opening",
+    );
+  }
+  return constants.O_RDONLY | noFollowFlag | directoryFlag;
 }
 
 async function readHandleAtStart(
@@ -296,15 +413,27 @@ async function readHandleAtStart(
 }
 
 function commandLease(
-  commandPath: string,
+  commandDirectoryPath: string,
+  commandName: string,
   format: AcpxCommandFormat,
   verifiedBytes: Buffer,
+  commandDirectory: FileHandle,
 ): VerifiedAcpxCommandLease {
   let consumed = false;
+  let directoryReleased = false;
+  const releaseDirectory = async (): Promise<void> => {
+    if (directoryReleased) return;
+    directoryReleased = true;
+    await commandDirectory.close();
+  };
+  const releaseDirectoryBestEffort = (): void => {
+    void releaseDirectory().catch(() => undefined);
+  };
   const close = async (): Promise<void> => {
     if (consumed) return;
     consumed = true;
     verifiedBytes.fill(0);
+    await releaseDirectory();
   };
   return {
     spawn(
@@ -322,21 +451,24 @@ function commandLease(
             format === "module"
               ? MODULE_SNAPSHOT_BOOTSTRAP
               : COMMONJS_SNAPSHOT_BOOTSTRAP,
-            commandPath,
+            commandDirectoryPath,
+            commandName,
             ...args,
           ],
           {
             ...options,
             env: sanitizedNodeEnvironment(options.env),
             shell: false,
-            stdio: ["pipe", "pipe", "pipe", "pipe"],
+            stdio: ["pipe", "pipe", "pipe", "pipe", commandDirectory.fd],
           },
         );
       } catch (error) {
         verifiedBytes.fill(0);
+        releaseDirectoryBestEffort();
         throw error;
       }
-      const sourceInput = child.stdio[3] as Writable | null;
+      releaseDirectoryBestEffort();
+      const sourceInput = child.stdio[COMMAND_SOURCE_FD] as Writable | null;
       if (sourceInput === null) {
         verifiedBytes.fill(0);
         child.kill();
@@ -371,13 +503,26 @@ function snapshotBootstrap(format: AcpxCommandFormat): string {
     'const fs = require("node:fs");',
     'const { registerHooks } = require("node:module");',
     'const { pathToFileURL } = require("node:url");',
-    "const target = pathToFileURL(process.argv[1]).href;",
-    "const source = fs.readFileSync(3);",
+    "const commandDirectory = process.argv[1];",
+    "const commandName = process.argv[2];",
+    "process.argv.splice(1, 2, commandName);",
+    `const pinnedDirectory = fs.fstatSync(${COMMAND_DIRECTORY_FD}, { bigint: true });`,
+    "const assertPinnedDirectory = () => {",
+    "const current = fs.lstatSync(commandDirectory, { bigint: true });",
+    'if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== pinnedDirectory.dev || current.ino !== pinnedDirectory.ino) throw new Error("ACPX provider executable directory identity changed after verification");',
+    "};",
+    "assertPinnedDirectory();",
+    `const directory = process.platform === "linux" ? "/proc/self/fd/${COMMAND_DIRECTORY_FD}" : commandDirectory;`,
+    "const directoryUrl = pathToFileURL(`${directory}/`).href;",
+    "const target = new URL(commandName, directoryUrl).href;",
+    `const source = fs.readFileSync(${COMMAND_SOURCE_FD});`,
     "registerHooks({ resolve(specifier, context, nextResolve) {",
     "if (specifier === target) return { url: target, shortCircuit: true };",
+    'if (process.platform !== "linux" && context.parentURL?.startsWith(directoryUrl)) assertPinnedDirectory();',
     "return nextResolve(specifier, context);",
     "}, load(url, context, nextLoad) {",
     `if (url === target) return { format: ${JSON.stringify(format)}, source, shortCircuit: true };`,
+    'if (process.platform !== "linux" && url.startsWith(directoryUrl)) assertPinnedDirectory();',
     "return nextLoad(url, context);",
     "} });",
     "import(target).catch((error) => { console.error(error); process.exitCode = 1; });",
@@ -415,6 +560,23 @@ function fileIdentity(metadata: {
     modifiedNanoseconds: metadata.mtimeNs.toString(),
     changedNanoseconds: metadata.ctimeNs.toString(),
   };
+}
+
+function directoryIdentity(metadata: {
+  dev: bigint;
+  ino: bigint;
+}): VerifiedAcpxDirectoryIdentity {
+  return {
+    device: metadata.dev.toString(),
+    inode: metadata.ino.toString(),
+  };
+}
+
+function sameDirectoryIdentity(
+  left: VerifiedAcpxDirectoryIdentity,
+  right: VerifiedAcpxDirectoryIdentity,
+): boolean {
+  return left.device === right.device && left.inode === right.inode;
 }
 
 function sameIdentity(

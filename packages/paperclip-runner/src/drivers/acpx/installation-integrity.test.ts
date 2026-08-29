@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   realpath,
@@ -138,6 +139,26 @@ describe("ACPX installation integrity", () => {
     );
   });
 
+  it("rejects a hard-linked executable through a replacement directory", async () => {
+    const fixture = await installationFixture();
+    const attackerDirectory = join(fixture.root, "attacker-bin");
+    await mkdir(attackerDirectory);
+    await link(fixture.commandPath, join(attackerDirectory, "server.js"));
+    const installation = await verifyQualifiedAcpxInstallation(
+      fixture.profile,
+      fixture.resolve,
+    );
+    await rename(
+      fixture.commandDirectory,
+      `${fixture.commandDirectory}.verified`,
+    );
+    await symlink(attackerDirectory, fixture.commandDirectory);
+
+    await expect(installation.openCommand()).rejects.toThrow(
+      /executable directory (must be a real directory|identity changed)/,
+    );
+  });
+
   it("launches the verified bytes after its pathname is replaced", async () => {
     const fixture = await installationFixture();
     const installation = await verifyQualifiedAcpxInstallation(
@@ -253,6 +274,62 @@ describe("ACPX installation integrity", () => {
       "relative:argument",
     );
   });
+
+  it("pins relative imports when the command directory is replaced", async () => {
+    const fixture = await installationFixture();
+    const command = [
+      'import value from "./value.js";',
+      "process.stdout.write(value);",
+    ].join("\n");
+    const attackerDirectory = join(fixture.root, "attacker-bin");
+    await mkdir(attackerDirectory);
+    await Promise.all([
+      writeFile(
+        fixture.serverPackageJsonPath,
+        JSON.stringify({
+          version: "0.0.33",
+          type: "module",
+          bin: "bin/server.js",
+        }),
+      ),
+      writeFile(fixture.commandPath, command),
+      writeFile(
+        join(fixture.commandDirectory, "value.js"),
+        'export default "verified-relative";',
+      ),
+      writeFile(
+        join(attackerDirectory, "value.js"),
+        'export default "attacker-relative";',
+      ),
+    ]);
+    await link(fixture.commandPath, join(attackerDirectory, "server.js"));
+    const installation = await verifyQualifiedAcpxInstallation(
+      {
+        ...fixture.profile,
+        commandDigest: `sha256:${createHash("sha256").update(command).digest("hex")}`,
+      },
+      fixture.resolve,
+    );
+    const lease = await installation.openCommand();
+    const verifiedDirectory = `${fixture.commandDirectory}.verified`;
+    await rename(fixture.commandDirectory, verifiedDirectory);
+    await symlink(attackerDirectory, fixture.commandDirectory);
+    const verifiedCommand = await stat(join(verifiedDirectory, "server.js"), {
+      bigint: true,
+    });
+    const redirectedCommand = await stat(fixture.commandPath, { bigint: true });
+    expect(redirectedCommand.dev).toBe(verifiedCommand.dev);
+    expect(redirectedCommand.ino).toBe(verifiedCommand.ino);
+
+    if (process.platform === "linux") {
+      await expectOutput(lease.spawn(), "verified-relative");
+    } else {
+      await expectFailure(
+        lease.spawn(),
+        "executable directory identity changed after verification",
+      );
+    }
+  });
 });
 
 async function expectOutput(
@@ -260,13 +337,32 @@ async function expectOutput(
   expected: string,
 ): Promise<void> {
   let stdout = "";
+  let stderr = "";
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk) => {
     stdout += String(chunk);
   });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
   const [exitCode] = await once(child, "exit");
-  expect(exitCode).toBe(0);
+  expect(exitCode, stderr).toBe(0);
   expect(stdout).toBe(expected);
+}
+
+async function expectFailure(
+  child: ChildProcess,
+  expected: string,
+): Promise<void> {
+  let stderr = "";
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  const [exitCode] = await once(child, "exit");
+  expect(exitCode).not.toBe(0);
+  expect(stderr).toContain(expected);
 }
 
 async function installationFixture() {
