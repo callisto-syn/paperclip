@@ -12,6 +12,29 @@ pub struct NormalizedProviderEvent {
     pub payload: Value,
 }
 
+pub(crate) fn normalized_codex_terminal_event_type(
+    method: &str,
+    params: &Value,
+) -> Option<&'static str> {
+    let status = match method {
+        "turn/failed" => "failed",
+        "turn/cancelled" => "cancelled",
+        "turn/interrupted" => "interrupted",
+        "turn/completed" => string(
+            params
+                .pointer("/turn/status")
+                .or_else(|| params.get("status")),
+        ),
+        _ => return None,
+    };
+    Some(match status {
+        "failed" | "error" => "turn.failed",
+        "cancelled" | "canceled" => "turn.cancelled",
+        "interrupted" | "aborted" => "turn.interrupted",
+        _ => "turn.completed",
+    })
+}
+
 fn bounded_text(value: &str, max_chars: usize) -> String {
     redact_text(value).chars().take(max_chars).collect()
 }
@@ -129,12 +152,8 @@ pub fn normalize_codex_notification(method: &str, params: &Value) -> Vec<Normali
                         .or_else(|| params.get("status")),
                 ),
             };
-            let event_type = match status {
-                "failed" | "error" => "turn.failed",
-                "cancelled" | "canceled" => "turn.cancelled",
-                "interrupted" | "aborted" => "turn.interrupted",
-                _ => "turn.completed",
-            };
+            let event_type = normalized_codex_terminal_event_type(method, params)
+                .expect("matched Codex terminal method has a normalized terminal type");
             push(
                 &mut events,
                 event_type,

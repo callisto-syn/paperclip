@@ -21,7 +21,9 @@ use crate::provider_bridge::{
     authorized_tool_catalog_digest, semantic_value_digest, AuthorizedToolSet, PendingToolCall,
     ProviderToolBridge, ToolResult, MAX_PENDING_CALLS, TOOL_SET_SCHEMA,
 };
-use crate::provider_events::{normalize_codex_notification, NormalizedProviderEvent};
+use crate::provider_events::{
+    normalize_codex_notification, normalized_codex_terminal_event_type, NormalizedProviderEvent,
+};
 
 const PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.codex-provider-state.v1";
 const PROVIDER_STATE_FILE: &str = "codex-provider-state.json";
@@ -1641,14 +1643,17 @@ impl CodexCommandExecutor {
                     self.handle_tool_call(call_id, operation_id, input)?;
                 }
                 CodexProviderEvent::Notification { method, params } => {
-                    let completed_turn_authority = if method == "turn/completed" {
-                        self.provider
-                            .as_ref()
-                            .and_then(CodexProvider::completed_turn_authority)
-                            .map(|(generation, turn_id)| (generation, turn_id.to_owned()))
-                    } else {
-                        None
-                    };
+                    let normalized_terminal_type =
+                        normalized_codex_terminal_event_type(&method, &params);
+                    let completed_turn_authority =
+                        if normalized_terminal_type == Some("turn.completed") {
+                            self.provider
+                                .as_ref()
+                                .and_then(CodexProvider::completed_turn_authority)
+                                .map(|(generation, turn_id)| (generation, turn_id.to_owned()))
+                        } else {
+                            None
+                        };
                     let normalized = normalize_codex_notification(&method, &params);
                     let terminal_event_type = normalized
                         .iter()
@@ -1700,7 +1705,7 @@ impl CodexCommandExecutor {
                             }
                         }
                         state.active_provider_turn_id = None;
-                        if method == "turn/completed" {
+                        if terminal_event_type.as_deref() == Some("turn.completed") {
                             let (process_generation, provider_turn_id) = completed_turn_authority
                                 .ok_or_else(|| {
                                 DurableRunnerError::invalid(
@@ -1710,6 +1715,10 @@ impl CodexCommandExecutor {
                             state.completed_turn_authoritative = true;
                             state.completed_turn_process_generation = Some(process_generation);
                             state.completed_provider_turn_id = Some(provider_turn_id);
+                        } else {
+                            state.completed_turn_authoritative = false;
+                            state.completed_turn_process_generation = None;
+                            state.completed_provider_turn_id = None;
                         }
                         state.receipt_limit_diagnostic_emitted = false;
                         state.receipt_limit_interrupt_pending = false;

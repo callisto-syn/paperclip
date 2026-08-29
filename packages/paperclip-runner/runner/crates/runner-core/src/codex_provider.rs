@@ -10,6 +10,7 @@ use crate::durable::redact_text;
 use crate::local_runner::LocalRunnerError;
 use crate::process_supervisor::SupervisedProcess;
 use crate::provider_bridge::{AuthorizedTool, ToolResult};
+use crate::provider_events::normalized_codex_terminal_event_type;
 
 pub const CODEX_APP_SERVER_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BUFFERED_MESSAGES: usize = 1_024;
@@ -170,6 +171,7 @@ pub struct CodexProvider {
     expected_shutdown: bool,
     process_generation: u64,
     completed_turn_authority: Option<CompletedTurnAuthority>,
+    settled_provider_turn_id: Option<String>,
 }
 
 impl CodexProvider {
@@ -222,6 +224,7 @@ impl CodexProvider {
             expected_shutdown: false,
             process_generation,
             completed_turn_authority: None,
+            settled_provider_turn_id: None,
         };
         let initialized = provider.request(
             "initialize",
@@ -316,6 +319,10 @@ impl CodexProvider {
                 .to_owned(),
             observed_idle: false,
         });
+        self.settled_provider_turn_id = self
+            .completed_turn_authority
+            .as_ref()
+            .map(|authority| authority.provider_turn_id.clone());
         // Resuming a completed durable thread and reading its provider state
         // is recovery, not new turn work. Keep the prior terminal authoritative
         // until start_turn explicitly revokes it.
@@ -344,6 +351,7 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completed_turn_authority = None;
+        self.settled_provider_turn_id = None;
         let runtime_request_scope = new_runtime_request_scope()?;
         let result = self.request(
             "turn/start",
@@ -529,7 +537,11 @@ impl CodexProvider {
                         "Codex tool call named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none() && self.completed_turn_authority.is_some()
+                if self.active_provider_turn_id.is_none()
+                    && request_targets_settled_turn(
+                        self.settled_provider_turn_id.as_deref(),
+                        &params,
+                    )
                 {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
@@ -627,7 +639,11 @@ impl CodexProvider {
                         "Codex runtime request named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none() && self.completed_turn_authority.is_some()
+                if self.active_provider_turn_id.is_none()
+                    && request_targets_settled_turn(
+                        self.settled_provider_turn_id.as_deref(),
+                        &params,
+                    )
                 {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
@@ -700,20 +716,34 @@ impl CodexProvider {
                 self.active_provider_turn_id.as_deref(),
                 &params,
             )?;
-            if matches!(
-                method,
-                "turn/completed" | "turn/failed" | "turn/cancelled" | "turn/interrupted"
-            ) {
-                let completed_turn_authority = if method == "turn/completed" {
-                    let provider_turn_id =
-                        self.active_provider_turn_id.clone().ok_or_else(|| {
-                            LocalRunnerError::invalid(
-                                "Codex completion arrived outside an active provider turn",
-                            )
-                        })?;
+            if let Some(terminal_event_type) = normalized_codex_terminal_event_type(method, &params)
+            {
+                let notification_turn_id = params
+                    .get("turnId")
+                    .or_else(|| params.pointer("/turn/id"))
+                    .and_then(Value::as_str);
+                if self.active_provider_turn_id.is_none() {
+                    if notification_turn_id == self.settled_provider_turn_id.as_deref() {
+                        return Ok(Some(CodexProviderEvent::Notification {
+                            method: "warning".to_owned(),
+                            params: json!({
+                                "message": "ignored a duplicate terminal notification for the settled Codex turn",
+                                "providerMethod": bounded_method(method),
+                            }),
+                        }));
+                    }
+                    return Err(LocalRunnerError::invalid(
+                        "Codex terminal arrived outside an active provider turn",
+                    ));
+                }
+                let provider_turn_id = self
+                    .active_provider_turn_id
+                    .clone()
+                    .expect("active provider turn checked above");
+                let completed_turn_authority = if terminal_event_type == "turn.completed" {
                     Some(CompletedTurnAuthority {
                         process_generation: self.process_generation,
-                        provider_turn_id,
+                        provider_turn_id: provider_turn_id.clone(),
                         observed_idle: false,
                     })
                 } else {
@@ -722,6 +752,7 @@ impl CodexProvider {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
                 self.completed_turn_authority = completed_turn_authority;
+                self.settled_provider_turn_id = Some(provider_turn_id);
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
@@ -1015,6 +1046,11 @@ fn validate_notification_binding(
         }
     }
     Ok(())
+}
+
+fn request_targets_settled_turn(settled_turn_id: Option<&str>, params: &Value) -> bool {
+    settled_turn_id
+        .is_some_and(|settled| params.get("turnId").and_then(Value::as_str) == Some(settled))
 }
 
 fn latest_active_turn_id(snapshot: &Value) -> Option<String> {
@@ -1403,6 +1439,19 @@ mod tests {
             &json!({"threadId": "thread-1", "turnId": "turn-1"}),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn rejects_only_requests_bound_to_an_exact_settled_turn_nonfatally() {
+        assert!(request_targets_settled_turn(
+            Some("turn-1"),
+            &json!({"turnId": "turn-1"}),
+        ));
+        assert!(!request_targets_settled_turn(None, &json!({}),));
+        assert!(!request_targets_settled_turn(
+            Some("turn-1"),
+            &json!({"turnId": "turn-2"}),
+        ));
     }
 
     #[test]
