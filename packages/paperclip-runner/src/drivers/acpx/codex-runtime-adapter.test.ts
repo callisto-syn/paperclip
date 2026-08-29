@@ -231,6 +231,62 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
+  it("reconciles an older close that fails after a fresh close succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      let rejectFirstClose!: (error: unknown) => void;
+      const firstRuntimeClose = new Promise<void>((_resolve, reject) => {
+        rejectFirstClose = reject;
+      });
+      vi.mocked(runtime.close)
+        .mockReturnValueOnce(firstRuntimeClose)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined);
+      const child = fakeChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const firstClose = expect(
+        port.close({ reason: "first protocol close stalls" }),
+      ).rejects.toThrow("ACPX runtime and provider cleanup failed");
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await firstClose;
+
+      await expect(port.close({ reason: "fresh protocol close succeeds" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
+
+      rejectFirstClose(new Error("older protocol close failed late"));
+      await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledTimes(3));
+      expect(runtime.close).toHaveBeenLastCalledWith({
+        handle: HANDLE,
+        reason: "ACPX late protocol cleanup reconciliation 1",
+        discardPersistentState: false,
+      });
+      await expect(port.close({ reason: "observe reconciled cleanup" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps prompt turns to the admitted ACPX handle", async () => {
     const runtime = fakeRuntime();
     const turn = {
