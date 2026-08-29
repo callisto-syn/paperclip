@@ -44,6 +44,9 @@ import type { AcpxExpectedSessionIdentity } from "./sidecar-protocol.js";
 
 export const ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS = 2_000;
 const RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS = 8_000;
+const activeRuntimeHostCleanupOwners = new Set<
+  Promise<AggregateError | null>
+>();
 
 class AcpxRuntimeAdmissionTimeoutError extends Error {
   constructor() {
@@ -112,6 +115,8 @@ export interface AcpxRuntimeHostDependencies {
   openRuntime(options: AcpxRuntimePortOpenOptions): Promise<AcpxRuntimePort>;
   /** Internal test seam for the post-handshake admission deadline. */
   admissionVerificationTimeoutMs?: number;
+  /** Internal test seam for failed-admission cleanup. */
+  admissionCleanupTimeoutMs?: number;
 }
 
 export interface OpenAcpxRuntimeHostOptions {
@@ -194,6 +199,12 @@ export class AcpxRuntimeHost {
     let credential: ManagedCodexCredentialLease | null = null;
     let toolBridge: RunnerToolBridge | null = null;
     let runtime: AcpxRuntimePort | null = null;
+    const admissionVerificationTimeoutMs =
+      dependencies.admissionVerificationTimeoutMs ??
+      RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS;
+    const admissionCleanupTimeoutMs =
+      dependencies.admissionCleanupTimeoutMs ??
+      RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS;
     try {
       const sandbox = await prepareAcpxRuntimeSandbox({
         binding,
@@ -235,8 +246,7 @@ export class AcpxRuntimeHost {
       const runtimeIdentity = await boundedRuntimeAdmissionVerification(
         runtime,
         profile,
-        dependencies.admissionVerificationTimeoutMs ??
-          RUNTIME_ADMISSION_VERIFICATION_TIMEOUT_MS,
+        admissionVerificationTimeoutMs,
       );
       const observedIdentity: AcpxExpectedSessionIdentity = {
         kind: "acpx",
@@ -262,16 +272,32 @@ export class AcpxRuntimeHost {
         toolBridge,
       });
     } catch (error) {
-      const cleanupError = await cleanupRuntimeResources(
+      const cleanup = cleanupRuntimeResources(
         runtime,
         toolBridge,
         credential,
         command,
         "ACPX runtime initialization failed",
       );
-      if (cleanupError) {
+      retainRuntimeHostCleanup(cleanup);
+      const cleanupOutcome = await awaitRuntimeHostCleanupWithin(
+        cleanup,
+        admissionCleanupTimeoutMs,
+      );
+      if (cleanupOutcome === "deferred") {
         throw new AggregateError(
-          [error, ...cleanupError.errors],
+          [
+            error,
+            new Error(
+              "ACPX runtime initialization cleanup exceeded its shutdown timeout",
+            ),
+          ],
+          "ACPX runtime initialization and cleanup failed",
+        );
+      }
+      if (cleanupOutcome) {
+        throw new AggregateError(
+          [error, ...cleanupOutcome.errors],
           "ACPX runtime initialization and cleanup failed",
         );
       }
@@ -387,6 +413,37 @@ export class AcpxRuntimeHost {
     if (errors.length > 0) {
       throw new AggregateError(errors, "ACPX runtime cleanup failed");
     }
+  }
+}
+
+function retainRuntimeHostCleanup(
+  cleanup: Promise<AggregateError | null>,
+): void {
+  activeRuntimeHostCleanupOwners.add(cleanup);
+  void cleanup.then(
+    () => activeRuntimeHostCleanupOwners.delete(cleanup),
+    () => activeRuntimeHostCleanupOwners.delete(cleanup),
+  );
+}
+
+async function awaitRuntimeHostCleanupWithin(
+  cleanup: Promise<AggregateError | null>,
+  timeoutMs: number,
+): Promise<AggregateError | null | "deferred"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      cleanup,
+      new Promise<"deferred">((resolve) => {
+        timer = setTimeout(
+          () => resolve("deferred"),
+          Math.max(1, Math.floor(timeoutMs)),
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

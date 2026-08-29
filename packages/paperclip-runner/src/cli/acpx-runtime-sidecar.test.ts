@@ -7,6 +7,7 @@ import { ACPX_SIDECAR_PROTOCOL_VERSION } from "../drivers/acpx/sidecar-protocol.
 import {
   awaitSidecarCleanupWithin,
   closeActiveSidecarHostWithin,
+  closeSidecarHostForCommand,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   verifyOpenedAcpxSidecarHost,
@@ -89,6 +90,36 @@ describe("Codex ACPX runtime sidecar", () => {
       .resolves.toBe("deferred");
     expect(close).toHaveBeenCalledWith({ reason: "SIGTERM" });
     expect(retainCleanup).toHaveBeenCalledWith(cleanup);
+  });
+
+  it("bounds command cleanup without replacing its exact owner", async () => {
+    let finishCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const close = vi.fn(() => cleanup);
+    const retainCleanup = vi.fn();
+
+    await expect(closeSidecarHostForCommand(
+      { close },
+      "session close",
+      1,
+      retainCleanup,
+    )).rejects.toThrow("cleanup exceeded its command timeout");
+    expect(close).toHaveBeenCalledOnce();
+    expect(retainCleanup).toHaveBeenCalledWith(cleanup);
+
+    finishCleanup();
+    await cleanup;
+  });
+
+  it("preserves a settled command cleanup failure", async () => {
+    const cleanup = Promise.reject(new Error("runtime close failed"));
+    await expect(closeSidecarHostForCommand(
+      { close: () => cleanup },
+      "session close",
+      10,
+    )).rejects.toThrow("runtime close failed");
   });
 
   it("bounds status verification before cleaning up the opened host", async () => {

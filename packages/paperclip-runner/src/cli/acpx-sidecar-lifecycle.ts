@@ -59,6 +59,23 @@ export async function closeActiveSidecarHostWithin(
   return await awaitSidecarCleanupWithin(cleanup, timeoutMs);
 }
 
+export async function closeSidecarHostForCommand(
+  host: Pick<OpenedAcpxSidecarHost, "close">,
+  reason: string,
+  timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+  retainCleanup: (cleanup: Promise<void>) => void = () => undefined,
+): Promise<void> {
+  const cleanup = host.close({ reason });
+  retainCleanup(cleanup);
+  const disposition = await awaitSidecarCleanupWithin(cleanup, timeoutMs);
+  if (disposition === "deferred") {
+    throw new Error("ACPX session cleanup exceeded its command timeout");
+  }
+  // The bounded wait only reports settlement; preserve the exact close error
+  // for the command response and keep the host available for a later retry.
+  await cleanup;
+}
+
 export async function verifyOpenedAcpxSidecarHost(
   host: OpenedAcpxSidecarHost,
   sanitizeStatus: (value: unknown) => Record<string, unknown>,

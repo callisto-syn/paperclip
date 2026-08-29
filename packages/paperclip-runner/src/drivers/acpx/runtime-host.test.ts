@@ -295,6 +295,41 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
+  it("bounds post-handshake cleanup while retaining its exact owner", async () => {
+    const fixture = await hostFixture();
+    let finishRuntimeClose!: () => void;
+    const runtimeClose = new Promise<void>((resolve) => {
+      finishRuntimeClose = resolve;
+    });
+    const runtime = runtimePort({
+      getStatus: () => new Promise<never>(() => undefined),
+      onClose: () => runtimeClose,
+    });
+    const dependencies = fixture.dependencies({
+      openRuntime: async () => runtime,
+    });
+    dependencies.admissionVerificationTimeoutMs = 1;
+    dependencies.admissionCleanupTimeoutMs = 1;
+
+    await expect(
+      AcpxRuntimeHost.open(
+        {
+          ...fixture.options,
+          agent: "codex",
+          model: "gpt-5.6-sol",
+          permissionMode: "approve-all",
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        },
+        dependencies,
+      ),
+    ).rejects.toThrow("initialization and cleanup failed");
+    expect(runtime.close).toHaveBeenCalledOnce();
+    expect(fixture.commandClose).toHaveBeenCalledOnce();
+
+    finishRuntimeClose();
+    await runtimeClose;
+  });
+
   it("attempts every cleanup when runtime shutdown fails", async () => {
     const fixture = await hostFixture();
     let failClose = true;

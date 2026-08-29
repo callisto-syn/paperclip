@@ -54,6 +54,7 @@ import {
   awaitSidecarCleanupWithin,
   boundedIdentity,
   closeActiveSidecarHostWithin,
+  closeSidecarHostForCommand,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   verifyOpenedAcpxSidecarHost,
@@ -369,13 +370,16 @@ async function dispatch(
     }
     const activeHost = requireHost();
     const identity = activeHost.identity();
-    await activeHost.close({
-      reason: boundedOptionalText(
+    await closeSidecarHostForCommand(
+      activeHost,
+      boundedOptionalText(
         request.params.reason,
         "Paperclip suspension",
         4_000,
       ),
-    });
+      undefined,
+      (cleanup) => retainActiveHostCleanup(activeHost, cleanup),
+    );
     host = null;
     openParams = null;
     runId = null;
@@ -390,13 +394,17 @@ async function dispatch(
     const closingTurnId = turnId;
     if (closingTurnId) rejectTurnWaiters(closingTurnId, "ACPX session closed");
     if (host) {
-      await host.close({
-        reason: boundedOptionalText(
+      const activeHost = host;
+      await closeSidecarHostForCommand(
+        activeHost,
+        boundedOptionalText(
           request.params.reason,
           "Paperclip close",
           4_000,
         ),
-      });
+        undefined,
+        (cleanup) => retainActiveHostCleanup(activeHost, cleanup),
+      );
     }
     host = null;
     openParams = null;
@@ -1067,11 +1075,20 @@ function retainActiveHostCleanup(
   activeHost: AcpxRuntimeHost,
   cleanup: Promise<void>,
 ): void {
-  const retained = cleanup.catch(() => undefined);
+  let succeeded = false;
+  const retained = cleanup.then(
+    () => { succeeded = true; },
+    () => undefined,
+  );
   activeHostCleanup = retained;
   void retained.finally(() => {
     if (activeHostCleanup === retained) activeHostCleanup = null;
-    if (host === activeHost) host = null;
+    if (succeeded && host === activeHost) {
+      host = null;
+      openParams = null;
+      runId = null;
+      turnId = null;
+    }
   });
 }
 
