@@ -262,7 +262,7 @@ describe("managed Codex credentials", () => {
   );
 
   it.runIf(process.platform !== "win32")(
-    "fails within a bound and retains cleanup ownership until durability recovers",
+    "fails a non-durable admission within a bound and scrubs again on retry",
     async () => {
       const fixture = await credentialFixture();
       const probe = await open(fixture.home, "r");
@@ -294,6 +294,72 @@ describe("managed Codex credentials", () => {
           environment: { OPENAI_API_KEY: "launch-only-key" },
         });
         await expect(lease.close()).resolves.toBeUndefined();
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "keeps intent-publication failure before credential mutation and scrubs without process memory",
+    async () => {
+      const fixture = await credentialFixture();
+      const destination = join(fixture.home, "auth.json");
+      const cleanupIntent = join(
+        fixture.home,
+        ".paperclip-auth-cleanup-required",
+      );
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const originalSync = prototype.sync;
+      let directorySyncAttempts = 0;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          if ((await this.stat()).isDirectory()) {
+            directorySyncAttempts += 1;
+            if (directorySyncAttempts > 1) {
+              throw new Error("persistent intent sync failure");
+            }
+          }
+          await originalSync.call(this);
+        },
+      );
+      try {
+        await expect(stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        })).rejects.toThrow("remained non-durable after 8 attempts");
+        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+
+        // Model a crash losing the unsynced intent directory entry and the
+        // next process finding an unexpected auth file. A fresh module has no
+        // quarantine map from the failed process, so admission must rely on
+        // the isolated-home scrub rather than process memory.
+        syncSpy.mockRestore();
+        await rm(cleanupIntent, { force: true });
+        await writeFile(destination, '{"orphaned":true}', { mode: 0o600 });
+        vi.resetModules();
+        const freshCredentials = await import("./codex-credentials.js");
+        const persistentSyncFailure = vi.spyOn(prototype, "sync").mockImplementation(
+          async function (this: FileHandle): Promise<void> {
+            if ((await this.stat()).isDirectory()) {
+              throw new Error("persistent recovery sync failure");
+            }
+            await originalSync.call(this);
+          },
+        );
+        try {
+          await expect(freshCredentials.stageManagedCodexCredential({
+            agentHomeDirectory: fixture.home,
+            environment: { OPENAI_API_KEY: "launch-only-key" },
+          })).rejects.toThrow("remained non-durable after 8 attempts");
+          await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+        } finally {
+          persistentSyncFailure.mockRestore();
+        }
       } finally {
         syncSpy.mockRestore();
       }

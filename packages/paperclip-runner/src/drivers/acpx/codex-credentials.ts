@@ -60,6 +60,11 @@ export async function stageManagedCodexCredential(input: {
   const intentPath = join(home, CREDENTIAL_CLEANUP_INTENT);
   await recoverQuarantinedCredentialCleanup(destination, home);
   await recoverPersistedCredentialCleanup(destination, home, intentPath);
+  // The isolated home is itself the durable recovery anchor. Scrub auth.json
+  // before every admission, even when a prior cleanup-intent entry was lost
+  // with a runner crash. Only after this absence is durable may a new intent
+  // be created and a credential installed.
+  await removeCredential(destination, home);
   const environment = input.environment ?? {};
   const hasApiKey = Boolean(
     environment.CODEX_API_KEY || environment.OPENAI_API_KEY,
@@ -92,16 +97,13 @@ export async function stageManagedCodexCredential(input: {
 
   if (hasApiKey) {
     // Codex will read the API key from the launch environment. Persist cleanup
-    // intent before touching auth.json and retain it for the lease lifetime,
-    // so a replacement runner removes stale or provider-generated auth after
+    // intent before admitting the provider and retain it for the lease
+    // lifetime, so a replacement runner removes provider-generated auth after
     // a crash before it admits another provider.
-    try {
-      await createCredentialCleanupIntent(intentPath, home);
-      await removeCredential(destination, home);
-    } catch (error) {
-      quarantineCredentialCleanup(destination, home, intentPath);
-      throw error;
-    }
+    // Failure while publishing the intent cannot strand a staged credential:
+    // the unconditional admission scrub above is already durable and this
+    // mode has not allowed the provider to create auth.json yet.
+    await createCredentialCleanupIntent(intentPath, home);
     return credentialLease(destination, home, intentPath, "api_key");
   }
 
@@ -110,19 +112,18 @@ export async function stageManagedCodexCredential(input: {
     : await readManagedCredential(input.sourcePath!);
   try {
     validateCredentialDocument(credential);
+    // As with API-key mode, an intent-publication failure occurs before any
+    // credential mutation and therefore needs no process-only quarantine.
     await createCredentialCleanupIntent(intentPath, home);
-    // Establish durable absence before installing a replacement. This keeps a
-    // previously staged authentication document from reappearing after a
-    // crash even when the following rename is interrupted.
-    await removeCredential(destination, home);
-    await writeCredential(destination, home, credential);
-  } catch (error) {
-    // Either unlink or rename may already have mutated the credential
-    // namespace before directory durability failed. Retain a bounded process
-    // owner that removes auth.json, and make later staging recover that owner
-    // before admitting another provider.
-    quarantineCredentialCleanup(destination, home, intentPath);
-    throw error;
+    try {
+      await writeCredential(destination, home, credential);
+    } catch (error) {
+      // Rename may already have installed the credential before directory
+      // durability failed. Retain a bounded process owner and the persisted
+      // intent so later staging must recover both before admission.
+      quarantineCredentialCleanup(destination, home, intentPath);
+      throw error;
+    }
   } finally {
     credential.fill(0);
   }
