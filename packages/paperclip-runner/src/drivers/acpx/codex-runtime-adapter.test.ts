@@ -185,6 +185,36 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("bounds a stalled runtime close before terminating a failed-handshake provider", async () => {
+    const child = fakeChild();
+    const command = fakeCommand();
+    vi.mocked(command.spawn).mockReturnValue(child);
+    const runtime = fakeRuntime();
+    vi.mocked(runtime.close).mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+
+    await expect(
+      openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (runtimeOptions) => {
+          vi.mocked(runtime.ensureSession).mockImplementation(async () => {
+            runtimeOptions.spawnAgent?.({
+              command: "ignored",
+              args: ["--stdio"],
+              options: {},
+            });
+            throw new Error("ACP handshake rejected");
+          });
+          return runtime;
+        },
+        runtimeCloseTimeoutMs: 5,
+      }),
+    ).rejects.toThrow("ACPX session handshake and runtime cleanup failed");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
   it("rejects non-Codex profiles before constructing ACPX", async () => {
     const createRuntime = vi.fn();
     await expect(

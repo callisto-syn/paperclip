@@ -18,6 +18,7 @@ import type {
 } from "./runtime-host.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
+const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 2_000;
 
 export interface CodexAcpxRuntimeDependencies {
   createRuntime?: (options: AcpRuntimeOptions) => AcpRuntime;
@@ -25,6 +26,7 @@ export interface CodexAcpxRuntimeDependencies {
     overrides: Record<string, string | string[]>;
   }) => AcpAgentRegistry;
   createStore?: (input: { stateDir: string }) => AcpSessionStore;
+  runtimeCloseTimeoutMs?: number;
 }
 
 /**
@@ -45,6 +47,8 @@ export async function openCodexAcpxRuntime(
   const createRegistry = dependencies.createRegistry ?? createAgentRegistry;
   const createStore = dependencies.createStore ?? createRuntimeStore;
   const createRuntime = dependencies.createRuntime ?? createAcpRuntime;
+  const runtimeCloseTimeoutMs =
+    dependencies.runtimeCloseTimeoutMs ?? DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS;
   const children = new SpawnedChildSet();
   const runtime = createRuntime({
     cwd: options.cwd,
@@ -86,16 +90,14 @@ export async function openCodexAcpxRuntime(
       },
     });
   } catch (error) {
-    let runtimeCleanupError: unknown;
-    try {
-      await runtime.close({
+    const runtimeCleanupError = await closeRuntimeWithin(runtime, {
+      input: {
         handle: provisionalPersistentHandle(options),
         reason: "ACPX session handshake failed",
         discardPersistentState: false,
-      });
-    } catch (cleanupError) {
-      runtimeCleanupError = cleanupError;
-    }
+      },
+      timeoutMs: runtimeCloseTimeoutMs,
+    });
     const cleanupErrors = await children.terminate();
     if (runtimeCleanupError !== undefined || cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -111,15 +113,23 @@ export async function openCodexAcpxRuntime(
   }
 
   try {
-    return runtimePort(runtime, handle, requireIdentity(handle), children);
+    return runtimePort(
+      runtime,
+      handle,
+      requireIdentity(handle),
+      children,
+      runtimeCloseTimeoutMs,
+    );
   } catch (error) {
-    try {
-      await runtime.close({
+    const cleanupError = await closeRuntimeWithin(runtime, {
+      input: {
         handle,
         reason: "ACPX runtime identity validation failed",
         discardPersistentState: false,
-      });
-    } catch (cleanupError) {
+      },
+      timeoutMs: runtimeCloseTimeoutMs,
+    });
+    if (cleanupError !== undefined) {
       const processErrors = await children.terminate();
       throw new AggregateError(
         [error, cleanupError, ...processErrors],
@@ -154,6 +164,7 @@ function runtimePort(
   handle: AcpRuntimeHandle,
   identity: AcpxRuntimePortIdentity,
   children: SpawnedChildSet,
+  runtimeCloseTimeoutMs: number,
 ): AcpxRuntimePort {
   return {
     async identity() {
@@ -177,16 +188,14 @@ function runtimePort(
         }
       : {}),
     async close(input) {
-      let closeError: unknown;
-      try {
-        await runtime.close({
+      const closeError = await closeRuntimeWithin(runtime, {
+        input: {
           handle,
           reason: input.reason,
           discardPersistentState: false,
-        });
-      } catch (error) {
-        closeError = error;
-      }
+        },
+        timeoutMs: runtimeCloseTimeoutMs,
+      });
       const processErrors = await children.terminate();
       if (closeError !== undefined || processErrors.length > 0) {
         const errors = [...processErrors];
@@ -198,6 +207,32 @@ function runtimePort(
       }
     },
   };
+}
+
+async function closeRuntimeWithin(
+  runtime: AcpRuntime,
+  options: {
+    input: Parameters<AcpRuntime["close"]>[0];
+    timeoutMs: number;
+  },
+): Promise<unknown | undefined> {
+  const timeoutMs = Math.max(1, options.timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const closeOutcome = Promise.resolve()
+    .then(() => runtime.close(options.input))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  const timeoutOutcome = new Promise<Error>((resolve) => {
+    timer = setTimeout(
+      () => resolve(new Error("ACPX runtime close timed out")),
+      timeoutMs,
+    );
+  });
+  const outcome = await Promise.race([closeOutcome, timeoutOutcome]);
+  if (timer !== undefined) clearTimeout(timer);
+  return outcome;
 }
 
 class SpawnedChildSet {
