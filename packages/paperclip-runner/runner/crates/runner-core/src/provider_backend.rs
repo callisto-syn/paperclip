@@ -726,7 +726,6 @@ impl CodexCommandExecutor {
         if self.provider.is_none() {
             return Ok(());
         }
-        let mut completed_turn_in_batch = false;
         for _ in 0..MAX_EVENTS_PER_POLL {
             let event = self
                 .provider
@@ -779,7 +778,6 @@ impl CodexCommandExecutor {
                     if method == "turn/completed" {
                         state.active_provider_turn_id = None;
                         state.lifecycle = "session_open".to_owned();
-                        completed_turn_in_batch = true;
                     }
                     state.extend_events(normalized)?;
                     if let Some(event_type) = terminal_event_type {
@@ -823,7 +821,7 @@ impl CodexCommandExecutor {
                 }
                 CodexProviderEvent::Exited { exit_code, success } => {
                     self.provider = None;
-                    if !success && !completed_turn_in_batch {
+                    if !success {
                         let state = self
                             .state
                             .as_mut()

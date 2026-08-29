@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +15,7 @@ const MAX_BUFFERED_MESSAGES: usize = 1_024;
 const MAX_INSTRUCTIONS_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_TOOL_REQUESTS: usize = 4_096;
 const MAX_PENDING_TOOL_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const POST_COMPLETION_EXIT_RECONCILIATION: Duration = Duration::from_millis(100);
 type QuestionOptionLabels = BTreeMap<String, BTreeMap<String, String>>;
 type QuestionSetMapping = (String, Value, QuestionOptionLabels);
 
@@ -152,6 +153,7 @@ pub struct CodexProvider {
     pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
+    completion_exit_reconciliation_pending: bool,
 }
 
 impl CodexProvider {
@@ -186,6 +188,7 @@ impl CodexProvider {
             pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
+            completion_exit_reconciliation_pending: false,
         };
         let initialized = provider.request(
             "initialize",
@@ -277,6 +280,7 @@ impl CodexProvider {
             ));
         }
         self.expected_shutdown = false;
+        self.completion_exit_reconciliation_pending = false;
         let result = self.request(
             "turn/start",
             json!({
@@ -361,10 +365,24 @@ impl CodexProvider {
             message
         } else {
             let Some(line) = self.process.receive_stdout_line(Duration::from_millis(1))? else {
-                return if let Some(exit) = self.process.try_wait()? {
+                let mut exit = self.process.try_wait()?;
+                let completed_turn_exit = self.completion_exit_reconciliation_pending;
+                if exit.is_none() && completed_turn_exit {
+                    // A provider may close its output just before the OS makes
+                    // its exit status observable. Bound that race here so the
+                    // completion remains authoritative across polling batches,
+                    // without hiding a failure after the provider became idle.
+                    let deadline = Instant::now() + POST_COMPLETION_EXIT_RECONCILIATION;
+                    while exit.is_none() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                        exit = self.process.try_wait()?;
+                    }
+                    self.completion_exit_reconciliation_pending = false;
+                }
+                return if let Some(exit) = exit {
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
-                        success: exit.success && self.expected_shutdown,
+                        success: completed_turn_exit || (exit.success && self.expected_shutdown),
                     }))
                 } else {
                     Ok(None)
@@ -533,6 +551,7 @@ impl CodexProvider {
             if method == "turn/completed" {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
+                self.completion_exit_reconciliation_pending = true;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
