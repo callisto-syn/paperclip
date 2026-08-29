@@ -117,7 +117,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     assert_eq!(completed[0].payload["outputTruncated"], true);
     assert!(!completed[0].payload.to_string().contains("top-secret"));
 
-    for unsafe_path in [r"..\..\secret", r"src\..\secret", r"\rooted\secret"] {
+    for platform_path in [r"..\..\secret", r"src\..\secret", r"\rooted\secret"] {
         let backslash_escape = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
@@ -126,13 +126,17 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 "toolCallId":"tool-backslash",
                 "kind":"read",
                 "status":"completed",
-                "locations":[{"path":unsafe_path}]
+                "locations":[{"path":platform_path}]
             }),
         );
-        assert_eq!(
-            backslash_escape[0].payload["target"],
-            serde_json::Value::Null
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                backslash_escape[0].payload["target"],
+                serde_json::Value::Null
+            );
+        } else {
+            assert_eq!(backslash_escape[0].payload["target"], platform_path);
+        }
     }
 
     let windows_absolute = normalize(
@@ -175,10 +179,14 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"a:b/file.txt"}]
         }),
     );
-    assert_eq!(
-        windows_drive_relative[0].payload["target"],
-        serde_json::Value::Null,
-    );
+    if cfg!(windows) {
+        assert_eq!(
+            windows_drive_relative[0].payload["target"],
+            serde_json::Value::Null,
+        );
+    } else {
+        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt");
+    }
 
     for posix_path in ["src:/main.rs", "foo:/bar"] {
         let colon_component = normalize(

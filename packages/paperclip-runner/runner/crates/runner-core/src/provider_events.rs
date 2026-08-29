@@ -681,14 +681,15 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     };
     if path.is_empty()
         || path.starts_with('/')
-        // Provider display paths cross OS boundaries. Reject foreign absolute,
-        // rooted, drive-relative, and parent-traversing spellings on every
-        // host instead of reinterpreting them as literal POSIX filenames.
-        || windows_normalized_path.starts_with('/')
+        // Reject unmistakable foreign absolute paths on every host. Root-
+        // relative backslash spellings, drive-relative prefixes, and
+        // backslash-separated `..` are only path syntax on Windows; on POSIX
+        // those bytes are valid relative filename content and must survive.
+        || windows_normalized_path.starts_with("//")
         || is_absolute_windows_drive_path(&windows_normalized_path)
-        || has_drive_relative_prefix(&windows_normalized_path)
+        || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
         || (cfg!(windows) && raw_path.contains(':'))
-        || windows_normalized_path.split('/').any(|segment| segment == "..")
+        || path.split('/').any(|segment| segment == "..")
         || has_unsafe_uri_spelling(raw_path)
     {
         Value::Null
@@ -794,11 +795,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_drive_relative_syntax_on_every_runner_platform() {
-        assert_eq!(
-            safe_acpx_location(Some(&json!({"path": "a:b/file.txt"}))),
-            Value::Null,
-        );
+    fn applies_drive_relative_syntax_only_on_windows() {
+        let normalized = safe_acpx_location(Some(&json!({"path": "a:b/file.txt"})));
+        if cfg!(windows) {
+            assert_eq!(normalized, Value::Null);
+        } else {
+            assert_eq!(normalized, Value::String("a:b/file.txt".to_owned()));
+        }
     }
 
     #[test]
@@ -827,12 +830,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_backslash_root_and_traversal_on_every_runner_platform() {
+    fn applies_backslash_root_and_traversal_only_on_windows() {
         for location in [r"foo\..\bar", r"\rooted\name"] {
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": location}))),
-                Value::Null,
-            );
+            let normalized = safe_acpx_location(Some(&json!({"path": location})));
+            if cfg!(windows) {
+                assert_eq!(normalized, Value::Null);
+            } else {
+                assert_eq!(normalized, Value::String(location.to_owned()));
+            }
         }
     }
 
