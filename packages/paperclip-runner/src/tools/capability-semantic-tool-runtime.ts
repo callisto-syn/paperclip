@@ -181,17 +181,29 @@ export class CapabilitySemanticToolRuntime {
         throw new Error("expired extension receipt does not match durable execution");
       }
       if (extension.status !== "pending") {
-        if (
-          canonicalJson(extension.execution.value) !== canonicalJson(value) ||
-          canonicalJson(extension.execution.entityRefs) !== canonicalJson(entityRefs)
-        ) {
-          throw new Error("completed extension receipt cannot be replaced");
+        const durableResult = durable.operationResults[extension.resultId];
+        if (durableResult === undefined) {
+          throw new Error("completed extension receipt omitted its operation result");
         }
-        this.#adoptReconciledExtension(key, input, extension.resultId, {
-          value,
-          commandResult: null,
-          entityRefs,
-        });
+        // The original authorized executor may publish while trusted recovery
+        // is resolving the expired lease. Its durable completion is already
+        // authoritative for this exact key and canonical input; adopt it
+        // instead of letting a stale recovery observation replace or reject
+        // successfully completed work.
+        this.#state.operationResults.set(
+          extension.resultId,
+          structuredClone(durableResult),
+        );
+        this.#state.resultSequence = Math.max(
+          this.#state.resultSequence,
+          durable.resultSequence,
+        );
+        this.#adoptReconciledExtension(
+          key,
+          input,
+          extension.resultId,
+          structuredClone(extension.execution),
+        );
         return { resultId: extension.resultId };
       }
       if (

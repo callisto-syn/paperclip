@@ -1327,6 +1327,73 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("adopts an authoritative completion that wins the recovery publication race", async () => {
+    const authoritative = {
+      key: "case-publication-race",
+      body: "Original executor body",
+      upserted: true,
+    };
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 1,
+      operationResults: { "tool-result-1": authoritative },
+      extensions: [{
+        key: `${OPEN.identity.runId}:upsert_case:publication-race`,
+        input: '{"body":"Case body","key":"case-publication-race"}',
+        status: "completed",
+        resultId: "tool-result-1",
+        execution: {
+          value: authoritative,
+          commandResult: null,
+          entityRefs: ["case:case-publication-race"],
+        },
+      }],
+    };
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => { durableSnapshot = structuredClone(snapshot); },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["cases:write"] });
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["cases:write"],
+    });
+
+    expect(restored.reconcileExpiredExtensionReceipt({
+      operationId: "upsert_case",
+      input: { key: "case-publication-race", body: "Case body" },
+      idempotencyKey: "publication-race",
+      value: {
+        key: "case-publication-race",
+        body: "Stale recovery observation",
+        upserted: true,
+      },
+      entityRefs: ["case:stale-observation"],
+    })).toEqual({ resultId: "tool-result-1" });
+    await expect(restored.invoke({
+      operationId: "upsert_case",
+      input: { key: "case-publication-race", body: "Case body" },
+      idempotencyKey: "publication-race",
+    })).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: authoritative,
+    });
+    expect(durableSnapshot.operationResults).toEqual({
+      "tool-result-1": authoritative,
+    });
+  });
+
   it("resolves an expired mutable export receipt during a restored retry", async () => {
     const observedExport = {
       schema: "paperclip.capability.mock-export.v1",
