@@ -120,6 +120,7 @@ pub enum CodexProviderEvent {
     Exited {
         exit_code: Option<i32>,
         success: bool,
+        completed_turn_authoritative: bool,
     },
 }
 
@@ -370,6 +371,8 @@ impl CodexProvider {
                         // process exit healthy. Preserve the completed turn and
                         // independently fail the reusable provider session.
                         success: exit.success && self.expected_shutdown,
+                        completed_turn_authoritative: self.expected_shutdown
+                            && self.active_provider_turn_id.is_none(),
                     }))
                 } else {
                     Ok(None)

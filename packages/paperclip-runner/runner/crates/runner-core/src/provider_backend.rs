@@ -819,7 +819,11 @@ impl CodexCommandExecutor {
                         })?;
                     self.save_state()?;
                 }
-                CodexProviderEvent::Exited { exit_code, success } => {
+                CodexProviderEvent::Exited {
+                    exit_code,
+                    success,
+                    completed_turn_authoritative,
+                } => {
                     self.provider = None;
                     if !success {
                         let state = self
@@ -827,16 +831,23 @@ impl CodexCommandExecutor {
                             .as_mut()
                             .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
-                        state.push_event(NormalizedProviderEvent {
-                            event_type: "session.failed".to_owned(),
-                            priority: EventPriority::P0,
-                            payload: json!({
-                                "provider": "codex",
-                                "code": "provider_exited",
-                                "exitCode": exit_code,
-                                "expected": success,
-                            }),
-                        })?;
+                        // The dead process cannot be reused, but a provider
+                        // exit that follows an acknowledged turn terminal must
+                        // not rewrite that authoritative turn as a session
+                        // failure. A later start still fails closed through the
+                        // provider_exited lifecycle.
+                        if !completed_turn_authoritative {
+                            state.push_event(NormalizedProviderEvent {
+                                event_type: "session.failed".to_owned(),
+                                priority: EventPriority::P0,
+                                payload: json!({
+                                    "provider": "codex",
+                                    "code": "provider_exited",
+                                    "exitCode": exit_code,
+                                    "expected": success,
+                                }),
+                            })?;
+                        }
                     }
                     self.save_state()?;
                     break;
