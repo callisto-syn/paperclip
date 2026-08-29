@@ -217,6 +217,33 @@ describe("managed Codex credentials", () => {
     },
   );
 
+  it.runIf(process.platform !== "win32")(
+    "fails within a bound when directory durability remains unavailable",
+    async () => {
+      const fixture = await credentialFixture();
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const syncSpy = vi.spyOn(prototype, "sync").mockRejectedValue(
+        new Error("persistent directory sync failure"),
+      );
+      try {
+        const staging = stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { OPENAI_API_KEY: "launch-only-key" },
+        });
+        await expect(staging).rejects.toThrow(
+          "remained non-durable after 8 attempts",
+        );
+        expect(syncSpy).toHaveBeenCalledTimes(8);
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
+
   it("rejects missing, ambiguous, malformed, and unsafe sources", async () => {
     const fixture = await credentialFixture();
     await expect(

@@ -12,6 +12,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 const MAX_CODEX_CREDENTIAL_BYTES = 256 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
+const MAX_DIRECTORY_SYNC_ATTEMPTS = 8;
 
 export type ManagedCodexCredentialMode =
   "api_key" | "inline_json" | "managed_file";
@@ -294,20 +295,26 @@ async function removeCredential(path: string, home: string): Promise<void> {
 
 async function syncDirectoryDurably(directory: string): Promise<void> {
   let retryDelayMs = 10;
-  while (true) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_DIRECTORY_SYNC_ATTEMPTS; attempt += 1) {
     try {
       await syncDirectory(directory);
       return;
-    } catch {
-      // There is no safe success or failure result while a credential
-      // namespace mutation remains non-durable. Keep admission closed and
-      // retry with bounded backoff until the filesystem confirms durability.
+    } catch (error) {
+      lastError = error;
+      if (attempt === MAX_DIRECTORY_SYNC_ATTEMPTS) break;
+      // Keep admission closed during transient failures, while bounding total
+      // startup/shutdown latency for a persistently unhealthy filesystem.
       await new Promise<void>((resolveRetry) => {
         setTimeout(resolveRetry, retryDelayMs);
       });
       retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
     }
   }
+  throw new Error(
+    `Managed Codex credential directory remained non-durable after ${MAX_DIRECTORY_SYNC_ATTEMPTS} attempts`,
+    { cause: lastError },
+  );
 }
 
 async function syncDirectory(directory: string): Promise<void> {
