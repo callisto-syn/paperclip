@@ -314,6 +314,20 @@ impl AcpxProviderSession {
                         ))));
                     }
                 }
+                AcpxProviderStateEvent::SemanticResult(result) => {
+                    if let Err(error) =
+                        next_bridge.apply_result(crate::provider_bridge::ToolResult {
+                            call_id: result.call_id.clone(),
+                            operation_id: result.operation_id.clone(),
+                            result: result.result.clone(),
+                            is_error: false,
+                        })
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool result reconciliation failed: {error}"
+                        ))));
+                    }
+                }
                 AcpxProviderStateEvent::TurnTerminal { .. } => {
                     let settlements = match next_bridge.settle_turn("acpx_turn_settled") {
                         Ok(settlements) => settlements,

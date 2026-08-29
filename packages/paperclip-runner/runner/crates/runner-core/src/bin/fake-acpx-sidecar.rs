@@ -88,6 +88,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-wrong-scope"
             | "turns-tool"
             | "turns-tool-terminal"
+            | "turns-tool-result-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -113,7 +114,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if command == "turn.start"
                     && matches!(
                         mode,
-                        "turns-tool" | "turns-tool-terminal" | "turns-unauthorized-tool"
+                        "turns-tool"
+                            | "turns-tool-terminal"
+                            | "turns-tool-result-terminal"
+                            | "turns-unauthorized-tool"
                     )
                 {
                     write_turn_event(
@@ -124,9 +128,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         turn_id,
                         json!({
                             "callId":"call-1",
-                            "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal") { "issues.read" } else { "issues.delete" },
+                            "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal" | "turns-tool-result-terminal") { "issues.read" } else { "issues.delete" },
                             "input":{"id":"issue-1"},
                         }),
+                    )?;
+                    next_sequence += 1;
+                }
+                if command == "turn.start" && mode == "turns-tool-result-terminal" {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.event",
+                        "run-1",
+                        turn_id,
+                        json!({
+                            "type":"semantic_result",
+                            "callId":"call-1",
+                            "operationId":"issues.read",
+                            "result":{"id":"issue-1"},
+                        }),
+                    )?;
+                    next_sequence += 1;
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.turn_terminal",
+                        "run-1",
+                        turn_id,
+                        json!({"status":"completed"}),
                     )?;
                     next_sequence += 1;
                 }

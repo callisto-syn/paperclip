@@ -187,6 +187,31 @@ fn returns_pending_tool_cancellations_before_the_terminal_event() {
 }
 
 #[test]
+fn completed_tool_results_are_not_cancelled_when_the_turn_terminates() {
+    let mut session = AcpxProviderSession::start(&config("turns-tool-result-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+    let tool = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(tool[0], AcpxProviderStateEvent::ToolCall { .. }));
+
+    let result = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &result[0],
+        AcpxProviderStateEvent::SemanticResult(result)
+            if result.call_id == "call-1" && result.operation_id == "issues.read"
+    ));
+
+    let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert!(matches!(
+        &terminal[0],
+        AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
+    ));
+    session.shutdown("test complete").unwrap();
+}
+
+#[test]
 fn fails_closed_before_returning_an_unauthorized_tool_call() {
     let mut session = AcpxProviderSession::start(&config("turns-unauthorized-tool")).unwrap();
     session
