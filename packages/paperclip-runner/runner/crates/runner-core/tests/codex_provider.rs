@@ -390,7 +390,7 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn nonzero_provider_exit_distinguishes_same_process_completion_from_resumed_crash() {
+fn completion_authority_is_scoped_to_process_generation_and_fresh_work() {
     let directory = temporary_directory("completion-then-nonzero-exit");
     let config = provider_config(
         &directory,
@@ -434,10 +434,8 @@ fn nonzero_provider_exit_distinguishes_same_process_completion_from_resumed_cras
     }
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));
-    assert!(!event_types.iter().any(|event| event == "session.failed"));
-    assert!(event_types
-        .iter()
-        .any(|event| event == "session.reconciled"));
+    assert!(event_types.iter().any(|event| event == "session.failed"));
+    assert!(!event_types.iter().any(|event| event == "turn.failed"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after nonzero exit"),
@@ -445,7 +443,12 @@ fn nonzero_provider_exit_distinguishes_same_process_completion_from_resumed_cras
     .expect("parse provider state after nonzero exit");
     assert_eq!(persisted["lifecycle"], "provider_exited");
     assert_eq!(persisted["completedTurnAuthoritative"], true);
+    assert_eq!(persisted["providerProcessGeneration"], 1);
+    assert_eq!(persisted["completedTurnProcessGeneration"], 1);
 
+    // A fresh process restoring the durable completed turn is a recovery
+    // observation, not new provider work. Its configured nonzero exit must
+    // reconcile the already completed session until turn.start revokes it.
     let mut recovered = CodexCommandExecutor::new(&directory);
     let mut recovered_event_types = Vec::new();
     for _ in 0..200 {
@@ -457,18 +460,25 @@ fn nonzero_provider_exit_distinguishes_same_process_completion_from_resumed_cras
         );
         if recovered_event_types
             .iter()
-            .any(|event| event == "session.failed")
+            .any(|event| event == "session.reconciled")
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(recovered_event_types
-        .iter()
-        .any(|event| event == "session.failed"));
     assert!(!recovered_event_types
         .iter()
-        .any(|event| event == "turn.failed"));
+        .any(|event| event == "session.failed"));
+    assert!(recovered_event_types
+        .iter()
+        .any(|event| event == "session.reconciled"));
+    let recovered_persisted: Value = serde_json::from_slice(
+        &fs::read(directory.join("codex-provider-state.json"))
+            .expect("read provider state after resumed exit"),
+    )
+    .expect("parse provider state after resumed exit");
+    assert_eq!(recovered_persisted["providerProcessGeneration"], 2);
+    assert_eq!(recovered_persisted["completedTurnProcessGeneration"], 1);
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

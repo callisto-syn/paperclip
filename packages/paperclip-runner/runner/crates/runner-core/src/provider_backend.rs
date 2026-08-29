@@ -165,6 +165,12 @@ struct CodexProviderState {
     active_provider_turn_id: Option<String>,
     #[serde(default)]
     completed_turn_authoritative: bool,
+    #[serde(default)]
+    provider_process_generation: u64,
+    #[serde(default)]
+    completed_turn_process_generation: Option<u64>,
+    #[serde(default)]
+    completed_provider_turn_id: Option<String>,
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -187,6 +193,9 @@ impl CodexProviderState {
             provider_session_id: None,
             active_provider_turn_id: None,
             completed_turn_authoritative: false,
+            provider_process_generation: 0,
+            completed_turn_process_generation: None,
+            completed_provider_turn_id: None,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),
@@ -215,6 +224,10 @@ impl CodexProviderState {
                 .active_provider_turn_id
                 .as_ref()
                 .is_some_and(|value| value.is_empty() || value.len() > 240)
+            || self
+                .completed_provider_turn_id
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 240)
             || self.completion_contract.as_ref().is_some_and(|contract| {
                 contract.revision.is_empty()
                     || contract.revision.len() > 120
@@ -236,6 +249,12 @@ impl CodexProviderState {
                     || matches!(self.lifecycle.as_str(), "session_open" | "turn_active")))
             || (self.lifecycle == "turn_active" && self.active_provider_turn_id.is_none())
             || (self.completed_turn_authoritative && self.active_provider_turn_id.is_some())
+            || (!self.completed_turn_authoritative
+                && (self.completed_turn_process_generation.is_some()
+                    || self.completed_provider_turn_id.is_some()))
+            || self
+                .completed_turn_process_generation
+                .is_some_and(|generation| generation > self.provider_process_generation)
             || (matches!(
                 self.lifecycle.as_str(),
                 "prepared" | "session_open" | "closed"
@@ -290,6 +309,8 @@ impl CodexProviderState {
             // prior turn. Persisting both would make the recovered state
             // invalid and could misclassify a later provider exit.
             self.completed_turn_authoritative = false;
+            self.completed_turn_process_generation = None;
+            self.completed_provider_turn_id = None;
         }
         self.lifecycle = if self.active_provider_turn_id.is_some() {
             "turn_active".to_owned()
@@ -372,15 +393,32 @@ impl CodexCommandExecutor {
             DurableRunnerError::invalid("recoverable Codex state omitted its thread id")
         })?;
         let previous_active_turn_id = state.active_provider_turn_id.clone();
-        let mut provider =
-            CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
-                DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
-            })?;
+        let process_generation = state
+            .provider_process_generation
+            .checked_add(1)
+            .ok_or_else(|| DurableRunnerError::invalid("Codex process generation exhausted"))?;
+        let completed_turn_authoritative = state.completed_turn_authoritative;
+        let completed_turn_process_generation = state.completed_turn_process_generation;
+        let completed_provider_turn_id = state.completed_provider_turn_id.clone();
+        let mut provider = CodexProvider::start_for_generation(
+            &state.config,
+            Some(&thread_id),
+            process_generation,
+        )
+        .map_err(|error| {
+            DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
+        })?;
         let recovered_active_turn_id = provider.active_provider_turn_id().map(str::to_owned);
         provider.restore_completed_turn_authority(
-            state.completed_turn_authoritative && recovered_active_turn_id.is_none(),
+            completed_turn_authoritative && recovered_active_turn_id.is_none(),
+            completed_turn_process_generation,
+            completed_provider_turn_id.as_deref(),
         );
         self.provider = Some(provider);
+        self.state
+            .as_mut()
+            .expect("Codex state remains available during recovery")
+            .provider_process_generation = process_generation;
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
             let state = self
                 .state
@@ -397,8 +435,8 @@ impl CodexCommandExecutor {
                     "activeProviderTurnId": recovered_active_turn_id,
                 }),
             })?;
-            self.save_state()?;
         }
+        self.save_state()?;
         Ok(())
     }
 
@@ -507,14 +545,29 @@ impl CodexCommandExecutor {
                     "Codex provider session is closed",
                 ));
             }
-            let mut provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
-                .map_err(|error| {
-                    DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
-                })?;
+            let process_generation = state
+                .provider_process_generation
+                .checked_add(1)
+                .ok_or_else(|| DurableRunnerError::invalid("Codex process generation exhausted"))?;
+            let mut provider = CodexProvider::start_for_generation(
+                &state.config,
+                state.thread_id.as_deref(),
+                process_generation,
+            )
+            .map_err(|error| {
+                DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
+            })?;
             provider.restore_completed_turn_authority(
                 state.completed_turn_authoritative && provider.active_provider_turn_id().is_none(),
+                state.completed_turn_process_generation,
+                state.completed_provider_turn_id.as_deref(),
             );
             self.provider = Some(provider);
+            self.state
+                .as_mut()
+                .expect("Codex state remains available after provider start")
+                .provider_process_generation = process_generation;
+            self.save_state()?;
         }
         self.provider
             .as_mut()
@@ -627,6 +680,8 @@ impl CodexCommandExecutor {
             .expect("Codex state exists after turn start");
         state.active_provider_turn_id = Some(provider_turn_id.clone());
         state.completed_turn_authoritative = false;
+        state.completed_turn_process_generation = None;
+        state.completed_provider_turn_id = None;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -769,6 +824,14 @@ impl CodexCommandExecutor {
                     )));
                 }
                 CodexProviderEvent::Notification { method, params } => {
+                    let completed_turn_authority = if method == "turn/completed" {
+                        self.provider
+                            .as_ref()
+                            .and_then(CodexProvider::completed_turn_authority)
+                            .map(|(generation, turn_id)| (generation, turn_id.to_owned()))
+                    } else {
+                        None
+                    };
                     let normalized = normalize_codex_notification(&method, &params);
                     let terminal_event_type = normalized
                         .iter()
@@ -798,8 +861,16 @@ impl CodexCommandExecutor {
                         }
                     }
                     if method == "turn/completed" {
+                        let (process_generation, provider_turn_id) = completed_turn_authority
+                            .ok_or_else(|| {
+                                DurableRunnerError::invalid(
+                                    "Codex completion omitted process and turn authority",
+                                )
+                            })?;
                         state.active_provider_turn_id = None;
                         state.completed_turn_authoritative = true;
+                        state.completed_turn_process_generation = Some(process_generation);
+                        state.completed_provider_turn_id = Some(provider_turn_id);
                         state.lifecycle = "session_open".to_owned();
                     }
                     state.extend_events(normalized)?;
@@ -847,6 +918,9 @@ impl CodexCommandExecutor {
                     success,
                     completed_turn_authoritative,
                     completed_turn_observed_by_process,
+                    completion_reconciles_exit,
+                    process_generation,
+                    completed_turn_process_generation,
                 } => {
                     self.provider = None;
                     if !success {
@@ -861,9 +935,7 @@ impl CodexCommandExecutor {
                             // unavailable. Avoid emitting session.failed for
                             // already successful work, but never leave the
                             // durable lifecycle open after a nonzero exit.
-                            event_type: if completed_turn_authoritative
-                                && completed_turn_observed_by_process
-                            {
+                            event_type: if completion_reconciles_exit {
                                 "session.reconciled"
                             } else {
                                 "session.failed"
@@ -877,6 +949,8 @@ impl CodexCommandExecutor {
                                 "expected": success,
                                 "previousTurnCompleted": completed_turn_authoritative,
                                 "completedByExitedProcess": completed_turn_observed_by_process,
+                                "processGeneration": process_generation,
+                                "completedTurnProcessGeneration": completed_turn_process_generation,
                                 "activeProviderTurnId": Value::Null,
                             }),
                         })?;
@@ -997,6 +1071,9 @@ mod tests {
             provider_session_id: None,
             active_provider_turn_id: None,
             completed_turn_authoritative: false,
+            provider_process_generation: 0,
+            completed_turn_process_generation: None,
+            completed_provider_turn_id: None,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),
@@ -1027,12 +1104,17 @@ mod tests {
         state.thread_id = Some("thread-1".to_owned());
         state.lifecycle = "session_open".to_owned();
         state.completed_turn_authoritative = true;
+        state.provider_process_generation = 1;
+        state.completed_turn_process_generation = Some(1);
+        state.completed_provider_turn_id = Some("turn-1".to_owned());
 
         state.reconcile_active_provider_turn(Some("turn-2".to_owned()));
 
         assert_eq!(state.lifecycle, "turn_active");
         assert_eq!(state.active_provider_turn_id.as_deref(), Some("turn-2"));
         assert!(!state.completed_turn_authoritative);
+        assert!(state.completed_turn_process_generation.is_none());
+        assert!(state.completed_provider_turn_id.is_none());
         assert!(state.validate().is_ok());
     }
 

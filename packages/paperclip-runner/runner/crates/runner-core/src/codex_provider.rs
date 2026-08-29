@@ -122,7 +122,17 @@ pub enum CodexProviderEvent {
         success: bool,
         completed_turn_authoritative: bool,
         completed_turn_observed_by_process: bool,
+        completion_reconciles_exit: bool,
+        process_generation: u64,
+        completed_turn_process_generation: Option<u64>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletedTurnAuthority {
+    process_generation: u64,
+    provider_turn_id: String,
+    observed_idle: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,8 +164,8 @@ pub struct CodexProvider {
     pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
-    completed_turn_authoritative: bool,
-    completed_turn_observed_by_process: bool,
+    process_generation: u64,
+    completed_turn_authority: Option<CompletedTurnAuthority>,
 }
 
 impl CodexProvider {
@@ -163,7 +173,7 @@ impl CodexProvider {
         config: &CodexProviderConfig,
         resume_thread_id: Option<&str>,
     ) -> Result<Self, LocalRunnerError> {
-        Self::start_with_tools(config, std::iter::empty(), resume_thread_id)
+        Self::start_with_tools_for_generation(config, std::iter::empty(), resume_thread_id, 1)
     }
 
     pub fn start_with_tools(
@@ -171,7 +181,34 @@ impl CodexProvider {
         authorized_tools: impl IntoIterator<Item = AuthorizedTool>,
         resume_thread_id: Option<&str>,
     ) -> Result<Self, LocalRunnerError> {
+        Self::start_with_tools_for_generation(config, authorized_tools, resume_thread_id, 1)
+    }
+
+    pub(crate) fn start_for_generation(
+        config: &CodexProviderConfig,
+        resume_thread_id: Option<&str>,
+        process_generation: u64,
+    ) -> Result<Self, LocalRunnerError> {
+        Self::start_with_tools_for_generation(
+            config,
+            std::iter::empty(),
+            resume_thread_id,
+            process_generation,
+        )
+    }
+
+    fn start_with_tools_for_generation(
+        config: &CodexProviderConfig,
+        authorized_tools: impl IntoIterator<Item = AuthorizedTool>,
+        resume_thread_id: Option<&str>,
+        process_generation: u64,
+    ) -> Result<Self, LocalRunnerError> {
         config.validate()?;
+        if process_generation == 0 {
+            return Err(LocalRunnerError::invalid(
+                "Codex process generation must be positive",
+            ));
+        }
         let (dynamic_tools, authorized_tool_ids) = codex_dynamic_tools(authorized_tools)?;
         let mut provider = Self {
             process: SupervisedProcess::spawn(
@@ -190,8 +227,8 @@ impl CodexProvider {
             pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
-            completed_turn_authoritative: false,
-            completed_turn_observed_by_process: false,
+            process_generation,
+            completed_turn_authority: None,
         };
         let initialized = provider.request(
             "initialize",
@@ -271,12 +308,33 @@ impl CodexProvider {
         self.active_provider_turn_id.as_deref()
     }
 
-    pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
-        // Durable completion authority belongs to the completed turn, not the
-        // newly resumed provider process. Preserve the prior result without
-        // treating a later crash of this fresh process as reconciled work.
-        self.completed_turn_authoritative = authoritative;
-        self.completed_turn_observed_by_process = false;
+    pub(crate) fn restore_completed_turn_authority(
+        &mut self,
+        authoritative: bool,
+        process_generation: Option<u64>,
+        provider_turn_id: Option<&str>,
+    ) {
+        self.completed_turn_authority = authoritative.then(|| CompletedTurnAuthority {
+            // Legacy state did not record the generation. Generation zero is
+            // deliberately older than every supervised process generation.
+            process_generation: process_generation.unwrap_or(0),
+            provider_turn_id: provider_turn_id
+                .unwrap_or("durable-completed-turn")
+                .to_owned(),
+            observed_idle: false,
+        });
+        // A restored completed turn may not be failed again merely because
+        // the fresh reconciliation process exits before any new turn begins.
+        self.expected_shutdown = authoritative;
+    }
+
+    pub(crate) fn completed_turn_authority(&self) -> Option<(u64, &str)> {
+        self.completed_turn_authority.as_ref().map(|authority| {
+            (
+                authority.process_generation,
+                authority.provider_turn_id.as_str(),
+            )
+        })
     }
 
     pub fn start_turn(&mut self, message: &str, cwd: &str) -> Result<Value, LocalRunnerError> {
@@ -291,8 +349,7 @@ impl CodexProvider {
             ));
         }
         self.expected_shutdown = false;
-        self.completed_turn_authoritative = false;
-        self.completed_turn_observed_by_process = false;
+        self.completed_turn_authority = None;
         let result = self.request(
             "turn/start",
             json!({
@@ -347,10 +404,14 @@ impl CodexProvider {
     }
 
     pub fn read_thread(&mut self) -> Result<Value, LocalRunnerError> {
-        self.request(
+        let result = self.request(
             "thread/read",
             json!({"threadId": self.thread_id, "includeTurns": true}),
-        )
+        );
+        if result.is_ok() {
+            self.observe_current_process_idle_after_completion();
+        }
+        result
     }
 
     pub fn resolve_runtime_request(
@@ -379,6 +440,14 @@ impl CodexProvider {
             let Some(line) = self.process.receive_stdout_line(Duration::from_millis(1))? else {
                 let exit = self.process.try_wait()?;
                 return if let Some(exit) = exit {
+                    let completion_reconciles_exit = self
+                        .completed_turn_authority
+                        .as_ref()
+                        .is_some_and(|authority| {
+                            self.active_provider_turn_id.is_none()
+                                && (authority.process_generation != self.process_generation
+                                    || !authority.observed_idle)
+                        });
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
                         // Completion authority preserves the old turn result,
@@ -386,17 +455,36 @@ impl CodexProvider {
                         // The durable backend records that independent session
                         // lifecycle fact without refailing completed work.
                         success: exit.success
-                            && (self.expected_shutdown || self.completed_turn_authoritative),
-                        completed_turn_authoritative: self.completed_turn_authoritative
+                            && (self.expected_shutdown || completion_reconciles_exit),
+                        completed_turn_authoritative: self.completed_turn_authority.is_some()
                             && self.active_provider_turn_id.is_none(),
-                        completed_turn_observed_by_process: self.completed_turn_observed_by_process,
+                        completed_turn_observed_by_process: self
+                            .completed_turn_authority
+                            .as_ref()
+                            .is_some_and(|authority| {
+                                authority.process_generation == self.process_generation
+                            }),
+                        completion_reconciles_exit,
+                        process_generation: self.process_generation,
+                        completed_turn_process_generation: self
+                            .completed_turn_authority
+                            .as_ref()
+                            .map(|authority| authority.process_generation),
                     }))
                 } else {
+                    self.observe_current_process_idle_after_completion();
                     Ok(None)
                 };
             };
             parse_provider_message(&line)?
         };
+
+        // Any output after the terminal proves this generation remained live
+        // beyond the completed turn. Its old authority must not classify a
+        // later idle crash as part of that turn's completion.
+        if self.active_provider_turn_id.is_none() {
+            self.observe_current_process_idle_after_completion();
+        }
 
         if let (Some(rpc_id), Some(method)) = (
             message.get("id").cloned(),
@@ -556,10 +644,18 @@ impl CodexProvider {
                 &params,
             )?;
             if method == "turn/completed" {
+                let provider_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
+                    LocalRunnerError::invalid(
+                        "Codex completion arrived outside an active provider turn",
+                    )
+                })?;
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
-                self.completed_turn_authoritative = true;
-                self.completed_turn_observed_by_process = true;
+                self.completed_turn_authority = Some(CompletedTurnAuthority {
+                    process_generation: self.process_generation,
+                    provider_turn_id,
+                    observed_idle: false,
+                });
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
@@ -616,6 +712,16 @@ impl CodexProvider {
         self.expected_shutdown = true;
         self.cancel_pending_requests()?;
         self.process.terminate_group().map(|_| ())
+    }
+
+    fn observe_current_process_idle_after_completion(&mut self) {
+        let Some(authority) = self.completed_turn_authority.as_mut() else {
+            return;
+        };
+        if authority.process_generation == self.process_generation {
+            authority.observed_idle = true;
+            self.expected_shutdown = false;
+        }
     }
 
     fn cancel_pending_requests(&mut self) -> Result<(), LocalRunnerError> {
