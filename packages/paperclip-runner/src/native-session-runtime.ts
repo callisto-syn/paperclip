@@ -10,7 +10,6 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
-const GOVERNED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -111,25 +110,12 @@ async function settleBeforeAbort<T>(
   }
 }
 
-async function waitForSettlement(
-  pending: Promise<unknown>,
-  graceMs: number,
-): Promise<void> {
-  let graceTimer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    pending.then(() => undefined, () => undefined),
-    new Promise<void>((resolve) => {
-      graceTimer = setTimeout(resolve, graceMs);
-    }),
-  ]);
-  if (graceTimer !== undefined) clearTimeout(graceTimer);
-}
-
 async function consumeTurn(
   session: NativeSession,
   controlPlane: ControlPlanePort,
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
+  closeFailedSession: () => Promise<void>,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
   externalSignal?: AbortSignal,
 ) {
@@ -264,24 +250,18 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
-    // A governed resolver or cancellation is required to observe abort, but an
-    // embedding callback must not be able to postpone provider teardown
-    // indefinitely. Give cooperative work a bounded window, retain rejection
-    // observation for late settlement, and then proceed to the required close.
+    // Governed callbacks carry control-plane mutation authority. Once aborted,
+    // fail closed by joining them before provider teardown; closing first would
+    // let an abort-ignoring callback publish stale state into a closed session.
+    // The callback contract requires abort settlement, so a broken embedder is
+    // quarantined here rather than allowed to escape cleanup ownership.
     if (governedOperations.size > 0) {
       const governedSettlement = Promise.allSettled([...governedOperations]);
-      void governedSettlement;
-      await waitForSettlement(
-        governedSettlement,
-        GOVERNED_OPERATION_SETTLEMENT_GRACE_MS,
-      );
+      await governedSettlement;
     }
     if (!governedCancellationStarted) {
       await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
     }
-    // The outer execution owner performs the required close after this bounded
-    // consumer cleanup returns. Keeping close at that single ownership boundary
-    // avoids duplicate provider teardown while still terminating every failure.
     throw error;
   } finally {
     stopConsumer = true;
@@ -299,15 +279,8 @@ async function consumeTurn(
       iteratorTeardown,
       consumer,
     ]);
-    if (appendAbort.signal.aborted) {
-      void teardownSettlement;
-      await waitForSettlement(
-        teardownSettlement,
-        GOVERNED_OPERATION_SETTLEMENT_GRACE_MS,
-      );
-    } else {
-      await teardownSettlement;
-    }
+    if (appendAbort.signal.aborted) await closeFailedSession();
+    await teardownSettlement;
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
@@ -463,6 +436,16 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     });
   }
   options.onSession?.(session);
+  let sessionClosePromise: Promise<void> | null = null;
+  const closeSession = () => {
+    if (sessionClosePromise === null) {
+      options.onSession?.(null);
+      sessionClosePromise = session.close({
+        reason: "native session execution complete",
+      });
+    }
+    return sessionClosePromise;
+  };
   let executionSucceeded = false;
   try {
     const checkpoint = async () => {
@@ -505,6 +488,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         options.controlPlane,
         options.timeoutMs ?? 900_000,
         options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
+        closeSession,
         options.resolveGovernedWait,
         consumptionAbort.signal,
       );
@@ -686,8 +670,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return executionResult;
   } finally {
     if (!options.keepSessionOpen || !executionSucceeded) {
-      options.onSession?.(null);
-      await session.close({ reason: "native session execution complete" });
+      await closeSession();
     }
   }
 }

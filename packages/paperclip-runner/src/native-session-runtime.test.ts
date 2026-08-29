@@ -536,7 +536,7 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it("bounds an abort-ignoring governed-wait resolver before closing", async () => {
+  it("retains an abort-ignoring governed-wait resolver before closing", async () => {
     let markResolverStarted = () => {};
     const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve; });
     let releaseResolver = () => {};
@@ -606,16 +606,16 @@ describe("executeNativeSession recovery", () => {
       },
     });
     await resolverStarted;
-    await expect(execution).rejects.toThrow("native session timed out");
+    await new Promise<void>((resolve) => setTimeout(resolve, 125));
     expect(resolverSignal?.aborted).toBe(true);
-    expect(close).toHaveBeenCalled();
-    expect(lifecycle).toEqual(["closed"]);
+    expect(close).not.toHaveBeenCalled();
     releaseResolver();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(lifecycle).toEqual(["closed", "resolver-settled"]);
+    await expect(execution).rejects.toThrow("native session timed out");
+    expect(close).toHaveBeenCalled();
+    expect(lifecycle).toEqual(["resolver-settled", "closed"]);
   });
 
-  it("bounds an abort-ignoring governed-wait cancellation before closing", async () => {
+  it("retains an abort-ignoring governed-wait cancellation before closing", async () => {
     let markCancelStarted = () => {};
     const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
     let releaseCancel = () => {};
@@ -682,14 +682,14 @@ describe("executeNativeSession recovery", () => {
       resolveGovernedWait: async () => yieldedResult,
     });
     await cancelStarted;
-    await expect(execution).rejects.toThrow("native session timed out");
+    await new Promise<void>((resolve) => setTimeout(resolve, 125));
     expect(cancel).toHaveBeenCalled();
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(lifecycle).toEqual(["closed"]);
     releaseCancel();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(lifecycle).toEqual(["closed", "cancel-settled"]);
+    await expect(execution).rejects.toThrow("native session timed out");
+    expect(close).toHaveBeenCalled();
+    expect(lifecycle).toEqual(["cancel-settled", "closed"]);
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
