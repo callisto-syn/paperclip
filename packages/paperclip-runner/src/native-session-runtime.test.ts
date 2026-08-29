@@ -1628,8 +1628,8 @@ describe("executeNativeSession recovery", () => {
     };
     const terminalEvent: PrpEvent = {
       schema: "paperclip.prp.event.v1",
-      sourceEventId: "runner-recovery:run-native:3",
-      sourceSeq: 3,
+      sourceEventId: "runner-recovery:run-native:4",
+      sourceSeq: 4,
       sourceInstanceId: "runner-recovery",
       sourceKind: "provider",
       runId: identity.runId,
@@ -1643,13 +1643,19 @@ describe("executeNativeSession recovery", () => {
     };
     const resultProposalEvent: PrpEvent = {
       ...terminalEvent,
-      sourceEventId: "runner-recovery:run-native:2",
-      sourceSeq: 2,
+      sourceEventId: "runner-recovery:run-native:3",
+      sourceSeq: 3,
       eventType: "run.result.proposed",
       payload: result,
     };
     const originalTaskTerminal: PrpEvent = {
       ...terminalEvent,
+      sourceEventId: "runner-recovery:run-native:2",
+      sourceSeq: 2,
+      turnId: "turn-work",
+    };
+    const originalTaskProposal: PrpEvent = {
+      ...resultProposalEvent,
       sourceEventId: "runner-recovery:run-native:1",
       sourceSeq: 1,
       turnId: "turn-work",
@@ -1680,6 +1686,7 @@ describe("executeNativeSession recovery", () => {
     };
     const bySource = new Map<string, PrpEvent[]>([
       ["runner-recovery", [
+        structuredClone(originalTaskProposal),
         structuredClone(originalTaskTerminal),
         structuredClone(terminalEvent),
       ]],
@@ -1723,6 +1730,7 @@ describe("executeNativeSession recovery", () => {
       "native_recovery_checkpointed_disposition_proposal_missing",
     );
     bySource.set("runner-recovery", [
+      structuredClone(originalTaskProposal),
       structuredClone(originalTaskTerminal),
       structuredClone(resultProposalEvent),
       structuredClone(terminalEvent),
@@ -1734,6 +1742,7 @@ describe("executeNativeSession recovery", () => {
     });
     expect(startTurn).not.toHaveBeenCalled();
     expect(bySource.get("runner-recovery")).toEqual([
+      originalTaskProposal,
       originalTaskTerminal,
       resultProposalEvent,
       terminalEvent,

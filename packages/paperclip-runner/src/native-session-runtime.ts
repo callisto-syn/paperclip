@@ -458,12 +458,11 @@ async function replayCheckpointedTurnTerminal(input: {
       limit: 1_000,
     });
     if (replay.events.length === 0) {
-      const orderedTerminals = [...terminals]
-        .sort((left, right) => right.sourceSeq - left.sourceSeq);
-      const terminal = orderedTerminals.find((candidate) => {
-        const proposalSequence = latestResultProposalByTurn.get(candidate.turnId ?? "") ?? 0;
-        return proposalSequence > 0 && proposalSequence < candidate.sourceSeq;
-      }) ?? orderedTerminals[0] ?? null;
+      // Disposition recovery owns the newest durable provider terminal. An
+      // older task turn may also have a valid proposal, but selecting it would
+      // finalize stale work and strand the actual recovery terminal.
+      const terminal = [...terminals]
+        .sort((left, right) => right.sourceSeq - left.sourceSeq)[0] ?? null;
       const proposalSequence = latestResultProposalByTurn.get(terminal?.turnId ?? "") ?? 0;
       return terminal === null
         ? null
