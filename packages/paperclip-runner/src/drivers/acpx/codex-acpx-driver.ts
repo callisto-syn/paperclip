@@ -49,6 +49,7 @@ const TURN_START_EVENT_COUNT = 3;
 const MAX_TRANSCRIPT_EVENTS = 1_024;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
+const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;
@@ -571,9 +572,10 @@ class CodexAcpxSession implements HarnessSession {
     const failedOrPendingClose = this.#hostClosePromise;
     if (!failedOrPendingClose) return;
     // Never overlap the exact cleanup that exceeded the caller's wait bound.
-    // Once an attempt rejects, keep one backoff-bounded recovery owner alive
-    // until cleanup succeeds. A permanently pending attempt remains the sole
-    // owner while the runtime adapter independently terminates its children.
+    // Once an attempt rejects, keep one delay-bounded recovery owner alive for
+    // a finite retry budget. A permanently pending attempt remains the sole
+    // owner while the runtime adapter independently terminates its children;
+    // repeated terminal failures settle instead of creating an immortal loop.
     const recovery = (async () => {
       let attempt = failedOrPendingClose;
       let retryCount = 0;
@@ -582,7 +584,10 @@ class CodexAcpxSession implements HarnessSession {
           await attempt;
           this.#closed = true;
           return;
-        } catch {
+        } catch (error) {
+          if (retryCount >= MAX_AUTONOMOUS_HOST_CLOSE_RETRIES) {
+            throw error;
+          }
           retryCount += 1;
         }
         await waitForCleanupRetry(

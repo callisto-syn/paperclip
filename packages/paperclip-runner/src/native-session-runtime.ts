@@ -11,7 +11,9 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
+const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
+const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -724,31 +726,67 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     sessionQuarantined = true;
     options.onSession?.(null);
   };
+  let failedCleanupDeferred = false;
+  let sessionCloseRecoveryPromise: Promise<void> | null = null;
+  const retainFailedCleanup = (cleanup: Promise<void>) => {
+    failedCleanupDeferred = true;
+    quarantineSession();
+    failedSessionCleanupOwners.add(cleanup);
+    void cleanup.then(
+      () => failedSessionCleanupOwners.delete(cleanup),
+      () => failedSessionCleanupOwners.delete(cleanup),
+    );
+  };
+  const startSessionClose = (reason: string) => {
+    const attempt = session.close({ reason });
+    sessionClosePromise = attempt;
+    return attempt;
+  };
   const closeSession = () => {
     if (sessionClosePromise === null) {
       quarantineSession();
-      sessionClosePromise = (async () => {
+      const firstAttempt = startSessionClose(
+        "native session execution complete",
+      );
+      // Preserve the first close outcome for its caller. If an exact attempt
+      // fails, retain one ordered, delay-bounded production recovery within a
+      // finite retry budget. A still-pending attempt is never overlapped or
+      // replaced, and repeated terminal failure cannot create an immortal loop.
+      const recovery = (async () => {
+        let attempt = firstAttempt;
         let retryCount = 0;
-        let firstError: unknown;
         while (true) {
           try {
-            await session.close({
-              reason: retryCount === 0
-                ? "native session execution complete"
-                : `native session cleanup recovery after close failure (${retryCount})`,
-            });
+            await attempt;
+            return;
           } catch (error) {
-            firstError ??= error;
+            if (retryCount >= MAX_FAILED_SESSION_CLOSE_RETRIES) {
+              throw error;
+            }
             retryCount += 1;
             await waitForSessionCloseRetry();
-            continue;
+            if (sessionClosePromise === attempt) {
+              sessionClosePromise = null;
+            }
+            attempt = startSessionClose(
+              `native session cleanup recovery after close failure (${retryCount})`,
+            );
           }
-          if (firstError !== undefined) throw firstError;
-          return;
         }
       })();
+      sessionCloseRecoveryPromise = recovery;
+      retainFailedCleanup(recovery);
+      void recovery.finally(() => {
+        if (sessionCloseRecoveryPromise === recovery) {
+          sessionCloseRecoveryPromise = null;
+        }
+      }).catch(() => undefined);
     }
-    return sessionClosePromise;
+    const activeClose = sessionClosePromise;
+    if (activeClose === null) {
+      throw new Error("native session cleanup lost its active close attempt");
+    }
+    return activeClose;
   };
   let executionSucceeded = false;
   try {
@@ -1055,7 +1093,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if (!options.keepSessionOpen || !executionSucceeded || sessionQuarantined) {
+    if (
+      (!options.keepSessionOpen || !executionSucceeded || sessionQuarantined)
+      && !failedCleanupDeferred
+    ) {
       // A provider that ignores close must not keep execution pending forever.
       // closeSession removes it from the caller before invoking the backend;
       // retain observation of the promise, but bound the final join. Provider
