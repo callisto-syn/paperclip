@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
 
@@ -44,6 +45,8 @@ import {
   type CodexServerRequestHandler,
   type CodexTraceInterpretation,
 } from "./app-server-transport.js";
+
+const WORKSPACE = realpathSync.native(process.cwd());
 
 class TestQueue<T> implements AsyncIterable<T> {
   values: T[] = [];
@@ -147,7 +150,7 @@ class FakeCodexTransport implements CodexAppServerTransport {
           id: this.threadId,
           sessionId: this.providerSessionId,
           modelProvider: "openai",
-          cwd: "/workspace",
+          cwd: WORKSPACE,
           turns: [],
           activePermissionProfile: {
             id: planMode
@@ -157,7 +160,7 @@ class FakeCodexTransport implements CodexAppServerTransport {
         },
         model: "gpt-test",
         modelProvider: "openai",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         sandbox: { type: "workspaceWrite" },
         approvalPolicy: params.approvalPolicy,
         instructionSources: [],
@@ -199,7 +202,7 @@ class FakeCodexTransport implements CodexAppServerTransport {
           thread: {
             id: this.threadId,
             sessionId: this.providerSessionId,
-            cwd: "/workspace",
+            cwd: WORKSPACE,
             turns: [{ id: "turn-1", status: "inProgress", items: [] }],
           },
         }
@@ -357,7 +360,7 @@ async function traceCompletedProposal(
   const traced = runCodexCodexTracer({
     driver,
     taskEnvelope: envelope,
-    workingDirectory: "/workspace",
+    workingDirectory: WORKSPACE,
     runId: options.runId,
     normalizedSessionId: options.normalizedSessionId,
     steer: options.steer,
@@ -411,7 +414,7 @@ describe("Codex app-server Codex driver", () => {
     const opening = driver.openSession({
       runId: "run-owned",
       normalizedSessionId: "normalized-owned",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await vi.waitFor(() => expect(onSpawn).toHaveBeenCalledOnce());
     expect(transport.calls).toEqual([]);
@@ -432,7 +435,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await driver.openSession({
       runId: "run-chat",
       normalizedSessionId: "normalized-chat",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
 
     const threadStart = transport.calls.find(
@@ -479,7 +482,7 @@ describe("Codex app-server Codex driver", () => {
     await driver.openSession({
       runId: "run-qualified-model",
       normalizedSessionId: "normalized-qualified-model",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
 
     expect(
@@ -508,7 +511,7 @@ describe("Codex app-server Codex driver", () => {
     await driver.openSession({
       runId: "run-runtime-context",
       normalizedSessionId: "normalized-runtime-context",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
 
     const threadStart = transport.calls.find((call) => call.method === "thread/start");
@@ -529,7 +532,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await driver.openSession({
       runId: "run-1",
       normalizedSessionId: "normalized-1",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Do the safe task." },
@@ -742,7 +745,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-durable-result",
       normalizedSessionId: "normalized-durable-result",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Finish through runnerd." },
@@ -776,7 +779,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-traced",
       normalizedSessionId: "normalized-traced",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Trace the response." },
@@ -832,7 +835,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-canonical-workspace",
       normalizedSessionId: "normalized-canonical-workspace",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Change the workspace." },
@@ -949,7 +952,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-empty-interrupted-workspace",
       normalizedSessionId: "normalized-empty-interrupted-workspace",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Inspect without changing files." },
@@ -992,7 +995,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-usage-replay",
       normalizedSessionId: "normalized-usage-replay",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
 
     transport.push("thread/tokenUsage/updated", {
@@ -1026,7 +1029,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-stream-channels",
       normalizedSessionId: "normalized-stream-channels",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const turn = await session.startTurn({
       message: { role: "user", text: "Stream progress." },
@@ -1161,7 +1164,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-context",
       normalizedSessionId: "normalized-context",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const iterator = session.events()[Symbol.asyncIterator]();
     const first = await iterator.next();
@@ -1172,7 +1175,7 @@ describe("Codex app-server Codex driver", () => {
       codexVersion: "codex-cli/0.132.0",
       model: "gpt-test",
       modelProvider: "openai",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
       approvalPolicy: "never",
       instructionSources: [],
       instructionPolicy: {
@@ -1197,7 +1200,7 @@ describe("Codex app-server Codex driver", () => {
         "features.image_generation": false,
       },
       permissions: "paperclip-runner-workspace-only",
-      runtimeWorkspaceRoots: ["/workspace"],
+      runtimeWorkspaceRoots: [WORKSPACE],
       dynamicTools: [{ name: "paperclip_finish" }, { name: "paperclip_block" }],
     });
     const commandPolicy = transport.calls.find(
@@ -1257,7 +1260,7 @@ describe("Codex app-server Codex driver", () => {
       const original = await driver.openSession({
         runId: `run-policy-${approvalPolicy}`,
         normalizedSessionId: `normalized-policy-${approvalPolicy}`,
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
       const started = await original.events()[Symbol.asyncIterator]().next();
       const snapshot = await original.snapshot();
@@ -1282,7 +1285,7 @@ describe("Codex app-server Codex driver", () => {
     }).openSession({
       runId: "run-no-collaboration-instructions",
       normalizedSessionId: "session-no-collaboration-instructions",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const first = await session.events()[Symbol.asyncIterator]().next();
 
@@ -1304,7 +1307,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await driver.openSession({
       runId: "run-plan",
       normalizedSessionId: "session-plan",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     expect(
       transport.calls.find((call) => call.method === "thread/start")?.params,
@@ -1348,24 +1351,34 @@ describe("Codex app-server Codex driver", () => {
       }).openSession({
         runId: "run-plan-unsupported",
         normalizedSessionId: "session-plan-unsupported",
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       }),
     ).rejects.toThrow("planning_mode_unsupported");
   });
 
   it("refuses to turn host credential roots into model-writable workspaces", async () => {
     await expect(
-      makeDriver([]).openSession({
+      makeDriver([], {
+        environment: {
+          HOME: "/isolated/home",
+          CODEX_HOME: WORKSPACE,
+        },
+      }).openSession({
         runId: "run-codex-home",
         normalizedSessionId: "normalized-codex-home",
-        workingDirectory: "/isolated/codex",
+        workingDirectory: WORKSPACE,
       }),
     ).rejects.toThrow("cannot overlap host CODEX_HOME");
     await expect(
-      makeDriver([]).openSession({
+      makeDriver([], {
+        environment: {
+          HOME: `${WORKSPACE}/host-home`,
+          CODEX_HOME: "/isolated/codex",
+        },
+      }).openSession({
         runId: "run-host-home",
         normalizedSessionId: "normalized-host-home",
-        workingDirectory: "/isolated",
+        workingDirectory: WORKSPACE,
       }),
     ).rejects.toThrow("cannot contain the host HOME");
     await expect(
@@ -1382,7 +1395,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-controls",
       normalizedSessionId: "normalized-controls",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Start." },
@@ -1438,7 +1451,7 @@ describe("Codex app-server Codex driver", () => {
       const session = await makeDriver([transport]).openSession({
         runId: `run-${scenario.id}`,
         normalizedSessionId: `normalized-${scenario.id}`,
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
       const { turnId } = await session.startTurn({
         message: { role: "user", text: "Exercise request." },
@@ -1498,7 +1511,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-live-console-controls",
       normalizedSessionId: "normalized-live-console-controls",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Start." },
@@ -1616,7 +1629,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-interrupt-races",
       normalizedSessionId: "normalized-interrupt-races",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const starting = session.startTurn({
       message: { role: "user", text: "Start slowly." },
@@ -1650,7 +1663,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-goals",
       normalizedSessionId: "normalized-goals",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.goal?.({ action: "get" });
     await session.goal?.({
@@ -1695,7 +1708,7 @@ describe("Codex app-server Codex driver", () => {
       const unsupported = await unsupportedDriver.openSession({
         runId: "run-goals-unsupported",
         normalizedSessionId: "normalized-goals-unsupported",
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
       expect((await unsupportedDriver.descriptor()).capabilities).toMatchObject(
         { goals: false },
@@ -1721,7 +1734,7 @@ describe("Codex app-server Codex driver", () => {
       const session = await driver.openSession({
         runId: "run-goals-transient",
         normalizedSessionId: "normalized-goals-transient",
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
 
       expect((await driver.descriptor()).capabilities).toMatchObject({
@@ -1743,7 +1756,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-resolution-shapes",
       normalizedSessionId: "normalized-resolution-shapes",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Ask me things." },
@@ -1860,7 +1873,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-dot-185",
       normalizedSessionId: "normalized-dot-185",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Ask the deployment questions." },
@@ -1966,7 +1979,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-malformed-input",
       normalizedSessionId: "normalized-malformed-input",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Ask a malformed question." },
@@ -2008,7 +2021,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-outcome",
       normalizedSessionId: "normalized-outcome",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const events: PrpEvent[] = [];
     void (async () => {
@@ -2094,7 +2107,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-provider-loss",
       normalizedSessionId: "normalized-provider-loss",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const events: PrpEvent[] = [];
     const consume = (async () => {
@@ -2153,7 +2166,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-durable-handoff",
       normalizedSessionId: "normalized-durable-handoff",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const iterator = session.events()[Symbol.asyncIterator]();
     const { turnId } = await session.startTurn({
@@ -2233,7 +2246,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-answer-handoff-race",
       normalizedSessionId: "normalized-answer-handoff-race",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const iterator = session.events()[Symbol.asyncIterator]();
     const { turnId } = await session.startTurn({
@@ -2304,7 +2317,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-redaction",
       normalizedSessionId: "normalized-redaction",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Request input." },
@@ -2339,7 +2352,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-result",
       normalizedSessionId: "normalized-result",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     const request = {
@@ -2416,7 +2429,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-result-normalized-echo",
       normalizedSessionId: "normalized-result-normalized-echo",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     const toolShaped = structuredClone(result) as unknown as Record<string, unknown>;
@@ -2484,7 +2497,7 @@ describe("Codex app-server Codex driver", () => {
     }).openSession({
       runId: "run-tools",
       normalizedSessionId: "normalized-tools",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({
       message: { role: "user", text: "Inspect the task." },
@@ -2531,7 +2544,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-tool-then-message-conflict",
       normalizedSessionId: "normalized-tool-then-message-conflict",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -2578,7 +2591,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-message-then-tool-conflict",
       normalizedSessionId: "normalized-message-then-tool-conflict",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     transport.push("item/completed", {
@@ -2629,7 +2642,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-identical-cross-channel",
       normalizedSessionId: "normalized-identical-cross-channel",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -2673,7 +2686,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-terminal-result-conflict",
       normalizedSessionId: "normalized-terminal-result-conflict",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -2730,7 +2743,7 @@ describe("Codex app-server Codex driver", () => {
       const session = await makeDriver([transport]).openSession({
         runId: "run-hostile-tool",
         normalizedSessionId: "normalized-hostile-tool",
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
       await session.startTurn({ message: { role: "user", text: "Complete." } });
       expect(
@@ -2764,7 +2777,7 @@ describe("Codex app-server Codex driver", () => {
     const preTurn = await makeDriver([preTurnTransport]).openSession({
       runId: "run-pre-turn",
       normalizedSessionId: "normalized-pre-turn",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     preTurnTransport.push("item/completed", {
       threadId: "thread-1",
@@ -2789,7 +2802,7 @@ describe("Codex app-server Codex driver", () => {
     const crossThread = await makeDriver([crossThreadTransport]).openSession({
       runId: "run-cross-thread",
       normalizedSessionId: "normalized-cross-thread",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await crossThread.startTurn({
       message: { role: "user", text: "Complete." },
@@ -2818,7 +2831,7 @@ describe("Codex app-server Codex driver", () => {
     const postTerminal = await makeDriver([postTerminalTransport]).openSession({
       runId: "run-post-terminal",
       normalizedSessionId: "normalized-post-terminal",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await postTerminal.startTurn({
       message: { role: "user", text: "Complete." },
@@ -2848,7 +2861,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-terminal-replay",
       normalizedSessionId: "normalized-terminal-replay",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     transport.push("turn/completed", {
@@ -2882,7 +2895,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-large-result",
       normalizedSessionId: "normalized-large-result",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -2924,7 +2937,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-tools",
       normalizedSessionId: "normalized-tools",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await session.startTurn({
       message: { role: "user", text: "Complete or block." },
@@ -2997,7 +3010,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-recover",
       normalizedSessionId: "normalized-recover",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Work." } });
     const snapshot = await original.snapshot();
@@ -3025,7 +3038,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [
           { id: "turn-old", status: "completed", items: [] },
           { id: "turn-1", status: "inProgress", items: [] },
@@ -3036,7 +3049,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-history",
       normalizedSessionId: "normalized-history",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({
       message: { role: "user", text: "Keep working." },
@@ -3066,7 +3079,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-proposal-loss",
       normalizedSessionId: "normalized-proposal-loss",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -3152,7 +3165,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [
           {
             id: "turn-1",
@@ -3172,7 +3185,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-recovered-result-conflict",
       normalizedSessionId: "normalized-recovered-result-conflict",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -3221,7 +3234,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [{ id: "turn-1", status: "completed", items: [] }],
       },
     };
@@ -3229,7 +3242,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-terminal-loss",
       normalizedSessionId: "normalized-terminal-loss",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     expect(
@@ -3281,7 +3294,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [{ id: "turn-1", status: "completed", items: [] }],
       },
     };
@@ -3290,7 +3303,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [
           { id: "turn-1", status: "completed", items: [] },
           { id: "turn-2", status: "completed", items: [] },
@@ -3301,7 +3314,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-result-less-terminal",
       normalizedSessionId: "normalized-result-less-terminal",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     first.push("turn/completed", {
@@ -3402,7 +3415,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [
           { id: "turn-1", status: "completed", items: [] },
           { id: "turn-2", status: "inProgress", items: [] },
@@ -3413,7 +3426,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-uncheckpointed-disposition",
       normalizedSessionId: "normalized-uncheckpointed-disposition",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     first.push("turn/completed", {
@@ -3443,7 +3456,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "thread-1",
         sessionId: "provider-session-1",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         turns: [
           { id: "turn-1", status: "completed", items: [] },
           { id: "turn-2", status: "inProgress", items: [] },
@@ -3454,7 +3467,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "run-result-recovery-loss",
       normalizedSessionId: "normalized-result-recovery-loss",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({ message: { role: "user", text: "Complete." } });
     expect(await first.invoke({
@@ -3522,7 +3535,7 @@ describe("Codex app-server Codex driver", () => {
         thread: {
           id: "thread-1",
           sessionId: "provider-session-1",
-          cwd: "/workspace",
+          cwd: WORKSPACE,
           turns: testCase.turns,
         },
       };
@@ -3530,7 +3543,7 @@ describe("Codex app-server Codex driver", () => {
       const original = await driver.openSession({
         runId: `run-${testCase.label}-turn`,
         normalizedSessionId: `normalized-${testCase.label}-turn`,
-        workingDirectory: "/workspace",
+        workingDirectory: WORKSPACE,
       });
       await original.startTurn({ message: { role: "user", text: "Work." } });
       const snapshot = await original.snapshot();
@@ -3561,7 +3574,7 @@ describe("Codex app-server Codex driver", () => {
       thread: {
         id: "driver-thread-loss",
         sessionId: "provider-session-loss",
-        cwd: "/workspace",
+        cwd: WORKSPACE,
         tokenUsage: { total: { inputTokens: 21, outputTokens: 8 } },
         turns: [
           {
@@ -3582,7 +3595,7 @@ describe("Codex app-server Codex driver", () => {
     const original = await driver.openSession({
       runId: "runtime-run-loss",
       normalizedSessionId: "controller-session-loss",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await original.startTurn({
       message: { role: "user", text: "Work through loss." },
@@ -3635,7 +3648,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await makeDriver([transport]).openSession({
       runId: "run-degrade",
       normalizedSessionId: "normalized-degrade",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     const { turnId } = await session.startTurn({
       message: { role: "user", text: "Start." },
@@ -3894,7 +3907,7 @@ describe("Codex app-server Codex driver", () => {
     const session = await driver.openSession({
       runId: "run-no-capabilities",
       normalizedSessionId: "normalized-no-capabilities",
-      workingDirectory: "/workspace",
+      workingDirectory: WORKSPACE,
     });
     await expect(session.read?.()).rejects.toBeInstanceOf(
       HarnessCapabilityUnavailableError,
