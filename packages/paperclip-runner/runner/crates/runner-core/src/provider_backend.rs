@@ -1169,10 +1169,14 @@ impl CodexCommandExecutor {
             .state
             .as_mut()
             .expect("Codex state remains available at its tool receipt limit");
-        if state.push_receipt_limit_diagnostic(call_id, operation_id)? {
+        let first_limit_hit = state.push_receipt_limit_diagnostic(call_id, operation_id)?;
+        if first_limit_hit {
             self.save_state()?;
+            // The durable marker owns the one interruption for this turn.
+            // Buffered calls that arrive before the terminal is observed must
+            // not issue a second provider request.
+            self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
         }
-        self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
         Ok(())
     }
 
