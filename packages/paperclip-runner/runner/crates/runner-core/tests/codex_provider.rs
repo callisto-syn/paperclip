@@ -423,13 +423,19 @@ fn completion_authority_is_scoped_to_process_generation_and_fresh_work() {
         .expect("start provider turn");
 
     let mut event_types = Vec::new();
-    for _ in 0..600 {
+    let first_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < first_exit_deadline {
         event_types.extend(
             poll_and_ack(&mut executor)
                 .expect("poll completion and nonzero exit")
                 .into_iter()
                 .map(|event| event.event_type),
         );
+        if event_types.iter().any(|event| event == "turn.completed")
+            && event_types.iter().any(|event| event == "session.failed")
+        {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
@@ -451,7 +457,8 @@ fn completion_authority_is_scoped_to_process_generation_and_fresh_work() {
     // reconcile the already completed session until turn.start revokes it.
     let mut recovered = CodexCommandExecutor::new(&directory);
     let mut recovered_event_types = Vec::new();
-    for _ in 0..200 {
+    let recovered_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < recovered_exit_deadline {
         recovered_event_types.extend(
             poll_and_ack(&mut recovered)
                 .expect("poll restored provider after idle crash")

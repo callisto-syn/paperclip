@@ -274,6 +274,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if fail_after_turn_completion {
                         if let Some(delay_ms) = fail_after_turn_completion_delay_ms {
                             thread::sleep(Duration::from_millis(delay_ms));
+                            // Make the post-terminal liveness observation
+                            // deterministic even when parallel tests delay the
+                            // controller's next poll until after this process
+                            // exits.
+                            send(json!({
+                                "method": "warning",
+                                "params": {"message": "provider remained live after terminal"}
+                            }))?;
                         }
                         return Err("configured failure after turn completion".into());
                     }
