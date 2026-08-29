@@ -653,7 +653,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
-  it("resolves linked shared approvals and wakes their requester", async () => {
+  it("resolves linked shared approvals and wakes each executable assignee", async () => {
     const adapter = seeded({
       actors: [
         {
@@ -815,19 +815,19 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     });
     expect(adapter.snapshot().wakes).toEqual([
       expect.objectContaining({
-        actorId: "actor-2",
+        actorId: "actor-1",
         taskId: "task-1",
         reason: "approval_resolved",
         payload: { approvalId: "approval-other-task", decision: "approved" },
       }),
       expect.objectContaining({
-        actorId: "actor-2",
+        actorId: "actor-1",
         taskId: "task-2",
         reason: "approval_resolved",
         payload: { approvalId: "approval-other-task", decision: "approved" },
       }),
       expect.objectContaining({
-        actorId: "actor-2",
+        actorId: "actor-1",
         taskId: "task-1",
         reason: "approval_resolved",
         payload: { approvalId: "approval-active-task", decision: "approved" },
@@ -874,6 +874,15 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         },
       ],
     })).toThrow(/invalid requester actor/);
+
+    expect(() => seeded({
+      blockers: [{
+        id: "blocker-invalid-task",
+        taskId: "task-1",
+        blockedByTaskId: "missing-task",
+        createdAt: "2026-08-09T00:00:00.000Z",
+      }],
+    })).toThrow(/invalid task reference/);
   });
 
   it("rejects stale interaction targets and invalid interaction outcomes", async () => {

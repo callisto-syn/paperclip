@@ -538,7 +538,21 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     }
 
     // A rejected completion is not an attempt against the scripted transport:
-    // validate the complete semantic input before consuming its fault budget.
+    // validate the complete semantic input and every blocker/wake reference
+    // before consuming its fault budget or changing terminal state.
+    const reconciledTaskStatus = "terminal" in result
+      ? result.result.reportedWorkDisposition === "done"
+        ? "done"
+        : result.result.reportedWorkDisposition === "blocked"
+          ? "blocked"
+          : result.result.reportedWorkDisposition === "needs_review"
+            ? "in_review"
+            : "todo"
+      : task.status;
+    const blockerReconciliation = this.#planBlockerReconciliation(
+      task,
+      reconciledTaskStatus,
+    );
     const fault = this.#consumeFault("complete_run");
     this.#throwBeforeFault(fault, run.id, "complete_run");
     if ("terminal" in result) {
@@ -551,7 +565,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     run.finishedAt = this.#now();
     if (task.checkoutRunId === run.id) task.checkoutRunId = null;
     if (task.executionRunId === run.id) task.executionRunId = null;
-    const wakeIds = this.#reconcileBlockerWakes(task);
+    const wakeIds = this.#reconcileBlockerWakes(task.id, blockerReconciliation);
     entityRefs.push(...wakeIds.map((id) => `wake:${id}`));
     this.#recordMutation(run.id, run.actorId, "run.completed", "run", run.id, {
       status: run.status,
@@ -814,8 +828,11 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
+          // A wake is an executable handoff. Prefer the task assignee because
+          // openFixtureRun deliberately rejects a different actor for an
+          // assigned task; use the requester only for an unassigned task.
           const wakeActorId =
-            approval.requestedByActorId ?? linkedTask.assigneeActorId;
+            linkedTask.assigneeActorId ?? approval.requestedByActorId;
           if (wakeActorId === null) continue;
           const wakeId = this.#scheduleWake(
             wakeActorId,
@@ -1010,32 +1027,58 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     }
   }
 
-  #reconcileBlockerWakes(completedTask: CapabilityFixtureTask): string[] {
-    if (completedTask.status !== "done") return [];
+  #planBlockerReconciliation(
+    completedTask: CapabilityFixtureTask,
+    resultingStatus: CapabilityFixtureTask["status"],
+  ): Array<{ dependentTask: CapabilityFixtureTask; wakeActorId: string | null }> {
+    if (resultingStatus !== "done") return [];
     const dependentIds = sortedUnique(
       this.#state.blockers
         .filter((blocker) => blocker.blockedByTaskId === completedTask.id)
         .map((blocker) => blocker.taskId),
     );
-    const wakeIds: string[] = [];
+    const plan: Array<{ dependentTask: CapabilityFixtureTask; wakeActorId: string | null }> = [];
     for (const dependentId of dependentIds) {
+      const dependentTask = this.#task(dependentId);
+      this.#assertCompany(completedTask.companyId, dependentTask.companyId);
       const unresolved = this.#state.blockers.filter(
-        (blocker) =>
-          blocker.taskId === dependentId && this.#task(blocker.blockedByTaskId).status !== "done",
+        (blocker) => {
+          if (blocker.taskId !== dependentId) return false;
+          const blockingTask = this.#task(blocker.blockedByTaskId);
+          this.#assertCompany(completedTask.companyId, blockingTask.companyId);
+          return blockingTask.id !== completedTask.id && blockingTask.status !== "done";
+        },
       );
       if (unresolved.length > 0) continue;
+      if (dependentTask.assigneeActorId !== null) {
+        const actor = this.#actor(dependentTask.assigneeActorId);
+        this.#assertCompany(completedTask.companyId, actor.companyId);
+      }
+      plan.push({
+        dependentTask,
+        wakeActorId: dependentTask.assigneeActorId,
+      });
+    }
+    return plan;
+  }
+
+  #reconcileBlockerWakes(
+    completedTaskId: string,
+    plan: Array<{ dependentTask: CapabilityFixtureTask; wakeActorId: string | null }>,
+  ): string[] {
+    const wakeIds: string[] = [];
+    for (const { dependentTask: dependent, wakeActorId } of plan) {
       this.#state.blockers = this.#state.blockers.filter(
-        (blocker) => blocker.taskId !== dependentId,
+        (blocker) => blocker.taskId !== dependent.id,
       );
-      const dependent = this.#task(dependentId);
       if (dependent.status === "blocked") dependent.status = "todo";
-      if (dependent.assigneeActorId !== null) {
+      if (wakeActorId !== null) {
         wakeIds.push(
           this.#scheduleWake(
-            dependent.assigneeActorId,
+            wakeActorId,
             dependent.id,
             "blockers_resolved",
-            { completedTaskId: completedTask.id },
+            { completedTaskId },
             0,
           ),
         );
@@ -1563,6 +1606,22 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         throw new CapabilityMockControlPlaneError(
           "fixture_state_invalid",
           `fixture approval ${approval.id} has an invalid requester actor`,
+        );
+      }
+    }
+    for (const blocker of this.#state.blockers) {
+      const task = tasksById.get(blocker.taskId);
+      const blockingTask = tasksById.get(blocker.blockedByTaskId);
+      if (
+        task === undefined ||
+        blockingTask === undefined ||
+        task.companyId !== this.#state.company.id ||
+        blockingTask.companyId !== this.#state.company.id ||
+        task.id === blockingTask.id
+      ) {
+        throw new CapabilityMockControlPlaneError(
+          "fixture_state_invalid",
+          `fixture blocker ${blocker.id} has an invalid task reference`,
         );
       }
     }
