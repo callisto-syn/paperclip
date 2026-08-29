@@ -186,9 +186,9 @@ function parsePersistedRecord(
       "profileDigest",
     ]);
     const legacyPermissionMode = record.permissionMode ?? "approve-reads";
-    if (legacyPermissionMode === "approve-all") {
+    if (legacyPermissionMode !== "approve-reads") {
       throw new Error(
-        "Legacy ACPX identity records cannot grant permissions beyond approve-reads",
+        "Legacy ACPX identity records must use the historical approve-reads policy",
       );
     }
     return {

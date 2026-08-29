@@ -145,7 +145,19 @@ describe("ACPX recovery identity", () => {
         permissive,
         { ...legacy, permissionMode: "approve-all" },
       ),
-    ).toThrow(/cannot grant permissions beyond approve-reads/);
+    ).toThrow(/historical approve-reads policy/);
+
+    const restrictive = {
+      ...fixture.binding,
+      permissionMode: "deny-all" as const,
+    };
+    expect(() =>
+      verifyExpectedAcpxIdentity(
+        { ...fixture.expected, permissionMode: "deny-all" },
+        restrictive,
+        { ...legacy, permissionMode: "deny-all" },
+      ),
+    ).toThrow(/historical approve-reads policy/);
   });
 
   it("rejects malformed records and unsafe workspace roots", async () => {
