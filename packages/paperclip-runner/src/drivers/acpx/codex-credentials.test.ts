@@ -184,7 +184,7 @@ describe("managed Codex credentials", () => {
   });
 
   it.runIf(process.platform !== "win32")(
-    "returns cleanup ownership when stale removal directory sync fails",
+    "fails API-key staging until stale removal is durable",
     async () => {
       const fixture = await credentialFixture();
       const destination = join(fixture.home, "auth.json");
@@ -204,13 +204,18 @@ describe("managed Codex credentials", () => {
         },
       );
       try {
+        await expect(stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { OPENAI_API_KEY: "launch-only-key" },
+        })).rejects.toThrow("injected directory sync failure");
+        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+
         const lease = await stageManagedCodexCredential({
           agentHomeDirectory: fixture.home,
           environment: { OPENAI_API_KEY: "launch-only-key" },
         });
-        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
-        expect(syncAttempts).toBe(2);
+        expect(syncAttempts).toBe(3);
       } finally {
         syncSpy.mockRestore();
       }

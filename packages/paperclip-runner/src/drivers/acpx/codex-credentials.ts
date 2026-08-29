@@ -73,9 +73,13 @@ export async function stageManagedCodexCredential(input: {
   }
 
   if (hasApiKey) {
-    const lease = credentialLease(destination, home, "api_key");
-    await removeCredentialForLease(destination, home);
-    return lease;
+    // Codex will read the API key from the launch environment, so stale
+    // auth.json removal must be durable before the provider may start. If the
+    // directory sync fails, fail staging and require the caller (or a later
+    // process) to repeat this preflight; an in-memory lease is not a durable
+    // owner across the crash that could restore the old directory entry.
+    await removeCredential(destination, home);
+    return credentialLease(destination, home, "api_key");
   }
 
   const credential = hasInlineJson
@@ -285,25 +289,6 @@ async function removeCredential(path: string, home: string): Promise<void> {
     // before the lease reports success.
     await syncDirectory(home);
   }
-}
-
-async function removeCredentialForLease(
-  path: string,
-  home: string,
-): Promise<void> {
-  try {
-    const metadata = await lstat(path);
-    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
-      throw new Error("Managed Codex credential destination is a directory");
-    }
-    await unlink(path);
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
-  }
-  // A lease already owns this path. If unlink succeeded but its directory sync
-  // did not, return that lease so close() can retry the durability boundary.
-  // Throwing here would strand cleanup ownership after the pathname vanished.
-  await syncDirectory(home).catch(() => undefined);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
