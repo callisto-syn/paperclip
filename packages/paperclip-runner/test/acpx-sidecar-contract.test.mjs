@@ -62,7 +62,8 @@ test("every ACPX sidecar message family declares the same version", () => {
   const versions = ["request", "response", "event"].map(
     (family) => schema.$defs[family].properties.protocolVersion.const,
   );
-  assert.deepEqual(versions, [2, 2, 2]);
+  assert.equal(new Set(versions).size, 1);
+  assert.equal(Number.isInteger(versions[0]) && versions[0] > 0, true);
 });
 
 function error() {
