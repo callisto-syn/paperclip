@@ -1822,9 +1822,9 @@ describe("executeNativeSession recovery", () => {
       const cancelled = new Promise<void>((resolve) => { releaseCancelled = resolve; });
       let releaseCreated!: () => void;
       const createdCommitted = new Promise<void>((resolve) => { releaseCreated = resolve; });
-      const handoffRuntimeRequest = vi.fn(async () => {
+      const handoffRuntimeRequest = vi.fn(() => {
         releaseHandoff();
-        return "handed_off" as const;
+        return { result: "handed_off" as const, cleanup: Promise.resolve() };
       });
       const cancel = vi.fn(async () => releaseCancelled());
       const events: PrpEvent[] = [];
@@ -1993,7 +1993,10 @@ describe("executeNativeSession recovery", () => {
       handoffRuntimeRequest(input) {
         handoffSignal = input.signal;
         markHandoffStarted();
-        return new Promise<void>((resolve) => { releaseHandoff = resolve; });
+        return {
+          result: "handed_off",
+          cleanup: new Promise<void>((resolve) => { releaseHandoff = resolve; }),
+        };
       },
       async cancel() {
         releaseEvents();
@@ -2157,7 +2160,7 @@ describe("executeNativeSession recovery", () => {
     }
   });
 
-  it("bounds a stalled terminal handoff without publishing success, then closes after settlement", async () => {
+  it("preserves terminal success while quarantining stalled handoff cleanup", async () => {
     const request = {
       schema: "paperclip.runtime_request.v2",
       requestKind: "runtime",
@@ -2185,6 +2188,8 @@ describe("executeNativeSession recovery", () => {
     let releaseHandoff = () => {};
     let handoffSignal: AbortSignal | undefined;
     const close = vi.fn(async () => undefined);
+    const onSession = vi.fn();
+    const completeRun = vi.fn(async () => undefined);
     const readResult = vi.fn(async () => ({
       result,
       terminal,
@@ -2220,9 +2225,12 @@ describe("executeNativeSession recovery", () => {
       handoffRuntimeRequest(input) {
         handoffSignal = input.signal;
         markHandoffStarted();
-        return new Promise<"handed_off">((resolve) => {
-          releaseHandoff = () => resolve("handed_off");
-        });
+        return {
+          result: "handed_off",
+          cleanup: new Promise<void>((resolve) => {
+            releaseHandoff = resolve;
+          }),
+        };
       },
       result: readResult,
       async snapshot() {
@@ -2265,7 +2273,7 @@ describe("executeNativeSession recovery", () => {
       async replayEvents() {
         return { events: [], highestContiguousSourceSeq: 0 };
       },
-      async completeRun() {},
+      completeRun,
     };
 
     const execution = executeNativeSession({
@@ -2275,16 +2283,20 @@ describe("executeNativeSession recovery", () => {
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
       runtimeInputLiveWindowMs: 1,
+      keepSessionOpen: true,
+      onSession,
     });
     await handoffStarted;
     await vi.waitFor(() => expect(handoffSignal?.aborted).toBe(true));
-    expect(readResult).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-    expect(readResult).not.toHaveBeenCalled();
-    await expect(execution).rejects.toThrow("native_terminal_handoff_settlement_timeout");
-    releaseHandoff();
+    await expect(execution).resolves.toMatchObject({ result });
+    expect(readResult).toHaveBeenCalledOnce();
+    expect(completeRun).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
-    expect(readResult).not.toHaveBeenCalled();
+    expect(onSession).toHaveBeenLastCalledWith(null);
+    releaseHandoff();
+    await Promise.resolve();
+    expect(close).toHaveBeenCalledOnce();
+    expect(completeRun).toHaveBeenCalledOnce();
   });
 
   it("keeps a structured input in the original turn when it resolves before expiry", async () => {
@@ -2324,7 +2336,10 @@ describe("executeNativeSession recovery", () => {
       { ...runnerEvent(3, "turn.completed"), turnId: "turn-live" },
     ];
     const appended: PrpEvent[] = [];
-    const handoffRuntimeRequest = vi.fn(async () => "handed_off" as const);
+    const handoffRuntimeRequest = vi.fn(() => ({
+      result: "handed_off" as const,
+      cleanup: Promise.resolve(),
+    }));
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {

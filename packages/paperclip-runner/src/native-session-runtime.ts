@@ -147,6 +147,7 @@ async function consumeTurn(
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
   closeFailedSession: () => Promise<void>,
+  quarantineSession: () => void,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
   externalSignal?: AbortSignal,
 ) {
@@ -155,10 +156,9 @@ async function consumeTurn(
   const governedOperations = new Set<Promise<unknown>>();
   let governedCancellationStarted = false;
   let deferredGovernedSettlement: Promise<unknown> | null = null;
-  let deferredHandoffSettlement: Promise<unknown> | null = null;
   let deferredSessionCancellationSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const handoffOperations = new Set<Promise<unknown>>();
+  const handoffCleanupOperations = new Set<Promise<unknown>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
   let stopConsumer = false;
   let rejectHandoff: ((error: unknown) => void) | null = null;
@@ -229,22 +229,31 @@ async function consumeTurn(
                   rejectHandoff?.(new Error("native_runtime_request_handoff_unavailable"));
                   return;
                 }
-                let handoff: Promise<unknown>;
+                let handoffCleanup: Promise<unknown>;
                 try {
-                  handoff = session.handoffRuntimeRequest({
+                  const handoff = session.handoffRuntimeRequest({
                     requestId,
                     turnId,
                     reason: "durable_handoff",
                     signal: appendAbort.signal,
                   });
+                  // Durable handoff mutation is synchronous. The returned
+                  // promise owns provider interruption only, so it can remain
+                  // observed without acquiring authority to delay or reverse
+                  // a provider terminal fact.
+                  handoffCleanup = handoff.cleanup;
                 } catch (error) {
                   rejectHandoff?.(error);
                   return;
                 }
-                handoffOperations.add(handoff);
-                void handoff
-                  .catch((error) => rejectHandoff?.(error))
-                  .finally(() => handoffOperations.delete(handoff));
+                handoffCleanupOperations.add(handoffCleanup);
+                void handoffCleanup
+                  .catch((error) => {
+                    if (!stopConsumer && !appendAbort.signal.aborted) {
+                      rejectHandoff?.(error);
+                    }
+                  })
+                  .finally(() => handoffCleanupOperations.delete(handoffCleanup));
               }, runtimeInputLiveWindowMs);
               inputTimer.unref?.();
               inputTimers.set(requestId, inputTimer);
@@ -303,16 +312,6 @@ async function consumeTurn(
     appendAbort.abort(error);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
-    // Handoff is a durable mutation boundary. Abort revokes its authority and
-    // give a cooperative backend a bounded window to settle. A backend that
-    // violates the signal contract remains observed, but cannot keep the
-    // provider session allocated or defeat the execution timeout.
-    if (handoffOperations.size > 0) {
-      const handoffSettlement = Promise.allSettled([...handoffOperations]);
-      if (!(await settlesWithin(handoffSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
-        deferredHandoffSettlement = handoffSettlement;
-      }
-    }
     // Governed callbacks carry control-plane mutation authority. Give them a
     // bounded cooperative-cancellation window. Once it expires, the aborted
     // signal is authoritative: retain observation of the broken callback, but
@@ -335,14 +334,13 @@ async function consumeTurn(
     stopConsumer = true;
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
-    const activeHandoffSettlement = handoffOperations.size > 0
-      ? Promise.allSettled([...handoffOperations])
+    const activeHandoffCleanupSettlement = handoffCleanupOperations.size > 0
+      ? Promise.allSettled([...handoffCleanupOperations])
       : null;
     if (!consumptionFailed && !appendAbort.signal.aborted) {
-      // A provider terminal revokes the live-turn authority of every pending
-      // durable handoff. Join those exact operations before reading the final
-      // result or closing the provider session, so a late handoff cannot
-      // mutate control-plane state after the run has completed.
+      // A provider terminal revokes live-turn authority. Handoff state was
+      // already committed synchronously; abort only tells provider cleanup
+      // that it must not begin any new work.
       appendAbort.abort(new Error("native turn reached a terminal state"));
     }
     // Do not let failure escape while the provider iterator still owns a live
@@ -352,30 +350,17 @@ async function consumeTurn(
     const iteratorTeardown = eventIterator.return?.().catch(() => undefined);
     // The consumer may already be past `next()` and awaiting a durable append.
     // Abort is a control-plane durability boundary: appendEvent must settle
-    // without committing when its signal is aborted. Join both promises so a
-    // failed execution cannot be followed by a late durable write or provider
-    // teardown.
+    // without committing when its signal is aborted. Handoff and cancellation
+    // promises below own provider cleanup only; their durable transitions were
+    // synchronous, so a slow cleanup cannot reverse terminal completion.
     const passiveTeardownSettlement = Promise.allSettled([
       iteratorTeardown,
       consumer,
-    ]);
-    const mutationSettlements = [
-      ...(deferredHandoffSettlement
-        ? [deferredHandoffSettlement]
-        : activeHandoffSettlement
-          ? [activeHandoffSettlement]
-          : []),
+      ...(activeHandoffCleanupSettlement ? [activeHandoffCleanupSettlement] : []),
       ...(deferredGovernedSettlement ? [deferredGovernedSettlement] : []),
       ...(deferredSessionCancellationSettlement
         ? [deferredSessionCancellationSettlement]
         : []),
-    ];
-    const mutationSettlement = mutationSettlements.length > 0
-      ? Promise.allSettled(mutationSettlements)
-      : null;
-    const teardownSettlement = Promise.allSettled([
-      passiveTeardownSettlement,
-      ...(mutationSettlement ? [mutationSettlement] : []),
     ]);
     if (consumptionFailed) {
       // Start provider close immediately so a cooperative implementation can
@@ -386,33 +371,20 @@ async function consumeTurn(
       // to defeat the execution deadline. Promise.allSettled keeps every late
       // rejection observed after the bounded wait expires.
       const cleanupSettlement = Promise.allSettled([
-        teardownSettlement,
+        passiveTeardownSettlement,
         Promise.resolve().then(closeFailedSession),
       ]);
       await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
     } else {
-      if (
-        mutationSettlement
-        && !(await settlesWithin(mutationSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))
-      ) {
-        // A terminal provider fact does not make an uncooperative handoff safe
-        // to forget. Revoke its mutation authority, start provider close, and
-        // join the exact operation before publishing a failed execution.
-        const cleanupSettlement = Promise.allSettled([
-          teardownSettlement,
-          Promise.resolve().then(closeFailedSession),
-        ]);
-        await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
-        throw new Error("native_terminal_handoff_settlement_timeout");
-      }
-      // Iterator teardown owns no control-plane mutation authority. A slow
-      // provider subscription remains observed and is released by the normal
-      // session close, but it cannot erase an already committed terminal fact
-      // or prevent result retrieval and durable finalization.
-      await settlesWithin(
+      // Iterator and provider cleanup own no control-plane mutation authority.
+      // A slow subscription or cleanup remains observed and is released by the
+      // normal session close, but it cannot erase an already committed
+      // terminal fact or prevent result retrieval and durable finalization.
+      const teardownSettled = await settlesWithin(
         passiveTeardownSettlement,
         FAILED_OPERATION_SETTLEMENT_GRACE_MS,
       );
+      if (!teardownSettled) quarantineSession();
     }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
@@ -607,9 +579,15 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
   }
   options.onSession?.(session);
   let sessionClosePromise: Promise<void> | null = null;
+  let sessionQuarantined = false;
+  const quarantineSession = () => {
+    if (sessionQuarantined) return;
+    sessionQuarantined = true;
+    options.onSession?.(null);
+  };
   const closeSession = () => {
     if (sessionClosePromise === null) {
-      options.onSession?.(null);
+      quarantineSession();
       sessionClosePromise = session.close({
         reason: "native session execution complete",
       });
@@ -659,6 +637,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         options.timeoutMs ?? 900_000,
         options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
         closeSession,
+        quarantineSession,
         options.resolveGovernedWait,
         consumptionAbort.signal,
       );
@@ -839,7 +818,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if (!options.keepSessionOpen || !executionSucceeded) {
+    if (!options.keepSessionOpen || !executionSucceeded || sessionQuarantined) {
       // A provider that ignores close must not keep execution pending forever.
       // closeSession removes it from the caller before invoking the backend;
       // retain observation of the promise, but bound the final join. Provider

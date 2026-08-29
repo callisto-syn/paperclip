@@ -10,7 +10,7 @@ import type {
 } from "../protocol/replay-contract.js";
 import type {
   HarnessRuntimeRequest,
-  HarnessRuntimeRequestHandoffResult,
+  HarnessRuntimeRequestHandoff,
   HarnessRuntimeRequestResolution,
   HarnessThreadLineageEntry,
   NativeRuntimeContextCapabilities,
@@ -82,10 +82,11 @@ export interface NativeSession {
     reason: "durable_handoff";
     /**
      * Revokes durable mutation authority when event consumption fails. The
-     * handoff must settle without committing after this signal aborts.
+     * method must commit synchronously before returning; its returned promise
+     * owns provider cleanup only and must not mutate durable request state.
      */
     signal: AbortSignal;
-  }): Promise<HarnessRuntimeRequestHandoffResult>;
+  }): HarnessRuntimeRequestHandoff;
   result(): Promise<{
     result: PrpStructuredRunResult;
     terminal: PrpTerminalState;

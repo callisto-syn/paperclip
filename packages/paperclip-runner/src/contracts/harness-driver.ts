@@ -132,6 +132,16 @@ export type HarnessRuntimeRequestAction = HarnessRuntimeRequestResolution["actio
 
 export type HarnessRuntimeRequestHandoffResult = "handed_off" | "already_settled";
 
+/**
+ * A runtime-input handoff commits its durable state transition before the
+ * method returns. Provider interruption is cleanup only: it remains observed,
+ * but cannot acquire mutation authority or reverse an already committed turn.
+ */
+export interface HarnessRuntimeRequestHandoff {
+  result: HarnessRuntimeRequestHandoffResult;
+  cleanup: Promise<void>;
+}
+
 const RUNTIME_REQUEST_ACTIONS: readonly HarnessRuntimeRequestAction[] = [
   "accept",
   "accept_for_session",
@@ -471,9 +481,9 @@ export interface HarnessSession {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
-    /** Settle without committing if runtime ownership is revoked. */
+    /** Do not synchronously commit if runtime ownership is already revoked. */
     signal: AbortSignal;
-  }): Promise<HarnessRuntimeRequestHandoffResult>;
+  }): HarnessRuntimeRequestHandoff;
   goal?(input: HarnessGoalOperation): Promise<HarnessThreadGoal | null>;
   lineage?(): HarnessThreadLineageEntry[];
   read?(): Promise<Record<string, unknown>>;
