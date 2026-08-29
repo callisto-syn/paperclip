@@ -214,6 +214,83 @@ test("every question adapter fixture satisfies its declared schema", async () =>
     () => assertQuestionAdapterFixture(textModeMismatch),
     /text answer .* carries select-only fields/,
   );
+
+  const invalidTextAnswers = [
+    {
+      label: "minimum text length",
+      validation: { minLength: 4 },
+      text: "abc",
+      pattern: /must contain at least 4 characters/,
+    },
+    {
+      label: "maximum text length",
+      validation: { maxLength: 2 },
+      text: "abc",
+      pattern: /must contain at most 2 characters/,
+    },
+    {
+      label: "text pattern",
+      validation: { pattern: "^z+$" },
+      text: "abc",
+      pattern: /does not match the required format/,
+    },
+    {
+      label: "numeric input",
+      validation: { inputType: "number" },
+      text: "not-a-number",
+      pattern: /must be a valid number/,
+    },
+    {
+      label: "integer input",
+      validation: { inputType: "integer" },
+      text: "1.5",
+      pattern: /must be a valid integer/,
+    },
+    {
+      label: "numeric minimum",
+      validation: { inputType: "number", minimum: 2 },
+      text: "1",
+      pattern: /must be at least 2/,
+    },
+    {
+      label: "numeric maximum",
+      validation: { inputType: "number", maximum: 2 },
+      text: "3",
+      pattern: /must be at most 2/,
+    },
+  ];
+  for (const invalid of invalidTextAnswers) {
+    const malformedResponse = structuredClone(canonical);
+    malformedResponse.canonicalQuestionSet.questions[0] = {
+      ...requiredQuestion,
+      answerMode: "text",
+      options: [],
+      textValidation: invalid.validation,
+    };
+    malformedResponse.canonicalResponse.answers[requiredQuestionId] = {
+      text: invalid.text,
+    };
+    assert.throws(
+      () => assertQuestionAdapterFixture(malformedResponse),
+      invalid.pattern,
+      invalid.label,
+    );
+  }
+
+  const invalidCustomText = structuredClone(canonical);
+  invalidCustomText.canonicalQuestionSet.questions[0] = {
+    ...requiredQuestion,
+    customAnswer: { enabled: true },
+    textValidation: { minLength: 2, inputType: "text" },
+  };
+  invalidCustomText.canonicalResponse.answers[requiredQuestionId] = {
+    customText: "x",
+  };
+  assert.throws(
+    () => assertQuestionAdapterFixture(invalidCustomText),
+    /must contain at least 2 characters/,
+    "select custom text validation",
+  );
 });
 
 test("the cross-language conformance input and output have one stable identity", async () => {

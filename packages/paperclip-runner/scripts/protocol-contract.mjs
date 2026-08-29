@@ -267,6 +267,39 @@ export function assertQuestionAdapterFixture(fixture) {
     if (question.required && !hasValue) {
       throw contractError("invalid_question_adapter_fixture", `answer for required question ${question.id} is empty`);
     }
+    const boundedText = question.answerMode === "text" ? text : customText;
+    if (boundedText !== undefined) {
+      const validation = question.textValidation;
+      if (validation?.minLength !== undefined && boundedText.length < validation.minLength) {
+        throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} must contain at least ${validation.minLength} characters`);
+      }
+      if (validation?.maxLength !== undefined && boundedText.length > validation.maxLength) {
+        throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} must contain at most ${validation.maxLength} characters`);
+      }
+      if (validation?.pattern !== undefined) {
+        let pattern;
+        try {
+          pattern = new RegExp(validation.pattern);
+        } catch {
+          throw contractError("invalid_question_adapter_fixture", `text validation pattern for ${question.id} is invalid`);
+        }
+        if (!pattern.test(boundedText)) {
+          throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} does not match the required format`);
+        }
+      }
+      if (validation?.inputType === "number" || validation?.inputType === "integer") {
+        const numeric = Number(boundedText);
+        if (!Number.isFinite(numeric) || (validation.inputType === "integer" && !Number.isInteger(numeric))) {
+          throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} must be a valid ${validation.inputType}`);
+        }
+        if (validation.minimum !== undefined && numeric < validation.minimum) {
+          throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} must be at least ${validation.minimum}`);
+        }
+        if (validation.maximum !== undefined && numeric > validation.maximum) {
+          throw contractError("invalid_question_adapter_fixture", `answer for ${question.id} must be at most ${validation.maximum}`);
+        }
+      }
+    }
   }
   return fixture;
 }
