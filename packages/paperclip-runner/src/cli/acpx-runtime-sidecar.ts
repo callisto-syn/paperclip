@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import type {
@@ -43,6 +42,7 @@ import {
   type AcpxSidecarRequest,
   type AcpxSidecarResponse,
 } from "../drivers/acpx/sidecar-protocol.js";
+import { safeAcpxLocations } from "./acpx-sidecar-locations.js";
 import { validatePrpStructuredRunResult } from "../protocol/replay-contract.js";
 import type { RunnerToolCall } from "../drivers/runner-tool-bridge.js";
 import {
@@ -643,7 +643,10 @@ function sanitizeRuntimeEvent(event: AcpRuntimeEvent): Record<string, unknown> {
         status: event.status?.slice(0, 100) ?? null,
         title: event.title?.slice(0, 4_000) ?? null,
         kind: event.kind ?? null,
-        locations: safeLocations(event.locations),
+        locations: safeAcpxLocations(
+          event.locations,
+          openParams?.workingDirectory,
+        ),
         ...safeOutput(event.rawOutput),
       },
       128 * 1024,
@@ -723,24 +726,6 @@ function safeNonNegativeNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : null;
-}
-
-function safeLocations(
-  locations: Extract<AcpRuntimeEvent, { type: "tool_call" }>["locations"],
-): Array<Record<string, unknown>> {
-  if (!openParams) return [];
-  const cwd = resolve(openParams.workingDirectory);
-  return (locations ?? []).slice(0, 2_000).flatMap((location) => {
-    const candidate = record(location);
-    const rawPath = text(candidate.path, text(candidate.uri));
-    if (!rawPath) return [];
-    const absolute = isAbsolute(rawPath)
-      ? resolve(rawPath)
-      : resolve(cwd, rawPath);
-    const local = relative(cwd, absolute).replaceAll("\\", "/");
-    if (!local || local === ".." || local.startsWith("../")) return [];
-    return [{ path: local.slice(0, 4_000), line: candidate.line ?? null }];
-  });
 }
 
 function safeOutput(value: unknown): Record<string, unknown> {

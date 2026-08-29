@@ -1,0 +1,27 @@
+import { describe, expect, it } from "vitest";
+
+import { safeAcpxLocations } from "./acpx-sidecar-locations.js";
+
+describe("ACPX sidecar locations", () => {
+  it("preserves valid host-relative display names without admitting escape", () => {
+    expect(safeAcpxLocations([
+      { path: "src/main.ts", line: 4 },
+      { path: "src:main.ts" },
+      { path: String.raw`folder\literal` },
+      { path: "reports/100%/summary.txt" },
+      { path: "../outside.txt" },
+      { path: "/etc/passwd" },
+      { uri: "https://example.test/private" },
+      { path: "bad\0name" },
+    ], "/workspace/project")).toEqual([
+      { path: "src/main.ts", line: 4 },
+      { path: "src:main.ts", line: null },
+      { path: String.raw`folder\literal`, line: null },
+      { path: "reports/100%/summary.txt", line: null },
+    ]);
+  });
+
+  it("omits every location until the session working directory is bound", () => {
+    expect(safeAcpxLocations([{ path: "src/main.ts" }], undefined)).toEqual([]);
+  });
+});
