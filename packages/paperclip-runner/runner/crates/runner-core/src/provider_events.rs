@@ -668,35 +668,23 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
     };
-    // The sidecar has already resolved this under the provider host's path
-    // semantics and canonicalized Windows separators. This boundary enforces
-    // the PRP safePath contract without reinterpreting valid POSIX filename
-    // characters. URI-only locations never become filesystem display targets.
+    // Only the pinned sidecar may attest that it resolved this value within
+    // the workspace under the provider host's path semantics. Requiring the
+    // versioned marker makes raw provider paths and URI-shaped lookalikes fail
+    // closed here without reinterpreting valid POSIX filename characters.
+    if value.get("pathBoundary").and_then(Value::as_str)
+        != Some("paperclip.workspace_relative_display.v1")
+    {
+        return Value::Null;
+    }
     let raw_path = value
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let windows_drive_prefix = raw_path.as_bytes().get(1) == Some(&b':')
-        && raw_path
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic);
-    let uri_prefix = raw_path.split_once(':').is_some_and(|(scheme, suffix)| {
-        let mut characters = scheme.chars();
-        characters
-            .next()
-            .is_some_and(|value| value.is_ascii_alphabetic())
-            && characters
-                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '+' | '-' | '.'))
-            && (suffix.starts_with('/') || suffix.starts_with('\\'))
-    });
     if raw_path.is_empty()
         || raw_path.starts_with('/')
-        || raw_path.starts_with('\\')
-        || windows_drive_prefix
-        || uri_prefix
         || raw_path.contains('\0')
-        || raw_path.split(['/', '\\']).any(|segment| segment == "..")
+        || raw_path.split('/').any(|segment| segment == "..")
     {
         Value::Null
     } else {
@@ -719,6 +707,8 @@ mod tests {
             r"foo\..\bar",
             r"https:\host\secret",
             "https://example.test/private",
+            "https:example.test/private",
+            "file:secret.txt",
             "bad\0name",
         ] {
             assert_eq!(
@@ -730,6 +720,20 @@ mod tests {
             safe_acpx_location(Some(&json!({"uri": "https://example.test/private"}))),
             Value::Null,
         );
+        for location in [
+            "/absolute/path",
+            "../secret",
+            "src/../../secret",
+            "bad\0name",
+        ] {
+            assert_eq!(
+                safe_acpx_location(Some(&json!({
+                    "path": location,
+                    "pathBoundary": "paperclip.workspace_relative_display.v1"
+                }))),
+                Value::Null,
+            );
+        }
     }
 
     #[test]
@@ -737,11 +741,18 @@ mod tests {
         for location in [
             "src:main.rs",
             "foo:bar/baz",
+            "src:/main.rs",
+            "a:/foo",
+            "A:b/file.txt",
             r"folder\literal",
+            r"foo\..\bar",
             "reports/100%/summary.txt",
         ] {
             assert_eq!(
-                safe_acpx_location(Some(&json!({"path": location}))),
+                safe_acpx_location(Some(&json!({
+                    "path": location,
+                    "pathBoundary": "paperclip.workspace_relative_display.v1"
+                }))),
                 Value::String(location.to_owned()),
             );
         }

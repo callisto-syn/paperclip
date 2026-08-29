@@ -91,7 +91,10 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
             "kind":"read",
             "title":"Read file",
             "status":"pending",
-            "locations":[{"path":"src/main.rs"}],
+            "locations":[{
+                "path":"src/main.rs",
+                "pathBoundary":"paperclip.workspace_relative_display.v1"
+            }],
             "text":"Opening"
         }),
     );
@@ -120,7 +123,11 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
     for display_path in [
         "src:main.rs",
         "foo:bar/baz",
+        "src:/main.rs",
+        "a:/foo",
+        "A:b/file.txt",
         r"folder\literal",
+        r"foo\..\bar",
         "reports/100%/summary.txt",
     ] {
         let display = normalize(
@@ -131,7 +138,10 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
                 "toolCallId":"tool-display",
                 "kind":"read",
                 "status":"completed",
-                "locations":[{"path":display_path}]
+                "locations":[{
+                    "path":display_path,
+                    "pathBoundary":"paperclip.workspace_relative_display.v1"
+                }]
             }),
         );
         assert_eq!(display[0].payload["target"], display_path);
@@ -143,6 +153,8 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
         r"foo\..\bar",
         r"https:\host\secret",
         "https://example.test/private",
+        "https:example.test/private",
+        "file:secret.txt",
     ] {
         let rejected = normalize(
             AcpxRuntimeEventKind::ToolCall,

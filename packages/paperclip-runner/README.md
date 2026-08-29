@@ -73,7 +73,9 @@ event values again before they can enter provider state.
 Validated ACPX runtime events normalize into the same provider-neutral activity
 families as the direct Codex transport. Reasoning contents stay private. Tool
 targets are resolved within the workspace under the provider host's path
-semantics before becoming bounded, display-only PRP safe paths. Windows
+semantics and receive a versioned sidecar boundary marker before becoming
+bounded, display-only PRP safe paths. Raw or unmarked provider locations fail
+closed. Windows
 separators are canonicalized while valid POSIX colon, backslash, and percent
 characters remain unchanged; consumers must not reinterpret the display value
 as file-access authority. Operational semantic-result and terminal events
