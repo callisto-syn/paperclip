@@ -111,6 +111,7 @@ fn projects_structured_input_and_semantic_results_without_provider_envelopes() {
     let projected = project(AcpxProviderStateEvent::SemanticResult(AcpxSemanticResult {
         call_id: "finish-1".to_owned(),
         operation_id: "paperclip_finish".to_owned(),
+        ok: true,
         result: result.clone(),
     }));
     assert_eq!(projected[0].event_type, "run.result.proposed");
