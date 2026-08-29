@@ -193,8 +193,7 @@ export const commentOnApprovalAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "comment_on_approval"
           },
           "operationResultId": {
             "type": "string",

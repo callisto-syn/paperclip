@@ -135,8 +135,7 @@ export const searchTasksAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "search_tasks"
           },
           "operationResultId": {
             "type": "string",

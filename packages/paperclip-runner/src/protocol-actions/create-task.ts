@@ -247,8 +247,7 @@ export const createTaskAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "create_task"
           },
           "operationResultId": {
             "type": "string",

@@ -99,8 +99,7 @@ export const listApprovalsAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "list_approvals"
           },
           "operationResultId": {
             "type": "string",

@@ -217,8 +217,7 @@ export const decideApprovalAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "decide_approval"
           },
           "operationResultId": {
             "type": "string",

@@ -184,8 +184,7 @@ export const requestApprovalAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "request_approval"
           },
           "operationResultId": {
             "type": "string",

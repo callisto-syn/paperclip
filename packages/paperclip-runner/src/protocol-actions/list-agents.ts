@@ -101,8 +101,7 @@ export const listAgentsAction = {
             "type": "boolean"
           },
           "operationId": {
-            "type": "string",
-            "minLength": 1
+            "const": "list_agents"
           },
           "operationResultId": {
             "type": "string",
