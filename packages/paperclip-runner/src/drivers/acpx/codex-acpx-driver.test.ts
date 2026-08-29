@@ -305,7 +305,12 @@ describe("Codex ACPX harness driver", () => {
         workingDirectory: "/workspace",
       });
       const blocked = expect(admission).rejects.toThrow("exceeded the admission grace");
-      await vi.advanceTimersByTimeAsync(27_001);
+      // Drive the implementation's complete admission grace instead of
+      // duplicating its derived shutdown bound in this test. Later transport
+      // layers may add another bounded cleanup phase without weakening the
+      // invariant exercised here: no replacement host opens while the exact
+      // retained close is still pending.
+      await vi.runAllTimersAsync();
       await blocked;
       expect(fixture.openHost).toHaveBeenCalledOnce();
       stalledClose.resolve();
