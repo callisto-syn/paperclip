@@ -311,6 +311,8 @@ struct CodexProviderState {
     completed_turn_process_generation: Option<u64>,
     #[serde(default)]
     completed_provider_turn_id: Option<String>,
+    #[serde(default)]
+    receipt_limit_diagnostic_emitted: bool,
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -340,6 +342,7 @@ impl CodexProviderState {
             provider_process_generation: 0,
             completed_turn_process_generation: None,
             completed_provider_turn_id: None,
+            receipt_limit_diagnostic_emitted: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -403,6 +406,7 @@ impl CodexProviderState {
             || self
                 .completed_turn_process_generation
                 .is_some_and(|generation| generation > self.provider_process_generation)
+            || (self.receipt_limit_diagnostic_emitted && self.active_provider_turn_id.is_none())
             || (matches!(
                 self.lifecycle.as_str(),
                 "prepared" | "session_open" | "closed"
@@ -459,6 +463,30 @@ impl CodexProviderState {
             self.pending_events.push_back(event);
         }
         Ok(())
+    }
+
+    fn push_receipt_limit_diagnostic(
+        &mut self,
+        call_id: String,
+        operation_id: String,
+    ) -> Result<bool, DurableRunnerError> {
+        if self.receipt_limit_diagnostic_emitted {
+            return Ok(false);
+        }
+        self.push_terminal_event(NormalizedProviderEvent {
+            event_type: "harness.diagnostic".to_owned(),
+            priority: EventPriority::P0,
+            payload: json!({
+                "provider": "codex",
+                "code": "semantic_tool_turn_receipt_limit",
+                "operationId": operation_id,
+                "callId": call_id,
+                "message": "The active provider turn reached its durable semantic-tool receipt limit and was interrupted",
+                "paperclipExecuted": false,
+            }),
+        })?;
+        self.receipt_limit_diagnostic_emitted = true;
+        Ok(true)
     }
 
     fn push_event(&mut self, event: NormalizedProviderEvent) -> Result<(), DurableRunnerError> {
@@ -654,6 +682,7 @@ impl CodexCommandExecutor {
                         state.push_terminal_event(semantic_result_event(identity, &result))?;
                     }
                 }
+                state.receipt_limit_diagnostic_emitted = false;
             }
             state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
             let reconciled = NormalizedProviderEvent {
@@ -889,6 +918,7 @@ impl CodexCommandExecutor {
             state.thread_id = Some(thread_id.clone());
             state.provider_session_id = provider_session_id.clone();
             state.active_provider_turn_id = None;
+            state.receipt_limit_diagnostic_emitted = false;
             state.lifecycle = "session_open".to_owned();
             state.config.provider_version.clone()
         };
@@ -974,6 +1004,7 @@ impl CodexCommandExecutor {
         state.completed_turn_authoritative = false;
         state.completed_turn_process_generation = None;
         state.completed_provider_turn_id = None;
+        state.receipt_limit_diagnostic_emitted = false;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -1134,22 +1165,13 @@ impl CodexCommandExecutor {
         call_id: String,
         operation_id: String,
     ) -> Result<(), DurableRunnerError> {
-        self.state
+        let state = self
+            .state
             .as_mut()
-            .expect("Codex state remains available at its tool receipt limit")
-            .push_terminal_event(NormalizedProviderEvent {
-                event_type: "harness.diagnostic".to_owned(),
-                priority: EventPriority::P0,
-                payload: json!({
-                    "provider": "codex",
-                    "code": "semantic_tool_turn_receipt_limit",
-                    "operationId": operation_id,
-                    "callId": call_id,
-                    "message": "The active provider turn reached its durable semantic-tool receipt limit and was interrupted",
-                    "paperclipExecuted": false,
-                }),
-            })?;
-        self.save_state()?;
+            .expect("Codex state remains available at its tool receipt limit");
+        if state.push_receipt_limit_diagnostic(call_id, operation_id)? {
+            self.save_state()?;
+        }
         self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
         Ok(())
     }
@@ -1281,6 +1303,7 @@ impl CodexCommandExecutor {
             .as_mut()
             .ok_or_else(|| DurableRunnerError::invalid("Codex provider is not prepared"))?;
         state.active_provider_turn_id = None;
+        state.receipt_limit_diagnostic_emitted = false;
         state.lifecycle = "closed".to_owned();
         let thread_id = state.thread_id.clone();
         self.save_state()?;
@@ -1410,6 +1433,7 @@ impl CodexCommandExecutor {
                             state.completed_turn_process_generation = Some(process_generation);
                             state.completed_provider_turn_id = Some(provider_turn_id);
                         }
+                        state.receipt_limit_diagnostic_emitted = false;
                         state.lifecycle = "session_open".to_owned();
                     }
                     if terminal_event_type.is_some() {
@@ -1621,6 +1645,7 @@ mod tests {
             provider_process_generation: 0,
             completed_turn_process_generation: None,
             completed_provider_turn_id: None,
+            receipt_limit_diagnostic_emitted: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -1718,6 +1743,49 @@ mod tests {
             event.payload["semantic_tool"]["content"]["digest"],
             semantic_value_digest(transmitted)
         );
+    }
+
+    #[test]
+    fn receipt_limit_diagnostic_is_durable_and_turn_idempotent() {
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+            },
+            None,
+            ProviderToolBridge::default(),
+        );
+        state.thread_id = Some("thread-1".to_owned());
+        state.active_provider_turn_id = Some("turn-1".to_owned());
+        state.lifecycle = "turn_active".to_owned();
+
+        assert!(state
+            .push_receipt_limit_diagnostic("call-first".to_owned(), "tool.first".to_owned())
+            .unwrap());
+        assert!(!state
+            .push_receipt_limit_diagnostic("call-second".to_owned(), "tool.second".to_owned())
+            .unwrap());
+        assert_eq!(state.pending_events.len(), 1);
+        assert_eq!(state.pending_events[0].payload["callId"], "call-first");
+
+        let mut recovered: CodexProviderState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        recovered.validate().unwrap();
+        assert!(!recovered
+            .push_receipt_limit_diagnostic("call-after-restart".to_owned(), "tool.third".to_owned())
+            .unwrap());
+        assert_eq!(recovered.pending_events.len(), 1);
     }
 
     #[test]
