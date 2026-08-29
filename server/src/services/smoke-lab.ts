@@ -1244,6 +1244,18 @@ export function smokeLabService(db: Db, options: {
       accessTokens.clear();
       refreshTokens.clear();
       await db.delete(smokeRuns).where(eq(smokeRuns.companyId, companyId));
+      const fixtureApplications = await db.select({ id: toolApplications.id })
+        .from(toolApplications)
+        .where(and(
+          eq(toolApplications.companyId, companyId),
+          inArray(toolApplications.applicationKey, [HTTP_APP_KEY, STDIO_APP_KEY]),
+        ));
+      if (fixtureApplications.length > 0) {
+        await db.delete(toolConnections).where(and(
+          eq(toolConnections.companyId, companyId),
+          inArray(toolConnections.applicationId, fixtureApplications.map((application) => application.id)),
+        ));
+      }
       await db.delete(toolApplications).where(and(
         eq(toolApplications.companyId, companyId),
         inArray(toolApplications.applicationKey, [HTTP_APP_KEY, STDIO_APP_KEY]),
