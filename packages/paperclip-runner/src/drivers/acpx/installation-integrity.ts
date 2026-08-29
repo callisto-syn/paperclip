@@ -457,6 +457,10 @@ function commandLease(
           ],
           {
             ...options,
+            // A private process group lets the sidecar transfer an exceptional
+            // unresponsive provider to its dedicated reaper without touching
+            // the runner, shell, or unrelated sibling processes.
+            detached: process.platform !== "win32",
             env: sanitizedNodeEnvironment(options.env),
             shell: false,
             stdio: ["pipe", "pipe", "pipe", "pipe", commandDirectory.fd],

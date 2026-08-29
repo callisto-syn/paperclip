@@ -1,4 +1,7 @@
-import type { ChildProcess } from "node:child_process";
+import {
+  spawn as spawnChildProcess,
+  type ChildProcess,
+} from "node:child_process";
 
 import {
   createAcpRuntime,
@@ -25,14 +28,46 @@ const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 2_000;
 const PROVIDER_TERM_EXIT_TIMEOUT_MS = 2_000;
 const PROVIDER_KILL_EXIT_TIMEOUT_MS = 2_000;
 const MAX_LATE_RUNTIME_CLEANUP_RECONCILIATION_ATTEMPTS = 3;
+const UNRESPONSIVE_REAPER_HANDSHAKE_TIMEOUT_MS = 1_000;
+const UNRESPONSIVE_REAPER_SOURCE = `
+const processGroupId = Number.parseInt(process.argv[1] ?? "", 10);
+if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) process.exit(2);
+let announced = false;
+const reap = () => {
+  try {
+    process.kill(-processGroupId, "SIGKILL");
+  } catch (error) {
+    if (error && error.code === "ESRCH") {
+      if (!announced) {
+        process.stdout.write("gone\\n", () => process.exit(0));
+      } else {
+        process.exit(0);
+      }
+      return;
+    }
+    process.stdout.write(
+      "error:" + String(error && error.code ? error.code : "unknown") + "\\n",
+      () => process.exit(1),
+    );
+    return;
+  }
+  if (!announced) {
+    announced = true;
+    process.stdout.write("owned\\n");
+  }
+  setTimeout(reap, 250);
+};
+reap();
+`;
 // Production shutdown waits for the protocol close bound before beginning the
-// sequential TERM/KILL verification windows. Keep this exported package-local
-// bound aligned with the implementation so admission can include the complete
-// provider cleanup path instead of accounting for only part of it.
+// sequential TERM/KILL verification windows and, for an unresponsive POSIX
+// process group, a bounded reaper ownership transfer. Keep this exported
+// package-local bound aligned with the complete implementation.
 export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
   DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS +
   PROVIDER_TERM_EXIT_TIMEOUT_MS +
-  PROVIDER_KILL_EXIT_TIMEOUT_MS;
+  PROVIDER_KILL_EXIT_TIMEOUT_MS +
+  UNRESPONSIVE_REAPER_HANDSHAKE_TIMEOUT_MS;
 // A close may outlive its caller-facing wait bound. Keep every exact attempt
 // owned until it settles even after the port releases it for a bounded retry.
 // This prevents abandoned protocol work from being garbage-collected without
@@ -65,6 +100,8 @@ export interface CodexAcpxRuntimeDependencies {
   sessionHandshakeTimeoutMs?: number;
   /** Retains autonomous cleanup ownership across the sidecar lifecycle. */
   retainCleanup?: (cleanup: Promise<void>) => void;
+  /** Internal test seam for transferring an unresponsive process group. */
+  reapUnresponsiveChild?: (child: ChildProcess) => Promise<void>;
 }
 
 /**
@@ -87,7 +124,10 @@ export async function openCodexAcpxRuntime(
   const createRuntime = dependencies.createRuntime ?? createAcpRuntime;
   const runtimeCloseTimeoutMs =
     dependencies.runtimeCloseTimeoutMs ?? DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS;
-  const children = new SpawnedChildSet(dependencies.retainCleanup);
+  const children = new SpawnedChildSet(
+    dependencies.retainCleanup,
+    dependencies.reapUnresponsiveChild,
+  );
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
   const rememberHandshakeHandle = (record: AcpSessionRecord): void => {
@@ -532,6 +572,8 @@ class SpawnedChildSet {
 
   constructor(
     private readonly retainCleanup?: (cleanup: Promise<void>) => void,
+    private readonly reapUnresponsiveChild: (child: ChildProcess) => Promise<void> =
+      launchUnresponsiveProviderReaper,
   ) {}
 
   add(child: ChildProcess): ChildProcess {
@@ -596,8 +638,8 @@ class SpawnedChildSet {
     const existing = this.#terminations.get(child);
     if (existing) return existing;
     const termination = (immediateKill
-      ? terminatePostSealChild(child)
-      : terminateChild(child)
+      ? terminatePostSealChild(child, this.reapUnresponsiveChild)
+      : terminateChild(child, this.reapUnresponsiveChild)
     ).catch((error: unknown) => [error]);
     this.#terminations.set(child, termination);
     termination.then(() => {
@@ -609,7 +651,10 @@ class SpawnedChildSet {
   }
 }
 
-async function terminatePostSealChild(child: ChildProcess): Promise<unknown[]> {
+async function terminatePostSealChild(
+  child: ChildProcess,
+  reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
   const killOutcome = await signalAndWaitForExit(
@@ -622,12 +667,15 @@ async function terminatePostSealChild(child: ChildProcess): Promise<unknown[]> {
   }
   if (!killOutcome.exited && running(child)) {
     errors.push(new Error("ACPX post-seal provider did not exit after SIGKILL"));
-    errors.push(...closeUnresponsiveChildStreams(child));
+    errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
   }
   return errors;
 }
 
-async function terminateChild(child: ChildProcess): Promise<unknown[]> {
+async function terminateChild(
+  child: ChildProcess,
+  reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
   const terminateOutcome = await signalAndWaitForExit(
@@ -649,13 +697,16 @@ async function terminateChild(child: ChildProcess): Promise<unknown[]> {
     }
     if (!killOutcome.exited && running(child)) {
       errors.push(new Error("ACPX provider did not exit after SIGKILL"));
-      errors.push(...closeUnresponsiveChildStreams(child));
+      errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
     }
   }
   return errors;
 }
 
-function closeUnresponsiveChildStreams(child: ChildProcess): unknown[] {
+async function handoffUnresponsiveChild(
+  child: ChildProcess,
+  reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+): Promise<unknown[]> {
   const errors: unknown[] = [];
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
     if (!stream) continue;
@@ -665,17 +716,80 @@ function closeUnresponsiveChildStreams(child: ChildProcess): unknown[] {
       errors.push(error);
     }
   }
-  // Both termination signals and the bounded exit checks are exhausted. The
-  // cleanup still rejects so the sidecar reports a failed shutdown, but this
-  // child handle must no longer be allowed to keep that sidecar alive forever.
-  // Its stdio is already detached above and SIGKILL was the final OS-level
-  // cleanup available to this process.
+  // Do not release the event-loop handle until a separate process has accepted
+  // ownership of the provider's private process group. If that handoff fails,
+  // this sidecar remains the owner and cannot orphan a live provider.
   try {
+    await reapUnresponsiveChild(child);
     child.unref();
   } catch (error) {
     errors.push(error);
   }
   return errors;
+}
+
+export async function launchUnresponsiveProviderReaper(
+  child: ChildProcess,
+): Promise<void> {
+  if (process.platform === "win32") {
+    throw new Error("ACPX provider process-group reaping is unavailable on Windows");
+  }
+  const processGroupId = child.pid;
+  if (!Number.isSafeInteger(processGroupId) || (processGroupId ?? 0) <= 0) {
+    throw new Error("ACPX provider omitted its process-group identity");
+  }
+  const reaper = spawnChildProcess(
+    process.execPath,
+    ["--eval", UNRESPONSIVE_REAPER_SOURCE, String(processGroupId)],
+    {
+      detached: true,
+      env: {},
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    },
+  );
+  const output = reaper.stdout;
+  if (!output) {
+    reaper.kill("SIGKILL");
+    throw new Error("ACPX provider reaper did not expose its ownership pipe");
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let buffered = "";
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reaper.off("error", onError);
+      reaper.off("close", onClose);
+      output.off("data", onData);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onError = (): void => finish(new Error("ACPX provider reaper failed to start"));
+    const onClose = (): void => finish(new Error("ACPX provider reaper exited before ownership transfer"));
+    const onData = (chunk: Buffer | string): void => {
+      buffered += chunk.toString();
+      if (buffered.includes("owned\n") || buffered.includes("gone\n")) finish();
+      else if (buffered.includes("error:")) {
+        const code = buffered.match(/error:([^\n]+)/)?.[1] ?? "unknown";
+        finish(new Error(`ACPX provider reaper could not own the process group (${code})`));
+      }
+    };
+    const timer = setTimeout(
+      () => finish(new Error("ACPX provider reaper ownership transfer timed out")),
+      UNRESPONSIVE_REAPER_HANDSHAKE_TIMEOUT_MS,
+    );
+    reaper.once("error", onError);
+    reaper.once("close", onClose);
+    output.on("data", onData);
+  }).catch((error) => {
+    reaper.kill("SIGKILL");
+    throw error;
+  });
+  output.destroy();
+  reaper.unref();
 }
 
 function running(child: ChildProcess): boolean {

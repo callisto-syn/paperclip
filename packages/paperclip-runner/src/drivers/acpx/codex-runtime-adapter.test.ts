@@ -1,5 +1,8 @@
-import type { ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
+import {
+  spawn as spawnChildProcess,
+  type ChildProcess,
+} from "node:child_process";
+import { EventEmitter, once } from "node:events";
 
 import type {
   AcpAgentRegistry,
@@ -12,7 +15,10 @@ import { decodeAcpxRuntimeHandleState } from "acpx/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import type { VerifiedAcpxCommandLease } from "./installation-integrity.js";
-import { openCodexAcpxRuntime } from "./codex-runtime-adapter.js";
+import {
+  launchUnresponsiveProviderReaper,
+  openCodexAcpxRuntime,
+} from "./codex-runtime-adapter.js";
 import type { AcpxRuntimePortOpenOptions } from "./runtime-host.js";
 
 const HANDLE: AcpRuntimeHandle = {
@@ -26,6 +32,31 @@ const HANDLE: AcpRuntimeHandle = {
 };
 
 describe("Codex ACPX runtime adapter", () => {
+  it("hands an exact detached provider group to the external reaper", async () => {
+    if (process.platform === "win32") return;
+    const child = spawnChildProcess(
+      process.execPath,
+      ["--eval", "setInterval(() => undefined, 1_000)"],
+      { detached: true, stdio: "ignore" },
+    );
+    await once(child, "spawn");
+    const exited = once(child, "exit");
+    try {
+      await launchUnresponsiveProviderReaper(child);
+      child.unref();
+      const [, signal] = await exited;
+      expect(signal).toBe("SIGKILL");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null && child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // The reaper already removed the private process group.
+        }
+      }
+    }
+  });
+
   it("opens a persistent Codex session without persisting launch secrets", async () => {
     const runtime = fakeRuntime();
     let runtimeOptions: AcpRuntimeOptions | undefined;
@@ -294,6 +325,7 @@ describe("Codex ACPX runtime adapter", () => {
       const runtime = fakeRuntime();
       const child = stubbornChild();
       const command = fakeCommand();
+      const reapUnresponsiveChild = vi.fn().mockResolvedValue(undefined);
       vi.mocked(command.spawn).mockReturnValue(child);
       let runtimeOptions: AcpRuntimeOptions | undefined;
       const port = await openCodexAcpxRuntime(openOptions(command), {
@@ -303,6 +335,7 @@ describe("Codex ACPX runtime adapter", () => {
           runtimeOptions = options;
           return runtime;
         },
+        reapUnresponsiveChild,
       });
       runtimeOptions?.spawnAgent?.({
         command: "ignored",
@@ -327,9 +360,51 @@ describe("Codex ACPX runtime adapter", () => {
       expect(child.stdin?.destroy).toHaveBeenCalledOnce();
       expect(child.stdout?.destroy).toHaveBeenCalledOnce();
       expect(child.stderr?.destroy).toHaveBeenCalledOnce();
-      // The close still fails and preserves the cleanup diagnostic, but the
-      // exhausted child handle cannot keep the sidecar process alive forever.
+      expect(reapUnresponsiveChild).toHaveBeenCalledWith(child);
+      // The close still fails and preserves the cleanup diagnostic. Only the
+      // successful external-reaper handoff releases the local event-loop hold.
       expect(child.unref).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains an unresponsive provider when external reaper handoff fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      const child = stubbornChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+        reapUnresponsiveChild: vi.fn().mockRejectedValue(
+          new Error("reaper handoff failed"),
+        ),
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const closing = expect(
+        port.close({ reason: "provider handoff failed" }),
+      ).rejects.toMatchObject({
+        errors: expect.arrayContaining([
+          expect.objectContaining({ message: "reaper handoff failed" }),
+        ]),
+      });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await closing;
+
+      expect(child.unref).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
