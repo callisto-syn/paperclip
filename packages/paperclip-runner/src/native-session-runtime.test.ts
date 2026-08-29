@@ -2336,7 +2336,7 @@ describe("executeNativeSession recovery", () => {
     expect(completeRun).toHaveBeenCalledOnce();
   });
 
-  it("keeps a structured input in the original turn when it resolves before expiry", async () => {
+  it("keeps a settling structured input in the original turn while its append crosses expiry", async () => {
     const request = {
       schema: "paperclip.runtime_request.v2",
       requestKind: "runtime",
@@ -2373,6 +2373,14 @@ describe("executeNativeSession recovery", () => {
       { ...runnerEvent(3, "turn.completed"), turnId: "turn-live" },
     ];
     const appended: PrpEvent[] = [];
+    let markSettlementAppendStarted!: () => void;
+    const settlementAppendStarted = new Promise<void>((resolve) => {
+      markSettlementAppendStarted = resolve;
+    });
+    let releaseSettlementAppend!: () => void;
+    const settlementAppendReleased = new Promise<void>((resolve) => {
+      releaseSettlementAppend = resolve;
+    });
     const handoffRuntimeRequest = vi.fn(() => ({
       result: "handed_off" as const,
       cleanup: Promise.resolve(),
@@ -2429,6 +2437,10 @@ describe("executeNativeSession recovery", () => {
       async openRun() {},
       async checkpointSession() {},
       async appendEvent(event) {
+        if (event.eventType === "runtime_request.resolved") {
+          markSettlementAppendStarted();
+          await settlementAppendReleased;
+        }
         appended.push(structuredClone(event as PrpEvent));
         const sourceEvents = appended.filter((candidate) => candidate.sourceInstanceId === event.sourceInstanceId);
         return {
@@ -2458,20 +2470,27 @@ describe("executeNativeSession recovery", () => {
       return originalSetTimeout(callback, delay, ...args);
     }) as typeof setTimeout);
     try {
-      await expect(executeNativeSession({
+      const execution = executeNativeSession({
         input,
         backend,
         controlPlane: port,
         runnerInstanceId: "runner-recovery",
         controlPlaneInstanceId: "control-recovery",
         runtimeInputLiveWindowMs: 123_456,
-      })).resolves.toMatchObject({ result });
+      });
+      await settlementAppendStarted;
       expect(queuedHandoffCallback).not.toBeNull();
+      queuedHandoffCallback?.();
+      await Promise.resolve();
+      expect(handoffRuntimeRequest).not.toHaveBeenCalled();
+      releaseSettlementAppend();
+      await expect(execution).resolves.toMatchObject({ result });
       queuedHandoffCallback?.();
       await Promise.resolve();
       expect(handoffRuntimeRequest).not.toHaveBeenCalled();
       expect(appended.some((event) => event.eventType === "runtime_request.expired")).toBe(false);
     } finally {
+      releaseSettlementAppend();
       timeoutSpy.mockRestore();
     }
   });

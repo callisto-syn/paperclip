@@ -185,13 +185,24 @@ async function consumeTurn(
           if (stopConsumer) throw new Error("native event consumer stopped");
           if (next.done) throw new Error("native event stream closed before a turn terminal fact");
           const event = next.value;
+          const payload = event.payload as Record<string, unknown>;
+          const settlingRequestId =
+            ["runtime_request.resolved", "runtime_request.cancelled", "runtime_request.expired"]
+              .includes(event.eventType)
+            && typeof payload.requestId === "string"
+              ? payload.requestId
+              : null;
+          // Beginning settlement revokes the expiry timer's handoff authority.
+          // appendEvent may remain pending across the live-window deadline; if
+          // the timer stayed live until the receipt returned, both settlement
+          // and a durable handoff could commit for the same request.
+          if (settlingRequestId !== null) clearInputTimer(settlingRequestId);
           const receipt = await controlPlane.appendEvent(event, {
             signal: appendAbort.signal,
           });
           if (stopConsumer) throw new Error("native event consumer stopped");
           eventCount += receipt.disposition === "committed" ? 1 : 0;
           highestContiguousSourceSeq = Math.max(highestContiguousSourceSeq, receipt.highestContiguousSourceSeq);
-          const payload = event.payload as Record<string, unknown>;
           const request = payload.request && typeof payload.request === "object" && !Array.isArray(payload.request)
             ? payload.request as Record<string, unknown>
             : null;
@@ -209,6 +220,9 @@ async function consumeTurn(
               const turnId = request.turnId;
               clearInputTimer(requestId);
               const inputTimer = setTimeout(() => {
+                // Clearing a timeout does not revoke a callback that is already
+                // queued. The map entry is the per-request authority token.
+                if (inputTimers.get(requestId) !== inputTimer) return;
                 inputTimers.delete(requestId);
                 // A timer callback can already be queued when teardown clears
                 // its handle. Re-check the live-turn authority inside the
@@ -249,11 +263,6 @@ async function consumeTurn(
             } catch {
               // Invalid structured inputs remain rejected by the driver and never become durable questions.
             }
-          } else if (
-            ["runtime_request.resolved", "runtime_request.cancelled", "runtime_request.expired"].includes(event.eventType)
-            && typeof payload.requestId === "string"
-          ) {
-            clearInputTimer(payload.requestId);
           }
           if (governedResult === null && resolveGovernedWait) {
             if (appendAbort.signal.aborted) {
