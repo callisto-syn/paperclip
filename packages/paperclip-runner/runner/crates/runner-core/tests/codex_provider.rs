@@ -320,11 +320,64 @@ fn codex_completion_survives_failed_pending_request_cancellation() {
 }
 
 #[test]
+fn clean_idle_provider_exit_preserves_completed_turn_success() {
+    let directory = temporary_directory("completion-output-clean-provider-exit");
+    let config = provider_config(
+        &directory,
+        &[
+            "--emit-post-completion-warning",
+            "--exit-after-turn-completion",
+        ],
+    );
+    let mut provider = CodexProvider::start(&config, None).expect("start Codex provider");
+    provider
+        .start_turn("Complete, produce idle output, then exit.", &config.cwd)
+        .expect("start provider turn");
+
+    let mut completion_seen = false;
+    let mut post_completion_output_seen = false;
+    let mut clean_exit = None;
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < exit_deadline {
+        match provider.poll().expect("poll completion and clean exit") {
+            Some(CodexProviderEvent::Notification { method, .. }) => {
+                completion_seen |= method == "turn/completed";
+                post_completion_output_seen |= completion_seen && method == "warning";
+            }
+            Some(CodexProviderEvent::Exited {
+                success,
+                completed_turn_authoritative,
+                completion_reconciles_exit,
+                ..
+            }) => {
+                clean_exit = Some((
+                    success,
+                    completed_turn_authoritative,
+                    completion_reconciles_exit,
+                ));
+                break;
+            }
+            Some(_) | None => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    assert!(completion_seen);
+    assert!(post_completion_output_seen);
+    assert_eq!(clean_exit, Some((true, true, false)));
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn clean_provider_exit_does_not_refail_a_completed_turn() {
     let directory = temporary_directory("completion-then-clean-exit");
     let config = provider_config(
         &directory,
-        &["--exit-after-turn-completion", "--exit-after-thread-read"],
+        &[
+            "--emit-post-completion-warning",
+            "--exit-after-turn-completion",
+            "--exit-after-thread-read",
+        ],
     );
     let mut executor = CodexCommandExecutor::new(&directory);
     executor
@@ -348,18 +401,32 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
         .expect("start provider turn");
 
     let mut event_types = Vec::new();
-    for _ in 0..32 {
+    let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < exit_deadline {
         event_types.extend(
             poll_and_ack(&mut executor)
                 .expect("poll completion and clean exit")
                 .into_iter()
                 .map(|event| event.event_type),
         );
-        if event_types.iter().any(|event| event == "turn.completed") {
+        if event_types.iter().any(|event| event == "turn.completed")
+            && event_types
+                .iter()
+                .any(|event| event == "provider.notice.recorded")
+        {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    for _ in 0..8 {
+
+    // The warning is ordered after the terminal and before the clean exit, so
+    // seeing it proves the completed process entered the idle/output path that
+    // previously cleared expected shutdown authority.
+    assert!(event_types.iter().any(|event| event == "turn.completed"));
+    assert!(event_types
+        .iter()
+        .any(|event| event == "provider.notice.recorded"));
+    for _ in 0..32 {
         event_types.extend(
             poll_and_ack(&mut executor)
                 .expect("poll after provider exit")
@@ -368,7 +435,6 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
         );
     }
 
-    assert!(event_types.iter().any(|event| event == "turn.completed"));
     assert!(!event_types.iter().any(|event| event == "session.failed"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))

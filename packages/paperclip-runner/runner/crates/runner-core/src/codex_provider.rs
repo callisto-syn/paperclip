@@ -440,6 +440,8 @@ impl CodexProvider {
             let Some(line) = self.process.receive_stdout_line(Duration::from_millis(1))? else {
                 let exit = self.process.try_wait()?;
                 return if let Some(exit) = exit {
+                    let completed_turn_authoritative = self.completed_turn_authority.is_some()
+                        && self.active_provider_turn_id.is_none();
                     let completion_reconciles_exit = self
                         .completed_turn_authority
                         .as_ref()
@@ -450,14 +452,13 @@ impl CodexProvider {
                         });
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
-                        // Completion authority preserves the old turn result,
-                        // but it does not hide a later unhealthy process exit.
-                        // The durable backend records that independent session
-                        // lifecycle fact without refailing completed work.
+                        // A clean idle exit after a terminal is healthy even if
+                        // later output proved the process remained live. A
+                        // nonzero exit is still an independent session failure,
+                        // and an active turn never inherits prior authority.
                         success: exit.success
-                            && (self.expected_shutdown || completion_reconciles_exit),
-                        completed_turn_authoritative: self.completed_turn_authority.is_some()
-                            && self.active_provider_turn_id.is_none(),
+                            && (self.expected_shutdown || completed_turn_authoritative),
+                        completed_turn_authoritative,
                         completed_turn_observed_by_process: self
                             .completed_turn_authority
                             .as_ref()

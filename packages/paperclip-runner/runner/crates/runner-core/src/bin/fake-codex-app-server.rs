@@ -113,6 +113,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let exit_after_turn_completion = args
         .iter()
         .any(|value| value == "--exit-after-turn-completion");
+    let emit_post_completion_warning = args
+        .iter()
+        .any(|value| value == "--emit-post-completion-warning");
     let fail_after_turn_completion = args
         .iter()
         .any(|value| value == "--fail-after-turn-completion");
@@ -271,6 +274,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
+                    if emit_post_completion_warning {
+                        send(json!({
+                            "method": "warning",
+                            "params": {"message": "provider remained live after terminal"}
+                        }))?;
+                    }
                     if fail_after_turn_completion {
                         if let Some(delay_ms) = fail_after_turn_completion_delay_ms {
                             thread::sleep(Duration::from_millis(delay_ms));
