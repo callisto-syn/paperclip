@@ -288,7 +288,7 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
-  it("keeps ownership of a provider that survives both shutdown signals", async () => {
+  it("releases the event-loop handle for a provider that survives both shutdown signals", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
@@ -327,7 +327,9 @@ describe("Codex ACPX runtime adapter", () => {
       expect(child.stdin?.destroy).toHaveBeenCalledOnce();
       expect(child.stdout?.destroy).toHaveBeenCalledOnce();
       expect(child.stderr?.destroy).toHaveBeenCalledOnce();
-      expect(child.unref).not.toHaveBeenCalled();
+      // The close still fails and preserves the cleanup diagnostic, but the
+      // exhausted child handle cannot keep the sidecar process alive forever.
+      expect(child.unref).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }

@@ -665,9 +665,16 @@ function closeUnresponsiveChildStreams(child: ChildProcess): unknown[] {
       errors.push(error);
     }
   }
-  // Do not unref a provider that ignored SIGKILL. Keeping the child-process
-  // handle referenced prevents the sidecar from exiting while it still owns a
-  // live provider and makes the failed cleanup externally observable.
+  // Both termination signals and the bounded exit checks are exhausted. The
+  // cleanup still rejects so the sidecar reports a failed shutdown, but this
+  // child handle must no longer be allowed to keep that sidecar alive forever.
+  // Its stdio is already detached above and SIGKILL was the final OS-level
+  // cleanup available to this process.
+  try {
+    child.unref();
+  } catch (error) {
+    errors.push(error);
+  }
   return errors;
 }
 
