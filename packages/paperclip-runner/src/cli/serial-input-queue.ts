@@ -7,9 +7,12 @@ export function enqueueSerialInput(
   operation: () => Promise<void>,
   onError: (error: unknown) => void | Promise<void>,
 ): Promise<void> {
-  const reportError = async (error: unknown): Promise<void> => {
+  const reportError = (error: unknown): void => {
     try {
-      await onError(error);
+      // Diagnostics are best-effort side effects, not input-queue work. Start
+      // them in order, but never give an uncooperative callback authority to
+      // block later frames or the shutdown drain.
+      void Promise.resolve(onError(error)).catch(() => undefined);
     } catch {
       // Diagnostics must not poison the queue or skip later input frames.
     }

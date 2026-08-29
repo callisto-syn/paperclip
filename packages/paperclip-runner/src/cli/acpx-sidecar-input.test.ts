@@ -56,6 +56,39 @@ describe("ACPX sidecar input sequencing", () => {
     expect(events).toEqual(["failed", "diagnostic", "recovered"]);
   });
 
+  it("does not let an unbounded diagnostic block later input or shutdown", async () => {
+    const events: string[] = [];
+    const neverSettles = new Promise<void>(() => undefined);
+    const failed = enqueueAcpxSidecarInput(
+      Promise.resolve(),
+      async () => {
+        events.push("failed");
+        throw new Error("bad frame");
+      },
+      () => {
+        events.push("diagnostic");
+        return neverSettles;
+      },
+    );
+    const recovered = enqueueAcpxSidecarInput(
+      failed,
+      async () => {
+        events.push("recovered");
+      },
+      () => events.push("unexpected"),
+    );
+
+    await expect(
+      Promise.race([
+        recovered.then(() => "drained"),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve("blocked"), 50);
+        }),
+      ]),
+    ).resolves.toBe("drained");
+    expect(events).toEqual(["failed", "diagnostic", "recovered"]);
+  });
+
   it("preserves the first bootstrap failure and blocks dependent commands", () => {
     const rootCause = new Error("agent initialize exited");
     const failure = recordAcpxBootstrapFailure(null, "session.open", rootCause);
