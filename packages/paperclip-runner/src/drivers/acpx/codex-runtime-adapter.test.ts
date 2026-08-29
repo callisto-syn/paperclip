@@ -178,13 +178,20 @@ describe("Codex ACPX runtime adapter", () => {
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 
       const retry = port.close({ reason: "cleanup ownership retried" });
+      const retryRejection = expect(retry).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({
+            message: "ACPX runtime close exceeded its shutdown timeout",
+          }),
+        ],
+      });
       await Promise.resolve();
       expect(runtime.close).toHaveBeenCalledTimes(2);
-      await expect(retry).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await retryRejection;
 
-      // The fresh attempt established that the runtime closed without waiting
-      // forever for the earlier attempt. The adapter still owns that attempt
-      // so a subsequent close reports its eventual failure exactly once.
+      // The fresh success cannot release the older outcome. Once that outcome
+      // arrives, autonomous/explicit retry observes its failure exactly once.
       rejectStalledClose?.(new Error("original close failed"));
       await Promise.resolve();
       await expect(

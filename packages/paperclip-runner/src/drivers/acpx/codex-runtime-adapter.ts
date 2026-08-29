@@ -318,6 +318,30 @@ function runtimePort(
       if (closeError instanceof AcpxRuntimeCloseTimeoutError) {
         runtimeErrors.unshift(closeError);
       }
+      if (
+        closeError === null &&
+        runtimeCloseSucceeded &&
+        [...ownedRuntimeCloseAttempts].some((attempt) => !attempt.settled)
+      ) {
+        // A newer close may prove that the runtime accepted shutdown, but it
+        // cannot release ownership of an older attempt whose outcome is still
+        // unknown. Keep this close retryable until that outcome is either
+        // reported or the bounded observer times out; the driver can then
+        // continue its autonomous cleanup loop.
+        const outstandingSettlement = Promise.all(
+          [...ownedRuntimeCloseAttempts]
+            .filter((attempt) => !attempt.settled)
+            .map((attempt) => attempt.promise),
+        ).then(() => null);
+        const outstandingError = await boundedCloseOutcome(
+          outstandingSettlement,
+          runtimeCloseTimeoutMs,
+        );
+        if (outstandingError instanceof AcpxRuntimeCloseTimeoutError) {
+          runtimeErrors.unshift(outstandingError);
+        }
+        runtimeErrors.push(...takeSettledRuntimeCloseErrors());
+      }
       if (runtimeErrors.length > 0 || processErrors.length > 0) {
         const errors = [...runtimeErrors, ...processErrors];
         throw new AggregateError(
@@ -325,10 +349,8 @@ function runtimePort(
           "ACPX runtime and provider cleanup failed",
         );
       }
-      // A successful fresh attempt is sufficient proof that the runtime is
-      // closed. Older attempts remain owned so a later close can report an
-      // eventual failure, but a never-settling attempt must not keep cleanup
-      // permanently unresolved.
+      // Success is reported only after every older attempt has an observed
+      // outcome. A never-settling attempt remains bounded and retryable.
     },
   };
 }
