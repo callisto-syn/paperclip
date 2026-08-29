@@ -28,9 +28,15 @@ describe("Codex value and workspace boundaries", () => {
       const outside = join(fixture, "outside");
       const hostRoot = join(fixture, "host");
       const hostHome = join(hostRoot, "home");
+      const protectedHomeDirectory = join(hostHome, ".ssh");
       const codexHome = join(fixture, "codex-home");
       const codexWorkspace = join(codexHome, "run");
-      for (const directory of [workspace, outside, hostHome, codexWorkspace]) {
+      for (const directory of [
+        workspace,
+        outside,
+        protectedHomeDirectory,
+        codexWorkspace,
+      ]) {
         mkdirSync(directory, { recursive: true });
       }
 
@@ -53,6 +59,9 @@ describe("Codex value and workspace boundaries", () => {
       expect(() =>
         validateCodexWorkingDirectory(hostRoot, { HOME: hostHome }),
       ).toThrow("cannot contain the host HOME");
+      expect(() =>
+        validateCodexWorkingDirectory(protectedHomeDirectory, { HOME: hostHome }),
+      ).toThrow("cannot overlap the host HOME");
       expect(() =>
         validateCodexWorkingDirectory(outside, {
           PAPERCLIP_WORKSPACE_CWD: workspaceRoot,

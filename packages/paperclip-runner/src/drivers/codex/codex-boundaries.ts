@@ -55,6 +55,9 @@ export function validateCodexWorkingDirectory(
   if (hostHome && pathContains(resolved, hostHome)) {
     throw new Error("Codex working directory cannot contain the host HOME");
   }
+  if (hostHome && pathContains(hostHome, resolved)) {
+    throw new Error("Codex working directory cannot overlap the host HOME");
+  }
   const codexHome = canonicalConfiguredPath(environment.CODEX_HOME);
   if (codexHome) {
     if (
