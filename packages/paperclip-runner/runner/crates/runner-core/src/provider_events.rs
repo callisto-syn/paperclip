@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::acpx_event_payload::{AcpxRuntimeEventKind, AcpxTurnStatus};
 use crate::acpx_provider_state::AcpxProviderStateEvent;
-use crate::durable::{redact_text, EventPriority};
+use crate::durable::{redact_text, sanitize_value, EventPriority};
 use crate::local_runner::LocalRunnerError;
 use crate::provider_bridge::semantic_value_digest;
 
@@ -119,6 +119,34 @@ pub fn project_acpx_state_event(
                 },
             }),
         ),
+        AcpxProviderStateEvent::ToolResult(result) => {
+            let safe_result = sanitize_value(&result.result);
+            one(
+                "semantic_tool.result",
+                EventPriority::P0,
+                json!({
+                    "semantic_tool": {
+                        "schema": "paperclip.prp.semantic_tool.v1",
+                        "schemaVersion": 1,
+                        "phase": "result",
+                        "operationId": result.operation_id,
+                        "callId": result.call_id,
+                        "correlation": context.correlation(),
+                        "idempotencyKey": Value::Null,
+                        "content": {
+                            "digest": semantic_value_digest(&safe_result),
+                            "redactionDisposition": "digest_only",
+                            "references": [],
+                        },
+                        "outcome": if result.is_error { "failed" } else { "succeeded" },
+                        "code": if result.is_error { "semantic_tool_failed" } else { "semantic_tool_succeeded" },
+                        "retryable": false,
+                        "authorizationBoundary": "active_task",
+                        "operationReceiptId": format!("operation_{}", result.call_id),
+                    },
+                }),
+            )
+        }
         AcpxProviderStateEvent::PermissionRequest { .. } => Err(LocalRunnerError::invalid(
             "ACPX permission request reached projection outside the pinned runner policy",
         )),

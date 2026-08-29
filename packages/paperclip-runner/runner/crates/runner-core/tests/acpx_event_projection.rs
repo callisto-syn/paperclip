@@ -1,6 +1,7 @@
 use paperclip_runner_core::acpx_event_payload::AcpxTurnStatus;
 use paperclip_runner_core::acpx_provider_state::{AcpxProviderStateEvent, AcpxSemanticResult};
 use paperclip_runner_core::durable::EventPriority;
+use paperclip_runner_core::provider_bridge::ToolResult;
 use paperclip_runner_core::provider_events::{
     project_acpx_state_event, AcpxEventProjectionContext, NormalizedProviderEvent,
 };
@@ -46,6 +47,38 @@ fn projects_authorized_tools_with_exact_durable_correlation() {
     assert!(events[0].payload["semantic_tool"]["content"]["digest"]
         .as_str()
         .is_some_and(|value| value.starts_with("sha256:")));
+}
+
+#[test]
+fn projects_terminal_tool_cancellations_as_correlated_results() {
+    let events = project(AcpxProviderStateEvent::ToolResult(ToolResult {
+        call_id: "call-1".to_owned(),
+        operation_id: "issues.read".to_owned(),
+        result: json!({
+            "error": {
+                "code": "acpx_turn_settled",
+                "message": "The provider turn stopped before this semantic tool completed",
+                "retryable": false,
+            },
+        }),
+        is_error: true,
+    }));
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "semantic_tool.result");
+    assert_eq!(events[0].priority, EventPriority::P0);
+    assert_eq!(events[0].payload["semantic_tool"]["phase"], "result");
+    assert_eq!(events[0].payload["semantic_tool"]["callId"], "call-1");
+    assert_eq!(events[0].payload["semantic_tool"]["outcome"], "failed");
+    assert_eq!(
+        events[0].payload["semantic_tool"]["correlation"],
+        json!({
+            "runId":"run-1",
+            "normalizedSessionId":"session-1",
+            "turnId":"turn-1",
+            "itemId":"item-1",
+        }),
+    );
 }
 
 #[test]
