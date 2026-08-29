@@ -1898,6 +1898,104 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("preserves terminal success while iterator teardown remains pending", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseTeardown = () => {};
+      const teardownStarted = vi.fn();
+      const close = vi.fn(async () => undefined);
+      const readResult = vi.fn(async () => ({
+        result,
+        terminal,
+        turnId: "turn-terminal",
+      }));
+      const session: NativeSession = {
+        identity: () => identity,
+        async capabilities() {
+          return {
+            resume: false,
+            typedEvents: true,
+            steering: false,
+            interruption: true,
+            structuredResult: true,
+          };
+        },
+        async *events() {
+          try {
+            yield { ...runnerEvent(1, "turn.completed"), turnId: "turn-terminal" };
+          } finally {
+            teardownStarted();
+            await new Promise<void>((resolve) => {
+              releaseTeardown = resolve;
+            });
+          }
+        },
+        async startTurn() {
+          return { turnId: "turn-terminal" };
+        },
+        result: readResult,
+        async snapshot() {
+          return {
+            backendKind: "mock",
+            sessionId: identity.sessionId,
+            identity,
+            providerSessionId: "provider-terminal",
+            cursor: "1",
+            activeTurnId: null,
+          };
+        },
+        close,
+      };
+      const backend: NativeSessionBackend = {
+        async descriptor() {
+          return {
+            kind: "mock",
+            name: "slow-teardown-backend",
+            version: "1",
+            capabilities: await session.capabilities(),
+          };
+        },
+        async openSession() {
+          return session;
+        },
+      };
+      const completeRun = vi.fn(async () => undefined);
+      const port: ControlPlanePort = {
+        async openRun() {},
+        async checkpointSession() {},
+        async appendEvent() {
+          return {
+            cursor: 1,
+            highestContiguousSourceSeq: 1,
+            disposition: "committed",
+          };
+        },
+        async replayEvents() {
+          return { events: [], highestContiguousSourceSeq: 0 };
+        },
+        completeRun,
+      };
+
+      const execution = executeNativeSession({
+        input,
+        backend,
+        controlPlane: port,
+        runnerInstanceId: "runner-recovery",
+        controlPlaneInstanceId: "control-recovery",
+      });
+      await vi.waitFor(() => expect(teardownStarted).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(execution).resolves.toMatchObject({ result });
+      expect(readResult).toHaveBeenCalledOnce();
+      expect(completeRun).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+      releaseTeardown();
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds a stalled terminal handoff without publishing success, then closes after settlement", async () => {
     const request = {
       schema: "paperclip.runtime_request.v2",

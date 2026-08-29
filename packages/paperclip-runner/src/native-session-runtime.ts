@@ -320,9 +320,11 @@ async function consumeTurn(
     // without committing when its signal is aborted. Join both promises so a
     // failed execution cannot be followed by a late durable write or provider
     // teardown.
-    const teardownSettlement = Promise.allSettled([
+    const passiveTeardownSettlement = Promise.allSettled([
       iteratorTeardown,
       consumer,
+    ]);
+    const mutationSettlements = [
       ...(deferredHandoffSettlement
         ? [deferredHandoffSettlement]
         : activeHandoffSettlement
@@ -332,6 +334,13 @@ async function consumeTurn(
       ...(deferredSessionCancellationSettlement
         ? [deferredSessionCancellationSettlement]
         : []),
+    ];
+    const mutationSettlement = mutationSettlements.length > 0
+      ? Promise.allSettled(mutationSettlements)
+      : null;
+    const teardownSettlement = Promise.allSettled([
+      passiveTeardownSettlement,
+      ...(mutationSettlement ? [mutationSettlement] : []),
     ]);
     if (consumptionFailed) {
       // Start provider close immediately so a cooperative implementation can
@@ -347,7 +356,10 @@ async function consumeTurn(
       ]);
       await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
     } else {
-      if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+      if (
+        mutationSettlement
+        && !(await settlesWithin(mutationSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))
+      ) {
         // A terminal provider fact does not make an uncooperative handoff safe
         // to forget. Revoke its mutation authority, start provider close, and
         // join the exact operation before publishing a failed execution.
@@ -358,6 +370,14 @@ async function consumeTurn(
         await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
         throw new Error("native_terminal_handoff_settlement_timeout");
       }
+      // Iterator teardown owns no control-plane mutation authority. A slow
+      // provider subscription remains observed and is released by the normal
+      // session close, but it cannot erase an already committed terminal fact
+      // or prevent result retrieval and durable finalization.
+      await settlesWithin(
+        passiveTeardownSettlement,
+        FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+      );
     }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
