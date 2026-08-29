@@ -1116,9 +1116,14 @@ function isReplaySafeMockExtension(
     case "routines.manage":
     case "cases.upsert":
     case "company.admin":
-    case "portability.export":
     case "test.generic_api":
       return true;
+    // The export is a projection of mutable control-plane state. If its
+    // executor disappears after starting, re-running it could publish a
+    // different snapshot for the same idempotency key. Keep that lease
+    // fail-closed until the original exact result can be reconciled.
+    case "portability.export":
+      return false;
     default:
       return false;
   }

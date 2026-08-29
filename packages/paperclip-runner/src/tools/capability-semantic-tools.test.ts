@@ -1107,6 +1107,56 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("does not replay a mutable export after its executing lease expires", async () => {
+    const durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: `${OPEN.identity.runId}:export_company:expired-export`,
+        input: "{}",
+        status: "pending",
+        ownerId: "terminated-exporter",
+        leaseExpiresAtMs: 1_000,
+        phase: "executing",
+      }],
+    };
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: () => {
+        throw new Error("an unsafe export replay must not mutate durable state");
+      },
+      compareAndSwap: () => {
+        throw new Error("an unsafe export replay must not acquire a new lease");
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["portability:export"] });
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["portability:export"],
+      now: () => 1_001,
+    });
+
+    await expect(restored.invoke({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "expired-export",
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "operation_unsupported", reason: "idempotency_recovery_in_flight" },
+    });
+    expect(durableSnapshot.extensions[0]).toMatchObject({
+      status: "pending",
+      ownerId: "terminated-exporter",
+      phase: "executing",
+    });
+  });
+
   it("allows only one restored runtime to reclaim an expired extension lease", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
