@@ -390,7 +390,7 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
+fn nonzero_provider_exit_distinguishes_same_process_completion_from_resumed_crash() {
     let directory = temporary_directory("completion-then-nonzero-exit");
     let config = provider_config(
         &directory,
@@ -457,18 +457,18 @@ fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
         );
         if recovered_event_types
             .iter()
-            .any(|event| event == "session.reconciled")
+            .any(|event| event == "session.failed")
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(!recovered_event_types
-        .iter()
-        .any(|event| event == "session.failed"));
     assert!(recovered_event_types
         .iter()
-        .any(|event| event == "session.reconciled"));
+        .any(|event| event == "session.failed"));
+    assert!(!recovered_event_types
+        .iter()
+        .any(|event| event == "turn.failed"));
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

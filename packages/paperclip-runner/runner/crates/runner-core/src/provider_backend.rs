@@ -846,6 +846,7 @@ impl CodexCommandExecutor {
                     exit_code,
                     success,
                     completed_turn_authoritative,
+                    completed_turn_observed_by_process,
                 } => {
                     self.provider = None;
                     if !success {
@@ -860,7 +861,9 @@ impl CodexCommandExecutor {
                             // unavailable. Avoid emitting session.failed for
                             // already successful work, but never leave the
                             // durable lifecycle open after a nonzero exit.
-                            event_type: if completed_turn_authoritative {
+                            event_type: if completed_turn_authoritative
+                                && completed_turn_observed_by_process
+                            {
                                 "session.reconciled"
                             } else {
                                 "session.failed"
@@ -873,6 +876,7 @@ impl CodexCommandExecutor {
                                 "exitCode": exit_code,
                                 "expected": success,
                                 "previousTurnCompleted": completed_turn_authoritative,
+                                "completedByExitedProcess": completed_turn_observed_by_process,
                                 "activeProviderTurnId": Value::Null,
                             }),
                         })?;

@@ -121,6 +121,7 @@ pub enum CodexProviderEvent {
         exit_code: Option<i32>,
         success: bool,
         completed_turn_authoritative: bool,
+        completed_turn_observed_by_process: bool,
     },
 }
 
@@ -154,6 +155,7 @@ pub struct CodexProvider {
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
     completed_turn_authoritative: bool,
+    completed_turn_observed_by_process: bool,
 }
 
 impl CodexProvider {
@@ -189,6 +191,7 @@ impl CodexProvider {
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
             completed_turn_authoritative: false,
+            completed_turn_observed_by_process: false,
         };
         let initialized = provider.request(
             "initialize",
@@ -270,11 +273,10 @@ impl CodexProvider {
 
     pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
         // Durable completion authority belongs to the completed turn, not the
-        // provider process that happened to emit it. Preserve that authority
-        // across an idle resume so a process exit cannot retroactively refail
-        // completed work. start_turn revokes both flags before new work begins.
+        // newly resumed provider process. Preserve the prior result without
+        // treating a later crash of this fresh process as reconciled work.
         self.completed_turn_authoritative = authoritative;
-        self.expected_shutdown = authoritative;
+        self.completed_turn_observed_by_process = false;
     }
 
     pub fn start_turn(&mut self, message: &str, cwd: &str) -> Result<Value, LocalRunnerError> {
@@ -290,6 +292,7 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completed_turn_authoritative = false;
+        self.completed_turn_observed_by_process = false;
         let result = self.request(
             "turn/start",
             json!({
@@ -386,6 +389,7 @@ impl CodexProvider {
                             && (self.expected_shutdown || self.completed_turn_authoritative),
                         completed_turn_authoritative: self.completed_turn_authoritative
                             && self.active_provider_turn_id.is_none(),
+                        completed_turn_observed_by_process: self.completed_turn_observed_by_process,
                     }))
                 } else {
                     Ok(None)
@@ -555,6 +559,7 @@ impl CodexProvider {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
                 self.completed_turn_authoritative = true;
+                self.completed_turn_observed_by_process = true;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
