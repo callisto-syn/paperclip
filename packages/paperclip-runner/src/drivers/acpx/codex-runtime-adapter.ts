@@ -529,8 +529,20 @@ class SpawnedChildSet {
   readonly #errors = new Set<unknown>();
   readonly #terminations = new Map<ChildProcess, Promise<unknown[]>>();
   #terminating = false;
+  #sealed = false;
 
   add(child: ChildProcess): ChildProcess {
+    if (this.#sealed) {
+      // Once the stable-empty cleanup point is sealed, ACPX no longer has
+      // authority to create provider work. Kill a violating late child before
+      // returning control to the runtime and reject the spawn itself.
+      try {
+        if (running(child)) child.kill("SIGKILL");
+      } finally {
+        closeUnresponsiveChildStreams(child);
+      }
+      throw new Error("ACPX provider spawned after cleanup was sealed");
+    }
     this.#children.add(child);
     const onError = (error: unknown) => this.#errors.add(error);
     const forget = () => this.#children.delete(child);
@@ -560,6 +572,10 @@ class SpawnedChildSet {
         pushUnique(errors, error);
       }
     }
+    // JavaScript cannot interleave another spawn between this synchronous
+    // empty check and the seal. Children added before it are tracked by the
+    // loop; children added afterward are synchronously killed by add().
+    this.#sealed = true;
     // A failed spawn or signal can emit `error` and then `close` before this
     // method snapshots the live children. Keep those errors independently of
     // child membership and report each object once after all owned attempts.

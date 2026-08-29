@@ -867,10 +867,13 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
-  it("cleans up a provider and real handle created after handshake timeout", async () => {
+  it("rejects provider children created after handshake cleanup is sealed", async () => {
     const child = fakeChild();
+    const postCleanupChild = fakeChild();
     const command = fakeCommand();
-    vi.mocked(command.spawn).mockReturnValue(child);
+    vi.mocked(command.spawn)
+      .mockReturnValueOnce(child)
+      .mockReturnValueOnce(postCleanupChild);
     const runtime = fakeRuntime();
     const retainCleanup = vi.fn<(cleanup: Promise<void>) => void>();
     let runtimeOptions: AcpRuntimeOptions | undefined;
@@ -899,20 +902,26 @@ describe("Codex ACPX runtime adapter", () => {
     const retainedCleanup = retainCleanup.mock.calls[0]?.[0];
     expect(retainedCleanup).toBeDefined();
 
-    runtimeOptions?.spawnAgent?.({
+    expect(() => runtimeOptions?.spawnAgent?.({
       command: "ignored",
       args: ["--stdio"],
       options: {},
-    });
+    })).toThrow("provider spawned after cleanup was sealed");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     resolveHandshake?.(HANDLE);
 
     await retainedCleanup;
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(runtime.close).toHaveBeenCalledWith({
       handle: HANDLE,
       reason: "ACPX session handshake completed after its admission deadline",
       discardPersistentState: false,
     });
+    expect(() => runtimeOptions?.spawnAgent?.({
+      command: "ignored",
+      args: ["--stdio"],
+      options: {},
+    })).toThrow("provider spawned after cleanup was sealed");
+    expect(postCleanupChild.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("rejects non-Codex profiles before constructing ACPX", async () => {
