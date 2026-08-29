@@ -54,6 +54,7 @@ import {
   boundedIdentity,
   closeSidecarHostForCommand,
   combineSidecarAdmissionCleanups,
+  hasSidecarSessionOwnership,
   observeSidecarCleanupWithin,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
@@ -188,7 +189,13 @@ async function dispatch(
     };
   }
   if (request.command === "session.open") {
-    if (host || failedAdmissionCleanup) {
+    if (
+      hasSidecarSessionOwnership(
+        host,
+        activeHostCleanup,
+        failedAdmissionCleanup,
+      )
+    ) {
       throw new Error("ACPX sidecar already owns a session or its cleanup");
     }
     if (!initializedModel) throw new Error("initialize the ACPX sidecar first");

@@ -7,6 +7,14 @@ export interface OpenedAcpxSidecarHost {
 const FAILED_ADMISSION_CLOSE_TIMEOUT_MS = 8_000;
 const ACTIVE_HOST_CLEANUP_ATTEMPTS = 4;
 
+export function hasSidecarSessionOwnership(
+  host: unknown,
+  activeHostCleanup: Promise<void> | null,
+  failedAdmissionCleanup: Promise<void> | null,
+): boolean {
+  return Boolean(host || activeHostCleanup || failedAdmissionCleanup);
+}
+
 export async function readSidecarHostStatusWithin(
   host: Pick<OpenedAcpxSidecarHost, "status">,
   timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,

@@ -9,6 +9,7 @@ import {
   closeActiveSidecarHostWithin,
   closeSidecarHostForCommand,
   combineSidecarAdmissionCleanups,
+  hasSidecarSessionOwnership,
   observeSidecarCleanupWithin,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
@@ -24,6 +25,15 @@ afterEach(async () => {
 });
 
 describe("Codex ACPX runtime sidecar", () => {
+  it("keeps session admission closed while any cleanup owner remains", () => {
+    const cleanup = Promise.resolve();
+
+    expect(hasSidecarSessionOwnership(null, null, null)).toBe(false);
+    expect(hasSidecarSessionOwnership({}, null, null)).toBe(true);
+    expect(hasSidecarSessionOwnership(null, cleanup, null)).toBe(true);
+    expect(hasSidecarSessionOwnership(null, null, cleanup)).toBe(true);
+  });
+
   it("closes an opened host when post-open verification fails", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const host = {
