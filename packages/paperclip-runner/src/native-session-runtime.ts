@@ -481,14 +481,25 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     ?? existingIdentity?.sessionId
     ?? input.session.normalizedSessionId
     ?? randomUUID();
+  const identity = {
+    runId: input.binding.runId,
+    sessionId: normalizedSessionId,
+    companyId: input.binding.companyId,
+    issueId: input.binding.issueId,
+    agentId: input.binding.agentId,
+  };
+  if (options.existingSession) {
+    if (options.existingSession.attachRun === undefined) {
+      throw new Error("native_session_multi_run_unavailable");
+    }
+    // Attaching can fail even after the retained session's identity passes the
+    // static binding check (for example, when the provider lost multi-run
+    // state). Prove the provider attachment before opening durable
+    // control-plane state because ControlPlanePort has no rollback operation.
+    await options.existingSession.attachRun({ identity });
+  }
   await options.controlPlane.openRun({
-    identity: {
-      runId: input.binding.runId,
-      sessionId: normalizedSessionId,
-      companyId: input.binding.companyId,
-      issueId: input.binding.issueId,
-      agentId: input.binding.agentId,
-    },
+    identity,
     backendKind: descriptor.kind,
     sourceInstanceId: options.runnerInstanceId,
   });
@@ -503,13 +514,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     await options.onCheckpoint?.(persistedSession);
   }
 
-  const identity = {
-    runId: input.binding.runId,
-    sessionId: normalizedSessionId,
-    companyId: input.binding.companyId,
-    issueId: input.binding.issueId,
-    agentId: input.binding.agentId,
-  };
   let recovered = false;
   let session: NativeSession;
   let continuityBreak: {
@@ -518,10 +522,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     previousProviderSessionId: string | null;
   } | null = null;
   if (options.existingSession) {
-    if (options.existingSession.attachRun === undefined) {
-      throw new Error("native_session_multi_run_unavailable");
-    }
-    await options.existingSession.attachRun({ identity });
     session = options.existingSession;
     recovered = true;
   } else if (persistedSession) {
