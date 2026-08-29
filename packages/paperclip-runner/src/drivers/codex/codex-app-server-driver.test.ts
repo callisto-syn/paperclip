@@ -2245,16 +2245,22 @@ describe("Codex app-server Codex driver", () => {
     }
     expect(created).not.toBeNull();
 
-    await expect(session.handoffRuntimeRequest?.({
+    const firstHandoff = session.handoffRuntimeRequest!({
       requestId: "handoff-input",
       turnId,
       reason: "durable_handoff",
-    })).resolves.toBe("handed_off");
-    await expect(session.handoffRuntimeRequest?.({
+      signal: new AbortController().signal,
+    });
+    expect(firstHandoff.result).toBe("handed_off");
+    await expect(firstHandoff.cleanup).resolves.toBeUndefined();
+    const repeatedHandoff = session.handoffRuntimeRequest!({
       requestId: "handoff-input",
       turnId,
       reason: "durable_handoff",
-    })).resolves.toBe("already_settled");
+      signal: new AbortController().signal,
+    });
+    expect(repeatedHandoff.result).toBe("already_settled");
+    await expect(repeatedHandoff.cleanup).resolves.toBeUndefined();
     expect(await pending).toEqual({ answers: {} });
 
     let expired: PrpEvent | null = null;
@@ -2281,6 +2287,64 @@ describe("Codex app-server Codex driver", () => {
         },
       },
     });
+    await session.close({ reason: "test complete" });
+  });
+
+  it("does not commit a durable handoff after runtime ownership is revoked", async () => {
+    const transport = new FakeCodexTransport();
+    const session = await makeDriver([transport]).openSession({
+      runId: "run-aborted-handoff",
+      normalizedSessionId: "normalized-aborted-handoff",
+      workingDirectory: WORKSPACE,
+    });
+    const iterator = session.events()[Symbol.asyncIterator]();
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Ask before continuing." },
+    });
+    const pending = transport.invoke({
+      id: "aborted-handoff-input",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-1",
+        turnId,
+        itemId: "aborted-handoff-input-item",
+        questions: [{
+          id: "environment",
+          header: "Environment",
+          question: "Where should we deploy?",
+          options: [{ label: "Staging" }, { label: "Production" }],
+        }],
+      },
+    });
+    for (let count = 0; count < 20; count += 1) {
+      const event = await iterator.next();
+      if (event.done || event.value.eventType === "runtime_request.created") break;
+    }
+
+    const ownership = new AbortController();
+    ownership.abort();
+    const abortedHandoff = session.handoffRuntimeRequest!({
+      requestId: "aborted-handoff-input",
+      turnId,
+      reason: "durable_handoff",
+      signal: ownership.signal,
+    });
+    expect(abortedHandoff.result).toBe("already_settled");
+    await expect(abortedHandoff.cleanup).resolves.toBeUndefined();
+    expect(session.pendingRuntimeRequests?.()).toHaveLength(1);
+    expect(transport.calls).not.toContainEqual(expect.objectContaining({
+      method: "turn/interrupt",
+    }));
+
+    const liveHandoff = session.handoffRuntimeRequest!({
+      requestId: "aborted-handoff-input",
+      turnId,
+      reason: "durable_handoff",
+      signal: new AbortController().signal,
+    });
+    expect(liveHandoff.result).toBe("handed_off");
+    await expect(liveHandoff.cleanup).resolves.toBeUndefined();
+    await expect(pending).resolves.toEqual({ answers: {} });
     await session.close({ reason: "test complete" });
   });
 
@@ -2330,11 +2394,14 @@ describe("Codex app-server Codex driver", () => {
       },
     });
     await Promise.resolve();
-    await expect(session.handoffRuntimeRequest?.({
+    const handoff = session.handoffRuntimeRequest!({
       requestId: "race-input",
       turnId,
       reason: "durable_handoff",
-    })).resolves.toBe("already_settled");
+      signal: new AbortController().signal,
+    });
+    expect(handoff.result).toBe("already_settled");
+    await expect(handoff.cleanup).resolves.toBeUndefined();
     releaseResolution();
     await resolution;
     await providerRequest;

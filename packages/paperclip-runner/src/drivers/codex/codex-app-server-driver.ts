@@ -14,6 +14,7 @@ import type {
   HarnessSessionRecoveryResult,
   HarnessGoalOperation,
   HarnessRuntimeRequest,
+  HarnessRuntimeRequestHandoff,
   HarnessRuntimeRequestResolution,
   PaperclipQuestionSet,
   HarnessThreadGoal,
@@ -1526,11 +1527,15 @@ class CodexHarnessSession implements HarnessSession {
     pending.settle(response);
   }
 
-  async handoffRuntimeRequest(input: {
+  handoffRuntimeRequest(input: {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
-  }): Promise<"handed_off" | "already_settled"> {
+    signal: AbortSignal;
+  }): HarnessRuntimeRequestHandoff {
+    if (input.signal.aborted) {
+      return { result: "already_settled", cleanup: Promise.resolve() };
+    }
     this.#requireCapability("runtimeRequestResolution");
     const pending = this.#pendingRuntimeRequests.get(input.requestId);
     if (
@@ -1539,26 +1544,28 @@ class CodexHarnessSession implements HarnessSession {
       || pending.request.turnId !== input.turnId
       || this.#activeTurnId !== input.turnId
       || pending.settlingResolution !== undefined
-    ) return "already_settled";
-    if (!this.#pendingRuntimeRequests.delete(input.requestId)) return "already_settled";
+    ) return { result: "already_settled", cleanup: Promise.resolve() };
+    if (!this.#pendingRuntimeRequests.delete(input.requestId)) {
+      return { result: "already_settled", cleanup: Promise.resolve() };
+    }
     this.#emit(
       "runtime_request.expired",
       harnessRuntimeInputExpiredOutcome(pending.request, input.reason),
       { turnId: input.turnId, itemId: pending.request.itemId },
     );
     pending.settle(safeRequestResponse(pending.request.method, "cancel"));
-    await Promise.allSettled([
-      this.#transport.resolveRuntimeRequest?.({
+    const cleanup = Promise.allSettled([
+      Promise.resolve().then(() => this.#transport.resolveRuntimeRequest?.({
         requestId: input.requestId,
         turnId: input.turnId,
         resolution: { action: "cancel" },
-      }),
-      this.#transport.request("turn/interrupt", {
+      })),
+      Promise.resolve().then(() => this.#transport.request("turn/interrupt", {
         threadId: this.#opened.threadId,
         turnId: input.turnId,
-      }),
-    ]);
-    return "handed_off";
+      })),
+    ]).then(() => undefined);
+    return { result: "handed_off", cleanup };
   }
 
   async goal(input: HarnessGoalOperation): Promise<HarnessThreadGoal | null> {
