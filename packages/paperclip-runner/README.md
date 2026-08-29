@@ -72,10 +72,12 @@ event values again before they can enter provider state.
 
 Validated ACPX runtime events normalize into the same provider-neutral activity
 families as the direct Codex transport. Reasoning contents stay private. Tool
-targets admit only a bounded, portable relative-path subset; platform-specific
-drive, root, backslash, traversal, and URI spellings are omitted instead of
-being reinterpreted on another host. Operational semantic-result and terminal
-events remain reserved for the stateful adapter rather than being duplicated.
+targets are resolved within the workspace under the provider host's path
+semantics before becoming bounded, display-only PRP safe paths. Windows
+separators are canonicalized while valid POSIX colon, backslash, and percent
+characters remain unchanged; consumers must not reinterpret the display value
+as file-access authority. Operational semantic-result and terminal events
+remain reserved for the stateful adapter rather than being duplicated.
 
 Run the complete contract gate with:
 

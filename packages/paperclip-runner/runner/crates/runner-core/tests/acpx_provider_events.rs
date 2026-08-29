@@ -81,7 +81,7 @@ fn maps_usage_and_review_status_but_ignores_inventory_updates() {
 }
 
 #[test]
-fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
+fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
     let started = normalize(
         AcpxRuntimeEventKind::ToolCall,
         json!({
@@ -117,180 +117,39 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     assert_eq!(completed[0].payload["outputTruncated"], true);
     assert!(!completed[0].payload.to_string().contains("top-secret"));
 
-    for platform_path in [r"..\..\secret", r"src\..\secret", r"\rooted\secret"] {
-        let backslash_escape = normalize(
-            AcpxRuntimeEventKind::ToolCall,
-            json!({
-                "type":"tool_call",
-                "tag":"tool_call_update",
-                "toolCallId":"tool-backslash",
-                "kind":"read",
-                "status":"completed",
-                "locations":[{"path":platform_path}]
-            }),
-        );
-        assert_eq!(
-            backslash_escape[0].payload["target"],
-            serde_json::Value::Null
-        );
-    }
-
-    let windows_absolute = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-2",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"C:\\Users\\alice\\repo\\src\\main.rs"}]
-        }),
-    );
-    assert_eq!(
-        windows_absolute[0].payload["target"],
-        serde_json::Value::Null
-    );
-
-    let windows_unc = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-unc",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"\\\\server\\share\\repo\\src\\main.rs"}]
-        }),
-    );
-    assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
-
-    let windows_drive_relative = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-3",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"a:b/file.txt"}]
-        }),
-    );
-    assert_eq!(
-        windows_drive_relative[0].payload["target"],
-        serde_json::Value::Null,
-    );
-
-    for posix_path in ["src:main.rs", "foo:bar/baz"] {
-        let colon_component = normalize(
-            AcpxRuntimeEventKind::ToolCall,
-            json!({
-                "type":"tool_call",
-                "tag":"tool_call_update",
-                "toolCallId":"tool-posix-colon",
-                "kind":"read",
-                "status":"completed",
-                "locations":[{"path":posix_path}]
-            }),
-        );
-        assert_eq!(
-            colon_component[0].payload["target"],
-            serde_json::Value::Null
-        );
-    }
-
-    let extensible_scheme = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-extensible-scheme",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"custom:/host/path"}]
-        }),
-    );
-    assert_eq!(
-        extensible_scheme[0].payload["target"],
-        serde_json::Value::Null
-    );
-
-    for unsafe_path in [
-        "custom://host/path",
-        "custom:/host/path",
-        r"custom:\host\path",
-        "s3:/bucket/key",
-        r"sftp:\host\secret",
-        "git+ssh:/host/repo",
-        r"https:\host\secret",
-        r"file:\server\share",
-        r"https:\\host\secret",
-        r"file:\\server\share",
+    for display_path in [
+        "src:main.rs",
+        "foo:bar/baz",
+        r"folder\literal",
+        r"foo\..\bar",
+        "reports/100%/summary.txt",
     ] {
-        let backslash_scheme = normalize(
+        let display = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
                 "type":"tool_call",
                 "tag":"tool_call_update",
-                "toolCallId":"tool-scheme",
+                "toolCallId":"tool-display",
                 "kind":"read",
                 "status":"completed",
-                "locations":[{"path":unsafe_path}]
+                "locations":[{"path":display_path}]
             }),
         );
-        assert_eq!(
-            backslash_scheme[0].payload["target"],
-            serde_json::Value::Null,
-            "scheme-qualified provider path should be rejected: {unsafe_path}",
-        );
+        assert_eq!(display[0].payload["target"], display_path);
     }
 
-    let posix_colon_backslash = normalize(
+    let uri_only = normalize(
         AcpxRuntimeEventKind::ToolCall,
         json!({
             "type":"tool_call",
             "tag":"tool_call_update",
-            "toolCallId":"tool-posix-colon-backslash",
+            "toolCallId":"tool-uri",
             "kind":"read",
             "status":"completed",
-            "locations":[{"path":r"foo:bar\baz"}]
+            "locations":[{"uri":"https://example.test/private"}]
         }),
     );
-    assert_eq!(
-        posix_colon_backslash[0].payload["target"],
-        serde_json::Value::Null
-    );
-
-    let percent_path = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-posix-percent",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":"reports/100%/summary.txt"}]
-        }),
-    );
-    assert_eq!(
-        percent_path[0].payload["target"],
-        "reports/100%/summary.txt"
-    );
-
-    let custom_backslash_scheme = normalize(
-        AcpxRuntimeEventKind::ToolCall,
-        json!({
-            "type":"tool_call",
-            "tag":"tool_call_update",
-            "toolCallId":"tool-custom-backslash",
-            "kind":"read",
-            "status":"completed",
-            "locations":[{"path":r"custom:\host\path"}]
-        }),
-    );
-    assert_eq!(
-        custom_backslash_scheme[0].payload["target"],
-        serde_json::Value::Null
-    );
+    assert_eq!(uri_only[0].payload["target"], serde_json::Value::Null);
 }
 
 #[test]

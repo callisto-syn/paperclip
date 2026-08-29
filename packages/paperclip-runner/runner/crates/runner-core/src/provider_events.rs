@@ -668,19 +668,17 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
     };
+    // The sidecar has already resolved this under the provider host's path
+    // semantics and canonicalized Windows separators. This boundary enforces
+    // the PRP safePath contract without reinterpreting valid POSIX filename
+    // characters. URI-only locations never become filesystem display targets.
     let raw_path = value
         .get("path")
-        .or_else(|| value.get("uri"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    // PRP targets cross machines and are later consumed by platform-neutral
-    // transcript code. Admit only the portable relative subset: a value that
-    // could change meaning as a Windows drive/root, URI, or backslash traversal
-    // is omitted instead of being interpreted according to the runner host.
     if raw_path.is_empty()
         || raw_path.starts_with('/')
-        || raw_path.contains('\\')
-        || raw_path.contains(':')
+        || raw_path.contains('\0')
         || raw_path.split('/').any(|segment| segment == "..")
     {
         Value::Null
@@ -694,93 +692,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_foreign_absolute_paths_on_every_runner_platform() {
-        for location in [r"C:\Users\alice\file.txt", r"\\server\share\file.txt"] {
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": location}))),
-                Value::Null,
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_drive_relative_syntax_on_every_platform() {
-        let normalized = safe_acpx_location(Some(&json!({"path": "a:b/file.txt"})));
-        assert_eq!(normalized, Value::Null);
-    }
-
-    #[test]
-    fn rejects_backslash_spelled_schemes_on_every_host_platform() {
+    fn enforces_the_declared_safe_path_contract() {
         for location in [
-            r"https:\host\secret",
-            r"file:\server\share",
-            r"https:\\host\secret",
-            r"file:\\server\share",
+            "/absolute/path",
+            "../secret",
+            "src/../../secret",
+            "bad\0name",
         ] {
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": location}))),
-                Value::Null,
+                Value::Null
             );
         }
-    }
-
-    #[test]
-    fn rejects_nonportable_colon_and_backslash_targets() {
-        let normalized = safe_acpx_location(Some(&json!({"path": r"foo:bar\baz"})));
-        assert_eq!(normalized, Value::Null);
-    }
-
-    #[test]
-    fn rejects_backslash_root_and_traversal_on_every_platform() {
-        for location in [r"foo\..\bar", r"\rooted\name"] {
-            let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            assert_eq!(normalized, Value::Null);
-        }
-    }
-
-    #[test]
-    fn preserves_portable_percent_components_but_omits_ambiguous_separators() {
-        let literal = safe_acpx_location(Some(&json!({"path": r"folder\name"})));
-        assert_eq!(literal, Value::Null);
-        let percent = safe_acpx_location(Some(&json!({"path": "reports/100%/summary.txt"})));
         assert_eq!(
-            percent,
-            Value::String("reports/100%/summary.txt".to_owned())
+            safe_acpx_location(Some(&json!({"uri": "https://example.test/private"}))),
+            Value::Null,
         );
-        let custom = safe_acpx_location(Some(&json!({"path": r"team:alpha\path"})));
-        assert_eq!(custom, Value::Null);
     }
 
     #[test]
-    fn rejects_colon_components_that_are_not_portable() {
-        for location in ["src:main.rs", "foo:bar/baz"] {
-            let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            assert_eq!(normalized, Value::Null);
-        }
-    }
-
-    #[test]
-    fn rejects_unlisted_single_separator_uri_prefixes() {
-        for location in ["custom:/host/path", r"custom:\host\path"] {
-            assert_eq!(
-                safe_acpx_location(Some(&json!({"path": location}))),
-                Value::Null,
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_unambiguous_uri_display_paths() {
+    fn preserves_valid_posix_display_characters() {
         for location in [
-            "custom://host/path",
-            "s3:/bucket/key",
-            r"sftp:\host\secret",
-            "git+ssh:/host/repo",
+            "src:main.rs",
+            "foo:bar/baz",
+            r"folder\literal",
+            r"foo\..\bar",
+            "reports/100%/summary.txt",
         ] {
             assert_eq!(
                 safe_acpx_location(Some(&json!({"path": location}))),
-                Value::Null,
-                "scheme-qualified provider path should be rejected: {location}",
+                Value::String(location.to_owned()),
             );
         }
     }
