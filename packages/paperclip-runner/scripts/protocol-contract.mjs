@@ -392,7 +392,176 @@ export function assertAcpxQuestionFixture(fixture) {
     }
     assertAcpxPropertyValue(name, property, value);
   }
+  const projected = projectAcpxFixture(params, fixture.canonicalResponse);
+  if (canonicalFixtureJson(projected.questionSet) !== canonicalFixtureJson(fixture.canonicalQuestionSet)) {
+    throw contractError("invalid_acpx_question_fixture", "native and canonical question sets differ");
+  }
+  if (canonicalFixtureJson(projected.nativeResponse) !== canonicalFixtureJson(fixture.nativeResponse)) {
+    throw contractError("invalid_acpx_question_fixture", "canonical and native responses differ");
+  }
   return fixture;
+}
+
+function projectAcpxFixture(params, canonicalResponse) {
+  const schema = params.requestedSchema;
+  const required = new Set(schema.required ?? []);
+  const bindings = Object.entries(schema.properties).map(([name, property], index) =>
+    projectAcpxProperty(name, property, index, required.has(name))
+  );
+  const title = optionalFixtureText(schema.title) ?? "Additional information needed";
+  const descriptions = [
+    optionalFixtureText(params.message),
+    optionalFixtureText(schema.description),
+  ].filter((value, index, all) => value !== undefined && value !== title && all.indexOf(value) === index);
+  const questionSet = {
+    schema: "paperclip.question_set.v1",
+    title,
+    ...(descriptions.length > 0 ? { description: descriptions.join("\n\n") } : {}),
+    submitLabel: "Submit answers",
+    questions: bindings.map((binding) => binding.question),
+  };
+  const content = {};
+  for (const binding of bindings) {
+    const answer = canonicalResponse.answers?.[binding.question.id];
+    if (!answer) continue;
+    if (binding.type === "string" && binding.question.answerMode === "text") {
+      if (answer.text !== undefined) content[binding.name] = answer.text;
+    } else if (binding.type === "number" || binding.type === "integer") {
+      if (answer.text !== undefined) content[binding.name] = Number(answer.text);
+    } else if (binding.type === "boolean") {
+      const selected = answer.selectedOptionIds?.[0];
+      if (selected !== undefined) content[binding.name] = binding.optionValues.get(selected) === "true";
+    } else {
+      const selected = (answer.selectedOptionIds ?? []).map((id) => binding.optionValues.get(id));
+      if (binding.type === "array") content[binding.name] = selected;
+      else if (selected[0] !== undefined) content[binding.name] = selected[0];
+    }
+  }
+  return { questionSet, nativeResponse: { action: "accept", content } };
+}
+
+function projectAcpxProperty(name, property, index, required) {
+  const id = stableAcpxFieldId(name, index);
+  const header = optionalFixtureText(property.title) ?? name;
+  const base = {
+    id,
+    header,
+    prompt: optionalFixtureText(property.description) ?? header,
+    required,
+  };
+  if (property.type === "string") {
+    const options = acpxNativeOptions(property);
+    if (options.length > 0) return projectedAcpxOptions(name, property.type, base, options, "single_select");
+    return {
+      name,
+      type: property.type,
+      optionValues: new Map(),
+      question: {
+        ...base,
+        answerMode: "text",
+        textValidation: {
+          inputType: "text",
+          ...(finiteNonNegativeFixtureInteger(property.minLength) !== undefined
+            ? { minLength: property.minLength }
+            : {}),
+          ...(finiteNonNegativeFixtureInteger(property.maxLength) !== undefined
+            ? { maxLength: property.maxLength }
+            : {}),
+          ...(optionalFixtureText(property.pattern) !== undefined
+            ? { pattern: property.pattern }
+            : {}),
+        },
+      },
+    };
+  }
+  if (property.type === "number" || property.type === "integer") {
+    return {
+      name,
+      type: property.type,
+      optionValues: new Map(),
+      question: {
+        ...base,
+        answerMode: "text",
+        textValidation: {
+          inputType: property.type,
+          ...(Number.isFinite(property.minimum) ? { minimum: property.minimum } : {}),
+          ...(Number.isFinite(property.maximum) ? { maximum: property.maximum } : {}),
+        },
+      },
+    };
+  }
+  if (property.type === "boolean") {
+    return projectedAcpxOptions(name, property.type, base, [
+      { value: "true", label: "Yes" },
+      { value: "false", label: "No" },
+    ], "single_select");
+  }
+  return projectedAcpxOptions(
+    name,
+    property.type,
+    base,
+    acpxNativeOptions(property.items),
+    "multi_select",
+  );
+}
+
+function projectedAcpxOptions(name, type, base, nativeOptions, answerMode) {
+  const optionValues = new Map();
+  const options = nativeOptions.map((option, index) => {
+    const id = `option-${index + 1}`;
+    optionValues.set(id, option.value);
+    return {
+      id,
+      label: option.label,
+      ...(option.description !== undefined ? { description: option.description } : {}),
+    };
+  });
+  return { name, type, optionValues, question: { ...base, answerMode, options } };
+}
+
+function acpxNativeOptions(property) {
+  const titled = Array.isArray(property.oneOf)
+    ? property.oneOf
+    : Array.isArray(property.anyOf)
+      ? property.anyOf
+      : null;
+  if (titled) {
+    return titled.map((entry) => ({
+      value: entry.const,
+      label: optionalFixtureText(entry.title) ?? entry.const,
+      ...(optionalFixtureText(entry.description) !== undefined
+        ? { description: entry.description }
+        : {}),
+    }));
+  }
+  return (property.enum ?? []).map((value) => ({ value, label: value }));
+}
+
+function stableAcpxFieldId(value, index) {
+  const readable = value
+    .trim()
+    .replace(/[^A-Za-z0-9._:-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return `field-${index + 1}-${readable || "value"}-${sha256(value).slice(0, 12)}`;
+}
+
+function optionalFixtureText(value) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function finiteNonNegativeFixtureInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function canonicalFixtureJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalFixtureJson).join(",")}]`;
+  if (isPlainRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalFixtureJson(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function assertAcpxProperty(name, value) {

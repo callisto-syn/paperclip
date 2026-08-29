@@ -138,6 +138,20 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
     () => assertAcpxQuestionFixture(missingResponse),
     /native response omits required property environment/,
   );
+
+  const divergentQuestion = structuredClone(canonical);
+  divergentQuestion.nativeRequest.params.requestedSchema.required = [];
+  assert.throws(
+    () => assertAcpxQuestionFixture(divergentQuestion),
+    /native and canonical question sets differ/,
+  );
+
+  const divergentResponse = structuredClone(canonical);
+  divergentResponse.nativeResponse.content.environment = "production";
+  assert.throws(
+    () => assertAcpxQuestionFixture(divergentResponse),
+    /canonical and native responses differ/,
+  );
 });
 
 test("every question adapter fixture satisfies its declared schema", async () => {
