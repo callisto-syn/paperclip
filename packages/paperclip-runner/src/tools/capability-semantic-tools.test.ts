@@ -1056,6 +1056,13 @@ describe("Capability exposure and authorization", () => {
         runId: OPEN.identity.runId,
         scenarioGrants: ["cases:write"],
         now: () => Date.now(),
+        resolveExpiredExtensionReceipt: () => ({
+          value: {
+            key: "case-heartbeat-loss",
+            body: "Authoritative recovered body",
+            upserted: true,
+          },
+        }),
       });
       const recovered = await restored.invoke(invocation);
       const original = await inFlight;
@@ -1063,6 +1070,12 @@ describe("Capability exposure and authorization", () => {
       expect(original).toMatchObject({ ok: true });
       if (!recovered.ok || !original.ok) throw new Error("expected recovered execution");
       expect(recovered.operationResultId).toBe(original.operationResultId);
+      expect(recovered.value).toEqual({
+        key: "case-heartbeat-loss",
+        body: "Authoritative recovered body",
+        upserted: true,
+      });
+      expect(original.value).toEqual(recovered.value);
     } finally {
       vi.useRealTimers();
     }

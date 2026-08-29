@@ -490,14 +490,8 @@ export class CapabilitySemanticToolRuntime {
         execution = await this.#execute(descriptor, invocation);
         resultId = execution.commandResult?.commandId ?? null;
       }
-      const finalAuthorization = this.#authorization.attachStateChange(
-        authorization.sequence,
-        beforeRevision,
-        this.#adapter.snapshot().revision,
-        execution.entityRefs,
-      );
-      const observableValue = redactForBoundary(descriptor, execution.value, "output");
-      const observableCommandResult = execution.commandResult === null
+      let observableValue = redactForBoundary(descriptor, execution.value, "output");
+      let observableCommandResult = execution.commandResult === null
         ? null
         : redactForBoundary(descriptor, toJsonValue(execution.commandResult), "output") as CapabilityToolSuccess["commandResult"];
       if (
@@ -512,13 +506,13 @@ export class CapabilitySemanticToolRuntime {
           resultId,
           value: structuredClone(execution),
         };
-        const completedResultId = await this.#completeExtensionExecution(
+        const published = await this.#completeExtensionExecution(
           extensionIdempotencyKey,
           extensionRecord,
           completed,
           observableValue,
         );
-        if (completedResultId === null) {
+        if (published === null) {
           // The extension already ran. Retain and renew its durable ownership
           // so another runtime cannot execute it again while this runtime can
           // still publish the exact completed receipt on an identical retry.
@@ -539,8 +533,22 @@ export class CapabilitySemanticToolRuntime {
           }
           throw new Error("durable extension execution lease was superseded");
         }
-        resultId = completedResultId;
-        completed.resultId = completedResultId;
+        // A trusted recovery may publish the durable receipt while this
+        // executor is still completing after heartbeat-store failures. Adopt
+        // that receipt instead of turning already-completed work into a
+        // denial; the durable key and canonical input were verified below.
+        resultId = published.resultId;
+        execution = structuredClone(published.value);
+        observableValue = structuredClone(published.observableValue);
+        observableCommandResult = execution.commandResult === null
+          ? null
+          : redactForBoundary(
+              descriptor,
+              toJsonValue(execution.commandResult),
+              "output",
+            ) as CapabilityToolSuccess["commandResult"];
+        completed.resultId = published.resultId;
+        completed.value = structuredClone(published.value);
         this.#stopExtensionExecutionLease(extensionRecord);
         extensionRecord.completed = completed;
         extensionRecord.execution = Promise.resolve(
@@ -549,6 +557,12 @@ export class CapabilitySemanticToolRuntime {
         extensionRecord.ownerId = null;
         extensionRecord.leaseExpiresAtMs = 0;
       }
+      const finalAuthorization = this.#authorization.attachStateChange(
+        authorization.sequence,
+        beforeRevision,
+        this.#adapter.snapshot().revision,
+        execution.entityRefs,
+      );
       let sequencedResultPersisted = false;
       if (extensionIdempotencyKey === null && resultId === null) {
         resultId = this.#persistSequencedOperationResult(observableValue);
@@ -897,7 +911,11 @@ export class CapabilitySemanticToolRuntime {
     record: ExtensionIdempotencyRecord,
     completed: { resultId: string; value: ExtensionExecution },
     observableValue: CapabilityJsonValue,
-  ): Promise<string | null> {
+  ): Promise<{
+    resultId: string;
+    value: ExtensionExecution;
+    observableValue: CapabilityJsonValue;
+  } | null> {
     // Execution already happened. Retry only the durable completion merge so
     // a lease heartbeat or unrelated snapshot update cannot discard its
     // receipt or cause the operation to execute again.
@@ -906,11 +924,13 @@ export class CapabilitySemanticToolRuntime {
       const extension = durable?.extensions.find((candidate) => candidate.key === key);
       if (durable === null || extension === undefined) return null;
       if (extension.status === "completed") {
-        return extension.input === record.input &&
-          JSON.stringify(extension.execution) === JSON.stringify(completed.value) &&
-          canonicalJson(durable.operationResults[extension.resultId]) ===
-            canonicalJson(observableValue)
-          ? extension.resultId
+        const durableResult = durable.operationResults[extension.resultId];
+        return extension.input === record.input && durableResult !== undefined
+          ? {
+              resultId: extension.resultId,
+              value: structuredClone(extension.execution),
+              observableValue: structuredClone(durableResult),
+            }
           : null;
       }
       if (extension.status !== "pending" || record.ownerId === null ||
@@ -950,7 +970,13 @@ export class CapabilitySemanticToolRuntime {
         this.#runId,
         durable,
         replacement,
-      )) return completed.resultId;
+      )) {
+        return {
+          resultId: completed.resultId,
+          value: structuredClone(completed.value),
+          observableValue: structuredClone(observableValue),
+        };
+      }
       if ((attempt + 1) % RUNTIME_PERSIST_CAS_ATTEMPTS === 0) {
         // Yield so lease heartbeats and other runtimes can make progress. The
         // bounded outer loop prevents a broken store from pinning invocation
