@@ -337,17 +337,6 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
           });
         }
       }
-      if (
-        call.input.envelope.content.digest !==
-        call.reconciled.envelope.content.digest
-      ) {
-        issues.push({
-          code: "binding_mismatch",
-          path: `/events/${call.reconciled.index}/payload/semantic_tool/content/digest`,
-          message:
-            "semantic_tool reconciled digest must match its input envelope",
-        });
-      }
     }
   }
 

@@ -47,6 +47,7 @@ function reconciledEvent(
   const result = resultPayload.semantic_tool as Record<string, unknown>;
   semanticTool.phase = "reconciled";
   for (const field of [
+    "content",
     "outcome",
     "code",
     "retryable",
@@ -145,7 +146,7 @@ describe("PRP v1 JSON Schema contract", () => {
     });
   });
 
-  it("binds a pending-call reconciliation to its original semantic input", async () => {
+  it("binds reconciliation identity while preserving recovered result content", async () => {
     const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
     const events = fixture.events as Array<Record<string, unknown>>;
     const reconciled = reconciledEvent(events);
@@ -156,6 +157,9 @@ describe("PRP v1 JSON Schema contract", () => {
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
       ok: true,
     });
+    expect(
+      (semanticTool.content as Record<string, unknown>).digest,
+    ).toBe("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
     semanticTool.operationId = "different_operation";
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
