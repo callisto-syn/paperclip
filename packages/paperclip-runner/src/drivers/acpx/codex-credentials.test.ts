@@ -40,8 +40,15 @@ describe("managed Codex credentials", () => {
     });
 
     expect(lease.mode).toBe("inline_json");
+    const cleanupIntent = join(
+      fixture.home,
+      ".paperclip-auth-cleanup-required",
+    );
     await expect(readFile(lease.path, "utf8")).resolves.toContain(
       "inline-canary",
+    );
+    await expect(readFile(cleanupIntent, "utf8")).resolves.toBe(
+      "paperclip-managed-codex-cleanup-v1\n",
     );
     if (process.platform !== "win32") {
       expect((await stat(lease.path)).mode & 0o777).toBe(0o600);
@@ -51,6 +58,35 @@ describe("managed Codex credentials", () => {
     await expect(readFile(lease.path)).rejects.toMatchObject({
       code: "ENOENT",
     });
+    await expect(readFile(cleanupIntent)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("recovers a persisted cleanup intent before admitting another provider", async () => {
+    const fixture = await credentialFixture();
+    const destination = join(fixture.home, "auth.json");
+    const cleanupIntent = join(
+      fixture.home,
+      ".paperclip-auth-cleanup-required",
+    );
+    await writeFile(destination, '{"crash_stale":true}', { mode: 0o600 });
+    await writeFile(
+      cleanupIntent,
+      "paperclip-managed-codex-cleanup-v1\n",
+      { mode: 0o600 },
+    );
+
+    const lease = await stageManagedCodexCredential({
+      agentHomeDirectory: fixture.home,
+      environment: { OPENAI_API_KEY: "launch-only-key" },
+    });
+    await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(cleanupIntent, "utf8")).resolves.toBe(
+      "paperclip-managed-codex-cleanup-v1\n",
+    );
+    await lease.close();
+    await expect(readFile(cleanupIntent)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.runIf(process.platform !== "win32")(
@@ -70,15 +106,19 @@ describe("managed Codex credentials", () => {
       let syncAttempts = 0;
       const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
         async function (this: FileHandle): Promise<void> {
-          syncAttempts += 1;
-          if (syncAttempts === 1) throw new Error("injected directory sync failure");
+          if ((await this.stat()).isDirectory()) {
+            syncAttempts += 1;
+            if (syncAttempts === 1) {
+              throw new Error("injected directory sync failure");
+            }
+          }
           await originalSync.call(this);
         },
       );
       try {
         await expect(lease.close()).resolves.toBeUndefined();
         await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
-        expect(syncAttempts).toBe(2);
+        expect(syncAttempts).toBe(3);
       } finally {
         syncSpy.mockRestore();
       }
@@ -117,7 +157,7 @@ describe("managed Codex credentials", () => {
         await expect(readFile(lease.path, "utf8")).resolves.toBe("{}");
         await expect(lease.close()).resolves.toBeUndefined();
         await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
-        expect(directorySyncAttempts).toBe(6);
+        expect(directorySyncAttempts).toBe(8);
       } finally {
         syncSpy.mockRestore();
       }
@@ -198,8 +238,12 @@ describe("managed Codex credentials", () => {
       let syncAttempts = 0;
       const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
         async function (this: FileHandle): Promise<void> {
-          syncAttempts += 1;
-          if (syncAttempts === 1) throw new Error("injected directory sync failure");
+          if ((await this.stat()).isDirectory()) {
+            syncAttempts += 1;
+            if (syncAttempts === 1) {
+              throw new Error("injected directory sync failure");
+            }
+          }
           await originalSync.call(this);
         },
       );
@@ -210,7 +254,7 @@ describe("managed Codex credentials", () => {
         });
         await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
-        expect(syncAttempts).toBe(3);
+        expect(syncAttempts).toBe(5);
       } finally {
         syncSpy.mockRestore();
       }
@@ -226,8 +270,14 @@ describe("managed Codex credentials", () => {
         sync(this: FileHandle): Promise<void>;
       };
       await probe.close();
-      const syncSpy = vi.spyOn(prototype, "sync").mockRejectedValue(
-        new Error("persistent directory sync failure"),
+      const originalSync = prototype.sync;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          if ((await this.stat()).isDirectory()) {
+            throw new Error("persistent directory sync failure");
+          }
+          await originalSync.call(this);
+        },
       );
       try {
         const staging = stageManagedCodexCredential({
@@ -266,7 +316,7 @@ describe("managed Codex credentials", () => {
         async function (this: FileHandle): Promise<void> {
           if ((await this.stat()).isDirectory()) {
             directorySyncAttempts += 1;
-            if (directorySyncAttempts > 1) {
+            if (directorySyncAttempts > 2) {
               throw new Error("persistent post-rename sync failure");
             }
           }

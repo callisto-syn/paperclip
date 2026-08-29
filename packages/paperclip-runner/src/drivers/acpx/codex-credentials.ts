@@ -14,10 +14,12 @@ const MAX_CODEX_CREDENTIAL_BYTES = 256 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_DIRECTORY_SYNC_ATTEMPTS = 8;
 const MAX_AUTONOMOUS_CREDENTIAL_CLEANUP_ATTEMPTS = 8;
+const CREDENTIAL_CLEANUP_INTENT = ".paperclip-auth-cleanup-required";
 
 interface QuarantinedCredentialCleanup {
   path: string;
   home: string;
+  intentPath: string;
   recovery: Promise<void> | null;
 }
 
@@ -55,7 +57,9 @@ export async function stageManagedCodexCredential(input: {
     throw new Error("Managed Codex credential home permissions are unsafe");
   }
   const destination = join(home, "auth.json");
+  const intentPath = join(home, CREDENTIAL_CLEANUP_INTENT);
   await recoverQuarantinedCredentialCleanup(destination, home);
+  await recoverPersistedCredentialCleanup(destination, home, intentPath);
   const environment = input.environment ?? {};
   const hasApiKey = Boolean(
     environment.CODEX_API_KEY || environment.OPENAI_API_KEY,
@@ -87,18 +91,18 @@ export async function stageManagedCodexCredential(input: {
   }
 
   if (hasApiKey) {
-    // Codex will read the API key from the launch environment, so stale
-    // auth.json removal must be durable before the provider may start. If the
-    // directory sync fails, fail staging and require the caller (or a later
-    // process) to repeat this preflight; an in-memory lease is not a durable
-    // owner across the crash that could restore the old directory entry.
+    // Codex will read the API key from the launch environment. Persist cleanup
+    // intent before touching auth.json and retain it for the lease lifetime,
+    // so a replacement runner removes stale or provider-generated auth after
+    // a crash before it admits another provider.
     try {
+      await createCredentialCleanupIntent(intentPath, home);
       await removeCredential(destination, home);
     } catch (error) {
-      quarantineCredentialCleanup(destination, home);
+      quarantineCredentialCleanup(destination, home, intentPath);
       throw error;
     }
-    return credentialLease(destination, home, "api_key");
+    return credentialLease(destination, home, intentPath, "api_key");
   }
 
   const credential = hasInlineJson
@@ -106,6 +110,7 @@ export async function stageManagedCodexCredential(input: {
     : await readManagedCredential(input.sourcePath!);
   try {
     validateCredentialDocument(credential);
+    await createCredentialCleanupIntent(intentPath, home);
     // Establish durable absence before installing a replacement. This keeps a
     // previously staged authentication document from reappearing after a
     // crash even when the following rename is interrupted.
@@ -116,7 +121,7 @@ export async function stageManagedCodexCredential(input: {
     // namespace before directory durability failed. Retain a bounded process
     // owner that removes auth.json, and make later staging recover that owner
     // before admitting another provider.
-    quarantineCredentialCleanup(destination, home);
+    quarantineCredentialCleanup(destination, home, intentPath);
     throw error;
   } finally {
     credential.fill(0);
@@ -124,16 +129,22 @@ export async function stageManagedCodexCredential(input: {
   return credentialLease(
     destination,
     home,
+    intentPath,
     hasInlineJson ? "inline_json" : "managed_file",
   );
 }
 
-function quarantineCredentialCleanup(path: string, home: string): void {
+function quarantineCredentialCleanup(
+  path: string,
+  home: string,
+  intentPath: string,
+): void {
   const existing = quarantinedCredentialCleanups.get(home);
   if (existing !== undefined) return;
   const cleanup: QuarantinedCredentialCleanup = {
     path,
     home,
+    intentPath,
     recovery: null,
   };
   quarantinedCredentialCleanups.set(home, cleanup);
@@ -154,6 +165,10 @@ function startCredentialCleanupRecovery(
       try {
         await removeReplaceableCredential(cleanup.path);
         await syncDirectory(cleanup.home);
+        await removeCredentialCleanupIntent(
+          cleanup.intentPath,
+          cleanup.home,
+        );
         quarantinedCredentialCleanups.delete(cleanup.home);
         return;
       } catch {
@@ -190,9 +205,20 @@ async function recoverQuarantinedCredentialCleanup(
   }
 }
 
+async function recoverPersistedCredentialCleanup(
+  path: string,
+  home: string,
+  intentPath: string,
+): Promise<void> {
+  if (!(await pathExists(intentPath))) return;
+  await removeCredential(path, home);
+  await removeCredentialCleanupIntent(intentPath, home);
+}
+
 function credentialLease(
   path: string,
   home: string,
+  intentPath: string,
   mode: ManagedCodexCredentialMode,
 ): ManagedCodexCredentialLease {
   let closed = false;
@@ -201,10 +227,59 @@ function credentialLease(
     mode,
     async close(): Promise<void> {
       if (closed) return;
-      await removeCredential(path, home);
-      closed = true;
+      try {
+        await removeCredential(path, home);
+        await removeCredentialCleanupIntent(intentPath, home);
+        closed = true;
+      } catch (error) {
+        quarantineCredentialCleanup(path, home, intentPath);
+        throw error;
+      }
     },
   });
+}
+
+async function createCredentialCleanupIntent(
+  intentPath: string,
+  home: string,
+): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(
+      intentPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      PRIVATE_FILE_MODE,
+    );
+    await handle.chmod(PRIVATE_FILE_MODE);
+    await handle.writeFile("paperclip-managed-codex-cleanup-v1\n", "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await syncDirectoryDurably(home);
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function removeCredentialCleanupIntent(
+  intentPath: string,
+  home: string,
+): Promise<void> {
+  await removeReplaceableCredential(intentPath);
+  await syncDirectoryDurably(home);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function boundedInlineCredential(value: string): Buffer {
