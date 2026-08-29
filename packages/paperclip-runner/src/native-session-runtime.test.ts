@@ -939,6 +939,64 @@ describe("executeNativeSession recovery", () => {
     expect(openRun).not.toHaveBeenCalled();
   });
 
+  it("quarantines an attached session when control-plane run admission fails", async () => {
+    const admissionFailure = new Error("control-plane admission failed");
+    const openRun = vi.fn(async () => {
+      throw admissionFailure;
+    });
+    const attachRun = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
+    const startTurn = vi.fn(async () => ({ turnId: "unexpected" }));
+    const onSession = vi.fn();
+    const existingSession: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      attachRun,
+      async *events() {},
+      startTurn,
+      async result() { return null; },
+      async snapshot() { throw new Error("unexpected snapshot"); },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "existing-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { throw new Error("unexpected open"); },
+    };
+    const port: ControlPlanePort = {
+      openRun,
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      existingSession,
+      onSession,
+    })).rejects.toBe(admissionFailure);
+    expect(attachRun).toHaveBeenCalledWith({ identity });
+    expect(openRun).toHaveBeenCalledOnce();
+    expect(onSession).toHaveBeenCalledOnce();
+    expect(onSession).toHaveBeenCalledWith(null);
+    expect(close).toHaveBeenCalledWith({
+      reason: "native control-plane run admission failed",
+    });
+    expect(startTurn).not.toHaveBeenCalled();
+  });
+
   it("rejects checkpoint adoption when the requested session id is absent", async () => {
     const openRun = vi.fn(async () => undefined);
     const openSession = vi.fn();

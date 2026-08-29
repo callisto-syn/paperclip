@@ -498,11 +498,31 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     // control-plane state because ControlPlanePort has no rollback operation.
     await options.existingSession.attachRun({ identity });
   }
-  await options.controlPlane.openRun({
-    identity,
-    backendKind: descriptor.kind,
-    sourceInstanceId: options.runnerInstanceId,
-  });
+  try {
+    await options.controlPlane.openRun({
+      identity,
+      backendKind: descriptor.kind,
+      sourceInstanceId: options.runnerInstanceId,
+    });
+  } catch (error) {
+    const attachedSession = options.existingSession;
+    if (attachedSession) {
+      // attachRun mutates the retained provider session to the new run. If
+      // durable admission then fails, that session no longer represents the
+      // previously retained run and must not remain available for reuse.
+      options.onSession?.(null);
+      const closeSettlement = Promise.allSettled([
+        Promise.resolve().then(() => attachedSession.close({
+          reason: "native control-plane run admission failed",
+        })),
+      ]);
+      await settlesWithin(
+        closeSettlement,
+        FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+      );
+    }
+    throw error;
+  }
   if (persistedSession) {
     persistedSession = await reconcileRecoveryCursor({
       controlPlane: options.controlPlane,
