@@ -49,6 +49,21 @@ export async function awaitSidecarCleanupWithin(
   }
 }
 
+export async function combineSidecarAdmissionCleanups(
+  cleanups: readonly Promise<void>[],
+): Promise<void> {
+  const outcomes = await Promise.allSettled(cleanups);
+  const errors = outcomes.flatMap((outcome) =>
+    outcome.status === "rejected" ? [outcome.reason as unknown] : []
+  );
+  if (errors.length > 0) {
+    throw new AggregateError(
+      errors,
+      "ACPX failed-admission cleanup did not release provider ownership",
+    );
+  }
+}
+
 export async function closeActiveSidecarHostWithin(
   host: Pick<OpenedAcpxSidecarHost, "close">,
   reason: string,

@@ -55,6 +55,7 @@ import {
   boundedIdentity,
   closeActiveSidecarHostWithin,
   closeSidecarHostForCommand,
+  combineSidecarAdmissionCleanups,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   recoverSidecarHostCleanup,
@@ -1109,11 +1110,20 @@ function retainActiveHostCleanup(
 
 function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {
   const prior = failedAdmissionCleanup;
-  const retained = Promise.allSettled(
+  const retained = combineSidecarAdmissionCleanups(
     prior ? [prior, cleanup] : [cleanup],
-  ).then(() => undefined);
+  );
   failedAdmissionCleanup = retained;
-  void retained.finally(() => {
-    if (failedAdmissionCleanup === retained) failedAdmissionCleanup = null;
-  });
+  void retained.then(
+    () => {
+      if (failedAdmissionCleanup === retained) failedAdmissionCleanup = null;
+    },
+    (error: unknown) => {
+      // A rejected cleanup can mean the provider survived termination. Keep
+      // the admission guard owned and retire this sidecar; never turn rejection
+      // into a successful settlement that permits a second provider.
+      diagnostic("failed_admission_cleanup_failed", safeMessage(error));
+      requestShutdown("ACPX failed-admission cleanup could not recover");
+    },
+  );
 }

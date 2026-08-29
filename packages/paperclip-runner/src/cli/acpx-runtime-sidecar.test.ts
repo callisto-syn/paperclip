@@ -8,6 +8,7 @@ import {
   awaitSidecarCleanupWithin,
   closeActiveSidecarHostWithin,
   closeSidecarHostForCommand,
+  combineSidecarAdmissionCleanups,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   recoverSidecarHostCleanup,
@@ -75,6 +76,29 @@ describe("Codex ACPX runtime sidecar", () => {
     await cleanup;
     expect(settled).toBe(true);
     await expect(awaitSidecarCleanupWithin(cleanup, 1)).resolves.toBe("settled");
+  });
+
+  it("preserves failed-admission rejection until every cleanup settles", async () => {
+    let finishCleanup!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const retained = combineSidecarAdmissionCleanups([
+      Promise.reject(new Error("provider survived termination")),
+      pending,
+    ]);
+    let settled = false;
+    void retained.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishCleanup();
+    await expect(retained).rejects.toThrow(
+      "did not release provider ownership",
+    );
   });
 
   it("bounds active-host cleanup during sidecar shutdown", async () => {
