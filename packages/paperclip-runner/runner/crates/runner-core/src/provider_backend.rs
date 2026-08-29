@@ -282,6 +282,21 @@ impl CodexProviderState {
         }
         Ok(())
     }
+
+    fn reconcile_active_provider_turn(&mut self, active_provider_turn_id: Option<String>) {
+        self.active_provider_turn_id = active_provider_turn_id;
+        if self.active_provider_turn_id.is_some() {
+            // A newly discovered turn supersedes completion authority from the
+            // prior turn. Persisting both would make the recovered state
+            // invalid and could misclassify a later provider exit.
+            self.completed_turn_authoritative = false;
+        }
+        self.lifecycle = if self.active_provider_turn_id.is_some() {
+            "turn_active".to_owned()
+        } else {
+            "session_open".to_owned()
+        };
+    }
 }
 
 pub struct CodexCommandExecutor {
@@ -361,20 +376,17 @@ impl CodexCommandExecutor {
             CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
                 DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
             })?;
-        provider.restore_completed_turn_authority(state.completed_turn_authoritative);
         let recovered_active_turn_id = provider.active_provider_turn_id().map(str::to_owned);
+        provider.restore_completed_turn_authority(
+            state.completed_turn_authoritative && recovered_active_turn_id.is_none(),
+        );
         self.provider = Some(provider);
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
             let state = self
                 .state
                 .as_mut()
                 .expect("Codex state remains available during recovery");
-            state.active_provider_turn_id = recovered_active_turn_id.clone();
-            state.lifecycle = if recovered_active_turn_id.is_some() {
-                "turn_active".to_owned()
-            } else {
-                "session_open".to_owned()
-            };
+            state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
             state.push_event(NormalizedProviderEvent {
                 event_type: "session.reconciled".to_owned(),
                 priority: EventPriority::P0,
@@ -990,6 +1002,38 @@ mod tests {
             next_provider_event_seq: initial_provider_event_seq(),
         };
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn recovered_active_turn_revokes_prior_completion_authority() {
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+            },
+            None,
+        );
+        state.thread_id = Some("thread-1".to_owned());
+        state.lifecycle = "session_open".to_owned();
+        state.completed_turn_authoritative = true;
+
+        state.reconcile_active_provider_turn(Some("turn-2".to_owned()));
+
+        assert_eq!(state.lifecycle, "turn_active");
+        assert_eq!(state.active_provider_turn_id.as_deref(), Some("turn-2"));
+        assert!(!state.completed_turn_authoritative);
+        assert!(state.validate().is_ok());
     }
 
     #[test]
