@@ -24,6 +24,8 @@ fn temporary_directory(label: &str) -> PathBuf {
         std::process::id()
     ));
     fs::create_dir_all(&directory).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
     directory
 }
 
@@ -148,6 +150,24 @@ fn rejects_a_symlinked_runner_state_directory() {
     let error = AcpxSuspensionCheckpointStore::new(&linked)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("real directory"), "{error}");
+    assert!(error.contains("must not be a symlink"), "{error}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_an_existing_runner_state_directory_that_is_not_private() {
+    let directory = temporary_directory("public-state");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let error = AcpxSuspensionCheckpointStore::new(&directory)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("not private"), "{error}");
+    assert_eq!(
+        fs::metadata(&directory).unwrap().permissions().mode() & 0o077,
+        0o055
+    );
     fs::remove_dir_all(directory).unwrap();
 }

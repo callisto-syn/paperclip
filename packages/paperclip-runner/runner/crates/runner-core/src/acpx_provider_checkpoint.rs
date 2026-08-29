@@ -1,11 +1,11 @@
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::DirBuilderExt;
 
 use serde::{Deserialize, Serialize};
 
@@ -212,20 +212,22 @@ fn read_checkpoint_bytes(
 }
 
 fn secure_directory(path: &Path, label: &str) -> Result<(), LocalRunnerError> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
             return Err(LocalRunnerError::invalid(format!(
-                "{label} directory must be a real directory"
-            )));
+                "failed to create {label} directory: {error}"
+            )))
         }
     }
-    fs::create_dir_all(path).map_err(|error| {
-        LocalRunnerError::invalid(format!("failed to create {label} directory: {error}"))
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        LocalRunnerError::invalid(format!("failed to protect {label} directory: {error}"))
-    })?;
+    // The leaf is created with its private mode in the atomic mkdir operation.
+    // Never chmod a path after a metadata check: an attacker could replace the
+    // leaf with a symlink between those calls and redirect the permission write.
+    // Existing paths must already satisfy the same fail-closed contract.
     verify_private_directory(path).map_err(|error| {
         LocalRunnerError::invalid(format!("{label} directory is not private: {error}"))
     })
