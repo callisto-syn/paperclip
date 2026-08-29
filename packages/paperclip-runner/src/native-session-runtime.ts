@@ -16,6 +16,7 @@ const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
 const QUARANTINED_SESSION_CLOSE_RETRY_MS = 60_000;
+const QUARANTINED_SESSION_ADMISSION_GRACE_MS = 3_000;
 
 interface QuarantinedSessionCleanup {
   session: NativeSession;
@@ -245,18 +246,23 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
         "native session quarantined admission recovery",
       );
     // The current recovery may still be in its bounded retry delay and not
-    // have exposed cleanup.attempt yet. Observe that owner rather than
-    // rejecting admission in the gap immediately before a successful close.
-    // A quarantined session has already had its mutation authority revoked,
-    // and NativeSession.close is required to own and settle its cleanup. Do
-    // not abandon that live owner at an arbitrary wall-clock boundary: doing
-    // so can reject a new execution immediately before a successful release.
-    // Admission remains fail-closed by waiting for the exact recovery owner;
-    // a rejected finite batch leaves the entry quarantined and is rejected
-    // below, while a fulfilled batch has removed it from the set.
+    // have exposed cleanup.attempt yet. Observe that owner for one finite
+    // admission grace, but never let a broken close promise block every later
+    // execution indefinitely. The recovery remains observed in the global
+    // owner set after this caller fails closed.
     observations.push(recovery.catch(() => undefined));
   }
-  await Promise.all(observations);
+  if (
+    observations.length > 0
+    && !(await settlesWithin(
+      Promise.all(observations),
+      QUARANTINED_SESSION_ADMISSION_GRACE_MS,
+    ))
+  ) {
+    throw new Error(
+      "native_session_cleanup_quarantined: prior session cleanup exceeded the admission grace",
+    );
+  }
   if (quarantinedSessionCleanups.size > 0) {
     throw new Error(
       "native_session_cleanup_quarantined: prior session cleanup remains incomplete",
