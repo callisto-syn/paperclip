@@ -1085,6 +1085,62 @@ describe("executeNativeSession recovery", () => {
     expect(openSession).not.toHaveBeenCalled();
   });
 
+  it("proves required provider recovery before re-opening the durable run", async () => {
+    const checkpoint: PersistedNativeSession = {
+      backendKind: "mock",
+      sessionId: "driver-unrecoverable",
+      identity,
+      providerSessionId: "provider-unrecoverable",
+      providerRecoveryPolicy: "same_session_only",
+      cursor: "0",
+      activeTurnId: "turn-unrecoverable",
+      pendingRuntimeRequests: [],
+      lineage: [],
+    };
+    const openRun = vi.fn(async () => undefined);
+    const completeRun = vi.fn(async () => undefined);
+    const recoverSession = vi.fn(async () => ({
+      recovered: false as const,
+      reason: "provider session no longer exists",
+    }));
+    const openSession = vi.fn(async () => { throw new Error("replacement is forbidden"); });
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      openSession,
+      recoverSession,
+    };
+    const port: ControlPlanePort = {
+      openRun,
+      async loadSessionCheckpoint() { return structuredClone(checkpoint); },
+      async checkpointSession() {},
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      completeRun,
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+    })).rejects.toThrow(
+      "native_session_recovery_failed: provider session no longer exists",
+    );
+
+    expect(recoverSession).toHaveBeenCalledOnce();
+    expect(openRun).not.toHaveBeenCalled();
+    expect(completeRun).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
   it("continues a provider-reported active turn without starting a duplicate turn", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",

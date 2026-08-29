@@ -490,6 +490,13 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     issueId: input.binding.issueId,
     agentId: input.binding.agentId,
   };
+  let recovered = false;
+  let session: NativeSession | null = null;
+  let continuityBreak: {
+    reason: string;
+    previousDriverSessionId: string;
+    previousProviderSessionId: string | null;
+  } | null = null;
   if (options.existingSession) {
     if (options.existingSession.attachRun === undefined) {
       throw new Error("native_session_multi_run_unavailable");
@@ -511,28 +518,13 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       );
       throw error;
     }
-  }
-  try {
-    await options.controlPlane.openRun({
-      identity,
-      backendKind: descriptor.kind,
-      sourceInstanceId: options.runnerInstanceId,
-    });
-  } catch (error) {
-    const attachedSession = options.existingSession;
-    if (attachedSession) {
-      // attachRun mutates the retained provider session to the new run. If
-      // durable admission then fails, that session no longer represents the
-      // previously retained run and must not remain available for reuse.
-      await quarantineRetainedSession(
-        attachedSession,
-        options.onSession,
-        "native control-plane run admission failed",
-      );
-    }
-    throw error;
-  }
-  if (persistedSession) {
+    session = options.existingSession;
+    recovered = true;
+  } else if (persistedSession) {
+    // A persisted checkpoint proves that this is recovery of an existing
+    // durable run. Reconcile its cursor and prove provider continuity before
+    // re-opening that run in the control plane: ControlPlanePort has no
+    // rollback operation if same-session recovery fails.
     persistedSession = await reconcileRecoveryCursor({
       controlPlane: options.controlPlane,
       checkpoint: persistedSession,
@@ -541,19 +533,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     });
     await options.controlPlane.checkpointSession?.(persistedSession);
     await options.onCheckpoint?.(persistedSession);
-  }
 
-  let recovered = false;
-  let session: NativeSession;
-  let continuityBreak: {
-    reason: string;
-    previousDriverSessionId: string;
-    previousProviderSessionId: string | null;
-  } | null = null;
-  if (options.existingSession) {
-    session = options.existingSession;
-    recovered = true;
-  } else if (persistedSession) {
     const replacementAllowed =
       persistedSession.providerRecoveryPolicy ===
       "allow_replacement_after_resume_failure";
@@ -583,7 +563,27 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       session = recovery.session;
       recovered = true;
     }
-  } else {
+  }
+  try {
+    await options.controlPlane.openRun({
+      identity,
+      backendKind: descriptor.kind,
+      sourceInstanceId: options.runnerInstanceId,
+    });
+  } catch (error) {
+    if (session) {
+      // Attachment and recovery both establish provider-side authority before
+      // durable admission. If admission then fails, the prepared session must
+      // not remain available for reuse.
+      await quarantineRetainedSession(
+        session,
+        options.onSession,
+        "native control-plane run admission failed",
+      );
+    }
+    throw error;
+  }
+  if (session === null) {
     session = await options.backend.openSession({
       identity,
       workingDirectory: input.workspace.cwd,
