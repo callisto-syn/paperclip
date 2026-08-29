@@ -784,6 +784,22 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           startedAt: "2026-08-09T00:00:00.000Z",
           completedAt: null,
         },
+        {
+          id: "task-5",
+          companyId: "company-1",
+          identifier: "MCK-5",
+          title: "Parked requester task",
+          description: null,
+          status: "backlog",
+          priority: "medium",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "actor-2",
+          checkoutRunId: null,
+          executionRunId: null,
+          startedAt: null,
+          completedAt: null,
+        },
       ],
       approvals: [
         {
@@ -842,6 +858,19 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           id: "approval-owned-requester",
           companyId: "company-1",
           taskIds: ["task-1", "task-4"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+        {
+          id: "approval-backlog-requester",
+          companyId: "company-1",
+          taskIds: ["task-1", "task-5"],
           type: "request_board_approval",
           status: "pending",
           requestedByActorId: "actor-2",
@@ -913,6 +942,16 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
+      idempotencyKey: "backlog-requester-approval-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-backlog-requester",
+        decision: "approved",
+        note: "A parked task cannot receive an executable continuation.",
+      },
+    })).resolves.toMatchObject({ disposition: "applied" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
       idempotencyKey: "unlinked-approval-decision",
       command: {
         kind: "decide_approval",
@@ -935,9 +974,10 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         { id: "approval-unlinked", status: "pending" },
         { id: "approval-terminal-requester", status: "approved" },
         { id: "approval-owned-requester", status: "approved" },
+        { id: "approval-backlog-requester", status: "approved" },
       ],
     });
-    expect(adapter.snapshot().wakes).toHaveLength(4);
+    expect(adapter.snapshot().wakes).toHaveLength(5);
     expect(adapter.snapshot().wakes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actorId: "actor-2",
@@ -949,6 +989,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         "approval-active-task",
         "approval-terminal-requester",
         "approval-owned-requester",
+        "approval-backlog-requester",
       ].map((approvalId) => expect.objectContaining({
         actorId: "actor-2",
         reason: "approval_resolved",
@@ -958,7 +999,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     const recoveryTaskIds = adapter.snapshot().wakes
       .filter((wake) => wake.taskId !== "task-2")
       .map((wake) => wake.taskId);
-    expect(recoveryTaskIds).toHaveLength(3);
+    expect(recoveryTaskIds).toHaveLength(4);
     for (const taskId of recoveryTaskIds) {
       expect(adapter.snapshot().tasks.find((candidate) => candidate.id === taskId)).toMatchObject({
         status: "todo",
@@ -967,6 +1008,15 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         executionRunId: null,
       });
     }
+    expect(adapter.snapshot().tasks.find((candidate) => candidate.id === "task-5")).toMatchObject({
+      status: "backlog",
+      assigneeActorId: "actor-2",
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    expect(adapter.snapshot().wakes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: "task-5" }),
+    ]));
     const requesterWake = adapter.snapshot().wakes.find((wake) => wake.actorId === "actor-2");
     expect(requesterWake).toMatchObject({ taskId: "task-2", status: "scheduled" });
     await expect(adapter.openFixtureRun({

@@ -847,7 +847,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             linkedTask.assigneeActorId === requester.id &&
             linkedTask.checkoutRunId === null &&
             linkedTask.executionRunId === null &&
-            ["backlog", "todo", "blocked", "in_review"].includes(linkedTask.status)
+            ["todo", "blocked", "in_review"].includes(linkedTask.status)
           ) {
             requesterTarget ??= {
               actorId: requester.id,
