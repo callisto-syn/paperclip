@@ -138,6 +138,14 @@ describe("ACPX recovery identity", () => {
     expect(() =>
       verifyExpectedAcpxIdentity(legacyExpected, permissive, legacy),
     ).toThrow(/immutable session configuration/);
+
+    expect(() =>
+      verifyExpectedAcpxIdentity(
+        { ...fixture.expected, permissionMode: "approve-all" },
+        permissive,
+        { ...legacy, permissionMode: "approve-all" },
+      ),
+    ).toThrow(/cannot grant permissions beyond approve-reads/);
   });
 
   it("rejects malformed records and unsafe workspace roots", async () => {

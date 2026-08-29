@@ -185,13 +185,19 @@ function parsePersistedRecord(
       "permissionMode",
       "profileDigest",
     ]);
+    const legacyPermissionMode = record.permissionMode ?? "approve-reads";
+    if (legacyPermissionMode === "approve-all") {
+      throw new Error(
+        "Legacy ACPX identity records cannot grant permissions beyond approve-reads",
+      );
+    }
     return {
       record: validatedRecord({
         ...record,
         schema: ACPX_IDENTITY_RECORD_SCHEMA,
         normalizedSessionId: binding.normalizedSessionId,
         workspaceDigest: binding.workspaceDigest,
-        permissionMode: record.permissionMode ?? "approve-reads",
+        permissionMode: legacyPermissionMode,
       }),
       legacy: true,
     };
