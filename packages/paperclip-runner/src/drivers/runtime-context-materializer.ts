@@ -51,6 +51,7 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
     || runtimeName.includes("\\")
     || runtimeName.includes("\0")
     || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || segments.some(isWin32ReservedPathSegment)
   ) {
     throw new Error("runtime context skill name must be a safe relative path");
   }
@@ -65,6 +66,17 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
     throw new Error("runtime context skill name must stay inside the skills home");
   }
   return target;
+}
+
+function isWin32ReservedPathSegment(segment: string): boolean {
+  const basename = segment
+    .normalize("NFC")
+    .replace(/[ .]+$/u, "")
+    .split(".", 1)[0]!
+    .toUpperCase();
+  return /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$/u.test(
+    basename,
+  );
 }
 
 function portableRuntimeNameKey(runtimeName: string): string {
