@@ -188,7 +188,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt");
     }
 
-    for posix_path in ["src:/main.rs", "foo:/bar"] {
+    for posix_path in ["src:main.rs", "foo:bar/baz"] {
         let colon_component = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
@@ -221,17 +221,15 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"custom:/host/path"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            extensible_scheme[0].payload["target"],
-            serde_json::Value::Null
-        );
-    } else {
-        assert_eq!(extensible_scheme[0].payload["target"], "custom:/host/path");
-    }
+    assert_eq!(
+        extensible_scheme[0].payload["target"],
+        serde_json::Value::Null
+    );
 
     for unsafe_path in [
         "custom://host/path",
+        "custom:/host/path",
+        r"custom:\host\path",
         "s3:/bucket/key",
         r"sftp:\host\secret",
         "git+ssh:/host/repo",
@@ -266,7 +264,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "toolCallId":"tool-posix-colon-backslash",
             "kind":"read",
             "status":"completed",
-            "locations":[{"path":r"foo:\bar"}]
+            "locations":[{"path":r"foo:bar\baz"}]
         }),
     );
     if cfg!(windows) {
@@ -275,7 +273,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null
         );
     } else {
-        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:\bar");
+        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:bar\baz");
     }
 
     let percent_path = normalize(
@@ -305,17 +303,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":r"custom:\host\path"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            custom_backslash_scheme[0].payload["target"],
-            serde_json::Value::Null
-        );
-    } else {
-        assert_eq!(
-            custom_backslash_scheme[0].payload["target"],
-            r"custom:\host\path"
-        );
-    }
+    assert_eq!(
+        custom_backslash_scheme[0].payload["target"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]

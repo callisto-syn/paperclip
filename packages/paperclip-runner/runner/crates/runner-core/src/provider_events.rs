@@ -717,50 +717,18 @@ fn is_absolute_windows_drive_path(path: &str) -> bool {
 fn has_unsafe_uri_spelling(path: &str) -> bool {
     path.split_once(':').is_some_and(|(scheme, suffix)| {
         // A one-letter prefix is ambiguous with a valid POSIX filename (and
-        // is handled as a drive selector on Windows). A multi-letter prefix
-        // followed by one forward slash is likewise indistinguishable from a
-        // valid POSIX colon component such as `src:/main.rs`. Reject the
-        // unambiguous URI spellings and known transport schemes while keeping
-        // that POSIX spelling displayable.
+        // is handled as a drive selector on Windows). A multi-letter RFC 3986
+        // scheme followed by either path separator is transport syntax even
+        // when the particular scheme is not in a local allowlist. Fail closed
+        // on that ambiguous boundary; ordinary POSIX colon components such as
+        // `src:main.rs` remain displayable.
         let valid_scheme = scheme.len() > 1
             && scheme.bytes().enumerate().all(|(index, byte)| {
                 byte.is_ascii_alphabetic()
                     || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
             });
-        if !valid_scheme {
-            return false;
-        }
-        suffix.starts_with("//")
-            || (suffix.starts_with('\\')
-                && (cfg!(windows)
-                    || scheme.contains(['+', '-', '.'])
-                    || is_known_uri_scheme(scheme)))
-            || (suffix.starts_with('/')
-                && (scheme.contains(['+', '-', '.']) || is_known_uri_scheme(scheme)))
+        valid_scheme && (suffix.starts_with('/') || suffix.starts_with('\\'))
     })
-}
-
-fn is_known_uri_scheme(scheme: &str) -> bool {
-    matches!(
-        scheme.to_ascii_lowercase().as_str(),
-        "data"
-            | "file"
-            | "ftp"
-            | "ftps"
-            | "git"
-            | "http"
-            | "https"
-            | "jar"
-            | "mailto"
-            | "s3"
-            | "sftp"
-            | "ssh"
-            | "tel"
-            | "urn"
-            | "vscode"
-            | "ws"
-            | "wss"
-    )
 }
 
 #[cfg(test)]
@@ -804,11 +772,11 @@ mod tests {
 
     #[test]
     fn preserves_posix_relative_filenames_with_colons_and_backslashes() {
-        let normalized = safe_acpx_location(Some(&json!({"path": r"foo:\bar"})));
+        let normalized = safe_acpx_location(Some(&json!({"path": r"foo:bar\baz"})));
         if cfg!(windows) {
             assert_eq!(normalized, Value::Null);
         } else {
-            assert_eq!(normalized, Value::String(r"foo:\bar".to_owned()));
+            assert_eq!(normalized, Value::String(r"foo:bar\baz".to_owned()));
         }
     }
 
@@ -837,17 +805,17 @@ mod tests {
             percent,
             Value::String("reports/100%/summary.txt".to_owned())
         );
-        let custom = safe_acpx_location(Some(&json!({"path": r"custom:\host\path"})));
+        let custom = safe_acpx_location(Some(&json!({"path": r"team:alpha\path"})));
         if cfg!(windows) {
             assert_eq!(custom, Value::Null);
         } else {
-            assert_eq!(custom, Value::String(r"custom:\host\path".to_owned()),);
+            assert_eq!(custom, Value::String(r"team:alpha\path".to_owned()),);
         }
     }
 
     #[test]
     fn preserves_posix_colon_components() {
-        for location in ["src:/main.rs", "foo:/bar"] {
+        for location in ["src:main.rs", "foo:bar/baz"] {
             let normalized = safe_acpx_location(Some(&json!({"path": location})));
             if cfg!(windows) {
                 assert_eq!(normalized, Value::Null);
@@ -858,14 +826,12 @@ mod tests {
     }
 
     #[test]
-    fn disambiguates_extensible_single_slash_uri_prefixes() {
-        let normalized = safe_acpx_location(Some(&json!({
-            "path": "custom:/host/path",
-        })));
-        if cfg!(windows) {
-            assert_eq!(normalized, Value::Null);
-        } else {
-            assert_eq!(normalized, Value::String("custom:/host/path".to_owned()),);
+    fn rejects_unlisted_single_separator_uri_prefixes() {
+        for location in ["custom:/host/path", r"custom:\host\path"] {
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": location}))),
+                Value::Null,
+            );
         }
     }
 
