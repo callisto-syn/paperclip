@@ -338,6 +338,9 @@ describe("runtime context materialization", () => {
     for (const runtimeName of [
       "CON",
       "con.txt",
+      "CON .txt",
+      "aux .json",
+      "COM1 .md",
       "group/AUX",
       "Lpt1.json",
       "group:name",

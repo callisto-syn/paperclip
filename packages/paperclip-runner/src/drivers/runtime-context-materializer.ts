@@ -72,8 +72,8 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
 function isWin32ReservedPathSegment(segment: string): boolean {
   const basename = segment
     .normalize("NFC")
-    .replace(/[ .]+$/u, "")
     .split(".", 1)[0]!
+    .replace(/[ .]+$/u, "")
     .toUpperCase();
   return /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$/u.test(
     basename,
