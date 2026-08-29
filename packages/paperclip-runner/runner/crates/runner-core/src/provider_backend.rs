@@ -496,10 +496,6 @@ impl CodexProviderState {
         Ok(true)
     }
 
-    fn mark_receipt_limit_interrupt_sent(&mut self) {
-        self.receipt_limit_interrupt_pending = false;
-    }
-
     fn push_event(&mut self, event: NormalizedProviderEvent) -> Result<(), DurableRunnerError> {
         self.push_event_with_limit(event, MAX_REGULAR_QUEUED_PROVIDER_EVENTS)
     }
@@ -1187,16 +1183,12 @@ impl CodexCommandExecutor {
             state.begin_receipt_limit_stop(call_id.clone(), operation_id.clone())?;
         if interrupt_pending {
             self.save_state()?;
-            // Persist a retry marker before the fallible provider request, then
-            // clear it after Codex accepts the request. Buffered calls must not
-            // issue overlapping interruptions while the terminal notification
-            // is still in flight, but a failed request remains retryable.
+            // Keep the durable retry marker until a terminal notification is
+            // observed. Provider acceptance acknowledges only this RPC; it
+            // does not prove that the turn stopped. Later buffered calls may
+            // therefore retry the idempotent interruption instead of leaving
+            // a still-active receipt-exhausted turn permanently unstopped.
             self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
-            self.state
-                .as_mut()
-                .expect("Codex state remains available after interrupting at its receipt limit")
-                .mark_receipt_limit_interrupt_sent();
-            self.save_state()?;
         }
         // The durable diagnostic owns the turn-level failure, while every
         // buffered JSON-RPC call still receives an explicit provider error.
@@ -1823,8 +1815,7 @@ mod tests {
         assert!(state
             .begin_receipt_limit_stop("call-first".to_owned(), "tool.first".to_owned())
             .unwrap());
-        state.mark_receipt_limit_interrupt_sent();
-        assert!(!state
+        assert!(state
             .begin_receipt_limit_stop("call-second".to_owned(), "tool.second".to_owned())
             .unwrap());
         assert_eq!(state.pending_events.len(), 1);
@@ -1833,13 +1824,13 @@ mod tests {
         let mut recovered: CodexProviderState =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         recovered.validate().unwrap();
-        assert!(!recovered
+        assert!(recovered
             .begin_receipt_limit_stop("call-after-restart".to_owned(), "tool.third".to_owned())
             .unwrap());
         assert_eq!(recovered.pending_events.len(), 1);
-        // Provider acceptance is enough to suppress overlapping interruption
-        // requests while the terminal notification is still in flight.
-        assert!(!recovered
+        // Only a terminal notification clears the retry marker. Accepting an
+        // interrupt request does not prove that the provider stopped.
+        assert!(recovered
             .begin_receipt_limit_stop("call-after-success".to_owned(), "tool.fourth".to_owned())
             .unwrap());
         assert_eq!(recovered.pending_events.len(), 1);
