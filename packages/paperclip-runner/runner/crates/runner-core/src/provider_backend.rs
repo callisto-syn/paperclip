@@ -315,6 +315,8 @@ struct CodexProviderState {
     receipt_limit_diagnostic_emitted: bool,
     #[serde(default)]
     receipt_limit_interrupt_pending: bool,
+    #[serde(default)]
+    receipt_limit_interrupt_accepted: bool,
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -346,6 +348,7 @@ impl CodexProviderState {
             completed_provider_turn_id: None,
             receipt_limit_diagnostic_emitted: false,
             receipt_limit_interrupt_pending: false,
+            receipt_limit_interrupt_accepted: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -413,6 +416,7 @@ impl CodexProviderState {
             || (self.receipt_limit_interrupt_pending
                 && (!self.receipt_limit_diagnostic_emitted
                     || self.active_provider_turn_id.is_none()))
+            || (self.receipt_limit_interrupt_accepted && !self.receipt_limit_interrupt_pending)
             || (matches!(
                 self.lifecycle.as_str(),
                 "prepared" | "session_open" | "closed"
@@ -494,6 +498,10 @@ impl CodexProviderState {
         self.receipt_limit_diagnostic_emitted = true;
         self.receipt_limit_interrupt_pending = true;
         Ok(true)
+    }
+
+    fn mark_receipt_limit_interrupt_accepted(&mut self) {
+        self.receipt_limit_interrupt_accepted = true;
     }
 
     fn push_event(&mut self, event: NormalizedProviderEvent) -> Result<(), DurableRunnerError> {
@@ -691,6 +699,7 @@ impl CodexCommandExecutor {
                 }
                 state.receipt_limit_diagnostic_emitted = false;
                 state.receipt_limit_interrupt_pending = false;
+                state.receipt_limit_interrupt_accepted = false;
             }
             state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
             let reconciled = NormalizedProviderEvent {
@@ -928,6 +937,7 @@ impl CodexCommandExecutor {
             state.active_provider_turn_id = None;
             state.receipt_limit_diagnostic_emitted = false;
             state.receipt_limit_interrupt_pending = false;
+            state.receipt_limit_interrupt_accepted = false;
             state.lifecycle = "session_open".to_owned();
             state.config.provider_version.clone()
         };
@@ -1015,6 +1025,7 @@ impl CodexCommandExecutor {
         state.completed_provider_turn_id = None;
         state.receipt_limit_diagnostic_emitted = false;
         state.receipt_limit_interrupt_pending = false;
+        state.receipt_limit_interrupt_accepted = false;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -1179,6 +1190,7 @@ impl CodexCommandExecutor {
             .state
             .as_mut()
             .expect("Codex state remains available at its tool receipt limit");
+        let prior_interrupt_accepted = state.receipt_limit_interrupt_accepted;
         let interrupt_pending =
             state.begin_receipt_limit_stop(call_id.clone(), operation_id.clone())?;
         if interrupt_pending {
@@ -1188,7 +1200,21 @@ impl CodexCommandExecutor {
             // does not prove that the turn stopped. Later buffered calls may
             // therefore retry the idempotent interruption instead of leaving
             // a still-active receipt-exhausted turn permanently unstopped.
-            self.interrupt_turn("semantic_tool_turn_receipt_limit")?;
+            match self.interrupt_turn("semantic_tool_turn_receipt_limit") {
+                Ok(_) => {
+                    self.state
+                        .as_mut()
+                        .expect("Codex state remains available after receipt-limit interruption")
+                        .mark_receipt_limit_interrupt_accepted();
+                    self.save_state()?;
+                }
+                // Once Codex has accepted one interrupt, a redundant retry is
+                // best-effort. Preserve the durable retry marker and continue
+                // polling so an in-flight terminal notification can settle the
+                // turn instead of being masked by the courtesy RPC failure.
+                Err(_) if prior_interrupt_accepted => {}
+                Err(error) => return Err(error),
+            }
         }
         // The durable diagnostic owns the turn-level failure, while every
         // buffered JSON-RPC call still receives an explicit provider error.
@@ -1343,6 +1369,7 @@ impl CodexCommandExecutor {
         state.active_provider_turn_id = None;
         state.receipt_limit_diagnostic_emitted = false;
         state.receipt_limit_interrupt_pending = false;
+        state.receipt_limit_interrupt_accepted = false;
         state.lifecycle = "closed".to_owned();
         let thread_id = state.thread_id.clone();
         self.save_state()?;
@@ -1474,6 +1501,7 @@ impl CodexCommandExecutor {
                         }
                         state.receipt_limit_diagnostic_emitted = false;
                         state.receipt_limit_interrupt_pending = false;
+                        state.receipt_limit_interrupt_accepted = false;
                         state.lifecycle = "session_open".to_owned();
                     }
                     if terminal_event_type.is_some() {
@@ -1687,6 +1715,7 @@ mod tests {
             completed_provider_turn_id: None,
             receipt_limit_diagnostic_emitted: false,
             receipt_limit_interrupt_pending: false,
+            receipt_limit_interrupt_accepted: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -1815,6 +1844,7 @@ mod tests {
         assert!(state
             .begin_receipt_limit_stop("call-first".to_owned(), "tool.first".to_owned())
             .unwrap());
+        state.mark_receipt_limit_interrupt_accepted();
         assert!(state
             .begin_receipt_limit_stop("call-second".to_owned(), "tool.second".to_owned())
             .unwrap());
@@ -1824,6 +1854,7 @@ mod tests {
         let mut recovered: CodexProviderState =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         recovered.validate().unwrap();
+        assert!(recovered.receipt_limit_interrupt_accepted);
         assert!(recovered
             .begin_receipt_limit_stop("call-after-restart".to_owned(), "tool.third".to_owned())
             .unwrap());
