@@ -471,6 +471,8 @@ export interface HarnessSession {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
+    /** Settle without committing if runtime ownership is revoked. */
+    signal: AbortSignal;
   }): Promise<HarnessRuntimeRequestHandoffResult>;
   goal?(input: HarnessGoalOperation): Promise<HarnessThreadGoal | null>;
   lineage?(): HarnessThreadLineageEntry[];

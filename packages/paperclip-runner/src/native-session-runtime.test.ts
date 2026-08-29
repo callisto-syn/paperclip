@@ -1635,12 +1635,131 @@ describe("executeNativeSession recovery", () => {
         requestId: "input-1",
         turnId: "turn-waiting",
         reason: "durable_handoff",
+        signal: expect.any(AbortSignal),
       });
       expect(cancel).toHaveBeenCalledOnce();
       expect(events.map((event) => event.eventType)).toContain("runtime_request.expired");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("aborts and bounds a durable handoff that never settles", async () => {
+    const request = {
+      schema: "paperclip.runtime_request.v2",
+      requestKind: "runtime",
+      requestId: "input-stalled",
+      type: "input",
+      status: "pending",
+      prompt: "Which region?",
+      input: {
+        schema: "paperclip.question_set.v1",
+        questions: [{
+          id: "region",
+          prompt: "Which region?",
+          required: true,
+          answerMode: "text",
+        }],
+      },
+      origin: { adapter: "mock" },
+      turnId: "turn-stalled",
+      itemId: "input-stalled",
+    };
+    const created = {
+      ...runnerEvent(1, "runtime_request.created", { request }),
+      turnId: "turn-stalled",
+    };
+    let releaseEvents = () => {};
+    const eventsReleased = new Promise<void>((resolve) => {
+      releaseEvents = resolve;
+    });
+    let markHandoffStarted = () => {};
+    const handoffStarted = new Promise<void>((resolve) => {
+      markHandoffStarted = resolve;
+    });
+    let handoffSignal: AbortSignal | undefined;
+    const close = vi.fn(async () => releaseEvents());
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return {
+          resume: false,
+          typedEvents: true,
+          steering: false,
+          interruption: true,
+          structuredResult: true,
+          runtimeRequestHandoff: true,
+        };
+      },
+      async *events() {
+        yield created;
+        await eventsReleased;
+      },
+      async startTurn() {
+        return { turnId: "turn-stalled" };
+      },
+      handoffRuntimeRequest(input) {
+        handoffSignal = input.signal;
+        markHandoffStarted();
+        return new Promise<never>(() => undefined);
+      },
+      async result() {
+        return null;
+      },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: identity.sessionId,
+          identity,
+          providerSessionId: "provider-stalled",
+          activeTurnId: "turn-stalled",
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "stalled-handoff-backend",
+          version: "1",
+          capabilities: await session.capabilities(),
+        };
+      },
+      async openSession() {
+        return session;
+      },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent() {
+        return {
+          cursor: 1,
+          highestContiguousSourceSeq: 1,
+          disposition: "committed",
+        };
+      },
+      async replayEvents() {
+        return { events: [], highestContiguousSourceSeq: 0 };
+      },
+      async completeRun() {},
+    };
+
+    const execution = executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      runtimeInputLiveWindowMs: 1,
+      timeoutMs: 25,
+      keepSessionOpen: true,
+    });
+    await handoffStarted;
+    await expect(execution).rejects.toThrow("native session timed out");
+    expect(handoffSignal?.aborted).toBe(true);
+    expect(close).toHaveBeenCalled();
   });
 
   it("keeps a structured input in the original turn when it resolves before expiry", async () => {

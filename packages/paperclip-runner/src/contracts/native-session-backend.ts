@@ -79,6 +79,11 @@ export interface NativeSession {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
+    /**
+     * Revokes durable mutation authority when event consumption fails. The
+     * handoff must settle without committing after this signal aborts.
+     */
+    signal: AbortSignal;
   }): Promise<HarnessRuntimeRequestHandoffResult>;
   result(): Promise<{
     result: PrpStructuredRunResult;

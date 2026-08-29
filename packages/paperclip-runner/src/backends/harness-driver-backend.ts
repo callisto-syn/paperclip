@@ -337,6 +337,7 @@ class HarnessNativeSession implements NativeSession {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
+    signal: AbortSignal;
   }) {
     if (this.#session.handoffRuntimeRequest === undefined) {
       throw new Error("native_runtime_request_handoff_unavailable");

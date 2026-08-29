@@ -138,6 +138,7 @@ async function consumeTurn(
   const governedOperations = new Set<Promise<unknown>>();
   let governedCancellationStarted = false;
   let deferredGovernedSettlement: Promise<unknown> | null = null;
+  let deferredHandoffSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const handoffOperations = new Set<Promise<unknown>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
@@ -210,6 +211,7 @@ async function consumeTurn(
                   requestId,
                   turnId,
                   reason: "durable_handoff",
+                  signal: appendAbort.signal,
                 });
                 handoffOperations.add(handoff);
                 void handoff
@@ -272,12 +274,15 @@ async function consumeTurn(
     appendAbort.abort(error);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
-    // Handoff is a durable mutation boundary. Join every operation that
-    // crossed the live-window deadline before failure can escape or the
-    // provider session can close, so no pending request commits after the
-    // execution has already reported failure.
+    // Handoff is a durable mutation boundary. Abort revokes its authority and
+    // give a cooperative backend a bounded window to settle. A backend that
+    // violates the signal contract remains observed, but cannot keep the
+    // provider session allocated or defeat the execution timeout.
     if (handoffOperations.size > 0) {
-      await Promise.allSettled([...handoffOperations]);
+      const handoffSettlement = Promise.allSettled([...handoffOperations]);
+      if (!(await settlesWithin(handoffSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+        deferredHandoffSettlement = handoffSettlement;
+      }
     }
     // Governed callbacks carry control-plane mutation authority. Give them a
     // bounded cooperative-cancellation window. Once it expires, the aborted
@@ -311,9 +316,13 @@ async function consumeTurn(
     ]);
     if (appendAbort.signal.aborted) {
       await closeFailedSession();
-      if (deferredGovernedSettlement !== null) {
+      const deferredSettlements = [
+        deferredHandoffSettlement,
+        deferredGovernedSettlement,
+      ].filter((settlement): settlement is Promise<unknown> => settlement !== null);
+      if (deferredSettlements.length > 0) {
         retainFailedCleanup(Promise.allSettled([
-          deferredGovernedSettlement,
+          ...deferredSettlements,
           teardownSettlement,
         ]).then(() => undefined));
       } else {
