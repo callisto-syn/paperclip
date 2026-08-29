@@ -137,7 +137,6 @@ class DeterministicHarnessSession implements HarnessSession {
   #closed = false;
   #active = false;
   #nextSourceSeq = 1;
-  #resumeOnEventConsumption = false;
   readonly #eventWaiters = new Set<() => void>();
 
   constructor(
@@ -151,7 +150,6 @@ class DeterministicHarnessSession implements HarnessSession {
     this.#semanticResult = snapshot?.semanticResult?.result ?? null;
     this.#active = snapshot?.activeTurnId !== null && snapshot?.activeTurnId !== undefined;
     this.#nextSourceSeq = (snapshot?.lastSourceSequence ?? 0) + 1;
-    this.#resumeOnEventConsumption = this.#active;
   }
 
   ids() {
@@ -163,13 +161,6 @@ class DeterministicHarnessSession implements HarnessSession {
   }
 
   async *events(): AsyncIterable<PrpEvent> {
-    // Consumption is the explicit resume boundary for this provider-free
-    // driver. This avoids a clock race between recovery and interruption while
-    // still giving the native runtime a producer for an active checkpoint.
-    if (this.#resumeOnEventConsumption) {
-      this.#resumeOnEventConsumption = false;
-      this.#completeRecoveredTurn();
-    }
     let index = 0;
     while (true) {
       while (index < this.#events.length) {
@@ -243,7 +234,6 @@ class DeterministicHarnessSession implements HarnessSession {
     if (input.turnId !== undefined && input.turnId !== this.#turnId) {
       throw new Error(`turn ${input.turnId} is not active`);
     }
-    this.#resumeOnEventConsumption = false;
     this.#appendEvents(
       this.#event("turn.interrupted", { reason: input.reason ?? "interrupted" }),
       this.#event("run.terminal", cancelledTerminal(), { turn: false }),
@@ -318,17 +308,6 @@ class DeterministicHarnessSession implements HarnessSession {
   #notifyEventWaiters(): void {
     for (const resolve of this.#eventWaiters) resolve();
     this.#eventWaiters.clear();
-  }
-
-  #completeRecoveredTurn(): void {
-    if (this.#closed || !this.#active || this.#turnId === null) return;
-    this.#semanticResult = completedResult();
-    this.#appendEvents(
-      this.#event("run.result.proposed", this.#semanticResult),
-      this.#event("turn.completed", {}),
-      this.#event("run.terminal", completedTerminal(), { turn: false }),
-    );
-    this.#active = false;
   }
 
   #event(
