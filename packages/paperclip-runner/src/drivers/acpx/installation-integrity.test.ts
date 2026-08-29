@@ -16,10 +16,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import {
+  guardSnapshotModuleLookup,
   verifiedExecutableOpenFlags,
   verifyQualifiedAcpxInstallation,
 } from "./installation-integrity.js";
@@ -35,6 +36,27 @@ afterEach(async () => {
 });
 
 describe("ACPX installation integrity", () => {
+  it("does not delegate non-Linux snapshot filesystem lookups", () => {
+    for (const platform of ["darwin", "freebsd", "win32"] as const) {
+      const nextResolve = vi.fn(() => ({ url: "file:///attacker.js" }));
+      const nextLoad = vi.fn(() => ({ source: "attacker" }));
+      expect(() =>
+        guardSnapshotModuleLookup(platform, true, nextResolve),
+      ).toThrow("requires Linux descriptor-pinned paths");
+      expect(() => guardSnapshotModuleLookup(platform, true, nextLoad)).toThrow(
+        "requires Linux descriptor-pinned paths",
+      );
+      expect(nextResolve).not.toHaveBeenCalled();
+      expect(nextLoad).not.toHaveBeenCalled();
+    }
+
+    const pinnedLookup = vi.fn(() => "verified");
+    expect(guardSnapshotModuleLookup("linux", true, pinnedLookup)).toBe(
+      "verified",
+    );
+    expect(pinnedLookup).toHaveBeenCalledOnce();
+  });
+
   it("fails closed when the platform cannot atomically open without following symlinks", () => {
     expect(() => verifiedExecutableOpenFlags("win32", 0x20000)).toThrow(
       "requires atomic no-follow",
@@ -269,10 +291,12 @@ describe("ACPX installation integrity", () => {
       fixture.resolve,
     );
 
-    await expectOutput(
-      (await installation.openCommand()).spawn(["argument"]),
-      "relative:argument",
-    );
+    const child = (await installation.openCommand()).spawn(["argument"]);
+    if (process.platform === "linux") {
+      await expectOutput(child, "relative:argument");
+    } else {
+      await expectFailure(child, "requires Linux descriptor-pinned paths");
+    }
   });
 
   it("pins relative imports when the command directory is replaced", async () => {
@@ -326,7 +350,7 @@ describe("ACPX installation integrity", () => {
     } else {
       await expectFailure(
         lease.spawn(),
-        "executable directory identity changed after verification",
+        "requires Linux descriptor-pinned paths",
       );
     }
   });

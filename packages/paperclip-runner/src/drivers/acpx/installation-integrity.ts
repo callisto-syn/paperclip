@@ -506,30 +506,34 @@ function snapshotBootstrap(format: AcpxCommandFormat): string {
     "const commandDirectory = process.argv[1];",
     "const commandName = process.argv[2];",
     "process.argv.splice(1, 2, commandName);",
-    `const pinnedDirectory = fs.fstatSync(${COMMAND_DIRECTORY_FD}, { bigint: true });`,
-    "const assertPinnedDirectory = () => {",
-    "const current = fs.lstatSync(commandDirectory, { bigint: true });",
-    'if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== pinnedDirectory.dev || current.ino !== pinnedDirectory.ino) throw new Error("ACPX provider executable directory identity changed after verification");',
-    "};",
-    // Linux can address the inherited directory descriptor directly. Other
-    // POSIX fdesc filesystems cannot be traversed, so fail closed if their
-    // retained lexical path no longer names the pinned directory inode.
-    'if (process.platform !== "linux") assertPinnedDirectory();',
+    `const guardSnapshotModuleLookup = ${guardSnapshotModuleLookup.toString()};`,
     `const directory = process.platform === "linux" ? "/proc/self/fd/${COMMAND_DIRECTORY_FD}" : commandDirectory;`,
     "const directoryUrl = pathToFileURL(`${directory}/`).href;",
     "const target = new URL(commandName, directoryUrl).href;",
     `const source = fs.readFileSync(${COMMAND_SOURCE_FD});`,
     "registerHooks({ resolve(specifier, context, nextResolve) {",
     "if (specifier === target) return { url: target, shortCircuit: true };",
-    'if (process.platform !== "linux" && context.parentURL?.startsWith(directoryUrl)) assertPinnedDirectory();',
-    "return nextResolve(specifier, context);",
+    'const filesystemLookup = context.parentURL?.startsWith(directoryUrl) === true && !specifier.startsWith("node:");',
+    "return guardSnapshotModuleLookup(process.platform, filesystemLookup, () => nextResolve(specifier, context));",
     "}, load(url, context, nextLoad) {",
     `if (url === target) return { format: ${JSON.stringify(format)}, source, shortCircuit: true };`,
-    'if (process.platform !== "linux" && url.startsWith(directoryUrl)) assertPinnedDirectory();',
-    "return nextLoad(url, context);",
+    "return guardSnapshotModuleLookup(process.platform, url.startsWith(directoryUrl), () => nextLoad(url, context));",
     "} });",
     "import(target).catch((error) => { console.error(error); process.exitCode = 1; });",
   ].join("");
+}
+
+export function guardSnapshotModuleLookup<T>(
+  platform: NodeJS.Platform,
+  filesystemLookup: boolean,
+  lookup: () => T,
+): T {
+  if (platform !== "linux" && filesystemLookup) {
+    throw new Error(
+      "ACPX provider relative module loading requires Linux descriptor-pinned paths",
+    );
+  }
+  return lookup();
 }
 
 function executableFormat(
