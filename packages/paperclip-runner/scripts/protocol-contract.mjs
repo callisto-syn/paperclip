@@ -359,13 +359,8 @@ export function assertAcpxQuestionFixture(fixture) {
   if (properties.length === 0 || properties.length > 64) {
     throw contractError("invalid_acpx_question_fixture", "native form property count");
   }
-  const required = requestedSchema.required ?? [];
-  if (
-    !Array.isArray(required)
-    || required.some((name) => typeof name !== "string")
-    || new Set(required).size !== required.length
-    || required.some((name) => !Object.hasOwn(requestedSchema.properties, name))
-  ) {
+  const required = normalizedAcpxRequired(requestedSchema);
+  if (required.size > 64) {
     throw contractError("invalid_acpx_question_fixture", "native required properties");
   }
   for (const [name, property] of properties) {
@@ -380,8 +375,8 @@ export function assertAcpxQuestionFixture(fixture) {
   ) {
     throw contractError("invalid_acpx_question_fixture", "native accept response");
   }
-  for (const name of required) {
-    if (!Object.hasOwn(response.content, name)) {
+  for (const [name] of properties) {
+    if (required.has(name) && !Object.hasOwn(response.content, name)) {
       throw contractError("invalid_acpx_question_fixture", `native response omits required property ${name}`);
     }
   }
@@ -404,7 +399,7 @@ export function assertAcpxQuestionFixture(fixture) {
 
 function projectAcpxFixture(params, canonicalResponse) {
   const schema = params.requestedSchema;
-  const required = new Set(schema.required ?? []);
+  const required = normalizedAcpxRequired(schema);
   const bindings = Object.entries(schema.properties).map(([name, property], index) =>
     projectAcpxProperty(name, property, index, required.has(name))
   );
@@ -438,6 +433,16 @@ function projectAcpxFixture(params, canonicalResponse) {
     }
   }
   return { questionSet, nativeResponse: { action: "accept", content } };
+}
+
+function normalizedAcpxRequired(schema) {
+  return new Set(
+    Array.isArray(schema.required)
+      ? schema.required
+          .slice(0, 65)
+          .filter((value) => typeof value === "string")
+      : []
+  );
 }
 
 function projectAcpxProperty(name, property, index, required) {

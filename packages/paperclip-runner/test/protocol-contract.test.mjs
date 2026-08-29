@@ -154,6 +154,15 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
     /native and canonical question sets differ/,
   );
 
+  const normalizedRequired = structuredClone(canonical);
+  normalizedRequired.nativeRequest.params.requestedSchema.required = [
+    "environment",
+    "environment",
+    42,
+    "not-a-property",
+  ];
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(normalizedRequired));
+
   const divergentResponse = structuredClone(canonical);
   divergentResponse.nativeResponse.content.environment = "production";
   assert.throws(
