@@ -377,12 +377,14 @@ impl CodexProvider {
                 return if let Some(exit) = exit {
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
-                        // A previously emitted terminal remains authoritative
-                        // for that turn, but it does not make a later nonzero
-                        // process exit healthy. Preserve the completed turn and
-                        // independently fail the reusable provider session.
-                        success: exit.success
-                            && (self.expected_shutdown || self.completed_turn_authoritative),
+                        // A terminal notification is the durable authority for
+                        // the completed turn. Once no turn remains active, a
+                        // later process exit (including a nonzero one) cannot
+                        // retroactively contradict that outcome. A new turn
+                        // revokes this authority before provider work starts.
+                        success: (self.completed_turn_authoritative
+                            && self.active_provider_turn_id.is_none())
+                            || (exit.success && self.expected_shutdown),
                         completed_turn_authoritative: self.completed_turn_authoritative
                             && self.active_provider_turn_id.is_none(),
                     }))

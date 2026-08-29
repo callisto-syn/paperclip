@@ -854,10 +854,11 @@ impl CodexCommandExecutor {
                             .as_mut()
                             .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
-                        // Preserve an already-recorded turn terminal, but fail
-                        // the reusable session for every unexpected or nonzero
-                        // process exit. Completion authority only classifies a
-                        // clean exit from a freshly resumed completed thread.
+                        // No authoritative terminal exists for this provider
+                        // exit. Completed turns are classified as success in
+                        // CodexProvider and never reach this contradictory
+                        // failure path; starting a new turn revokes that
+                        // authority first.
                         state.push_event(NormalizedProviderEvent {
                             event_type: "session.failed".to_owned(),
                             priority: EventPriority::P0,

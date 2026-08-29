@@ -390,7 +390,7 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn idle_resumed_provider_crash_fails_the_new_session_without_refailing_the_old_turn() {
+fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
     let directory = temporary_directory("completion-then-nonzero-exit");
     let config = provider_config(
         &directory,
@@ -434,13 +434,13 @@ fn idle_resumed_provider_crash_fails_the_new_session_without_refailing_the_old_t
     }
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));
-    assert!(event_types.iter().any(|event| event == "session.failed"));
+    assert!(!event_types.iter().any(|event| event == "session.failed"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after nonzero exit"),
     )
     .expect("parse provider state after nonzero exit");
-    assert_eq!(persisted["lifecycle"], "provider_exited");
+    assert_eq!(persisted["lifecycle"], "session_open");
     assert_eq!(persisted["completedTurnAuthoritative"], true);
 
     let mut recovered = CodexCommandExecutor::new(&directory);
@@ -460,7 +460,7 @@ fn idle_resumed_provider_crash_fails_the_new_session_without_refailing_the_old_t
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(recovered_event_types
+    assert!(!recovered_event_types
         .iter()
         .any(|event| event == "session.failed"));
 
