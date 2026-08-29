@@ -35,6 +35,11 @@ export const manageRoutineAction = {
       "operationId": "manage_routine",
       "input": {}
     },
+    "scenarioCall": {
+      "operationId": "manage_routine",
+      "idempotencyKey": "example",
+      "input": {}
+    },
     "success": {
       "ok": true,
       "operationId": "manage_routine",

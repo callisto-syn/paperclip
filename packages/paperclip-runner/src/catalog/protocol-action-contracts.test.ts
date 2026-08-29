@@ -30,18 +30,9 @@ describe("canonical Paperclip protocol action contracts", () => {
 
       if (action.scenario !== null) {
         const scenarioProperties = action.scenario.descriptor.inputSchema.properties ?? {};
-        const callEntries = Object.entries(action.examples.call.input);
-        const outOfBandKeys = callEntries
-          .map(([key]) => key)
-          .filter((key) => !(key in scenarioProperties));
-        // Scenario mutation idempotency is carried by the invocation envelope,
-        // not the operation input. No other example field may be omitted.
-        expect(outOfBandKeys).toEqual(
-          "idempotencyKey" in action.examples.call.input ? ["idempotencyKey"] : [],
-        );
-        const scenarioInput = Object.fromEntries(
-          callEntries.filter(([key]) => key !== "idempotencyKey"),
-        );
+        const scenarioCall = "scenarioCall" in action.examples
+          ? action.examples.scenarioCall
+          : action.examples.call;
         const scenarioOutput = {
           schema: "paperclip.capability.tool-result.v1",
           ok: true,
@@ -53,8 +44,19 @@ describe("canonical Paperclip protocol action contracts", () => {
         };
 
         expect(action.scenario.descriptor.operationId).toBe(operationId);
+        expect(scenarioCall.operationId).toBe(operationId);
         expect(
-          ajv.validate(action.scenario.descriptor.inputSchema, scenarioInput),
+          Object.keys(scenarioCall.input).filter((key) => !(key in scenarioProperties)),
+        ).toEqual([]);
+        if (action.scenario.descriptor.idempotency === "required") {
+          expect(action.examples).toHaveProperty("scenarioCall");
+          expect(scenarioCall.idempotencyKey).toEqual(expect.any(String));
+          expect(scenarioCall.idempotencyKey).not.toHaveLength(0);
+        } else {
+          expect(scenarioCall).not.toHaveProperty("idempotencyKey");
+        }
+        expect(
+          ajv.validate(action.scenario.descriptor.inputSchema, scenarioCall.input),
           JSON.stringify(ajv.errors),
         ).toBe(true);
         expect(

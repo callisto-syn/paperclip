@@ -38,6 +38,14 @@ export const upsertCaseAction = {
         "body": "example"
       }
     },
+    "scenarioCall": {
+      "operationId": "upsert_case",
+      "idempotencyKey": "example",
+      "input": {
+        "key": "example",
+        "body": "example"
+      }
+    },
     "success": {
       "ok": true,
       "operationId": "upsert_case",

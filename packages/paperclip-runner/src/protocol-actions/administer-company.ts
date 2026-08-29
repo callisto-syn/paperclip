@@ -42,6 +42,13 @@ export const administerCompanyAction = {
         "action": "example"
       }
     },
+    "scenarioCall": {
+      "operationId": "administer_company",
+      "idempotencyKey": "example",
+      "input": {
+        "action": "example"
+      }
+    },
     "success": {
       "ok": true,
       "operationId": "administer_company",

@@ -35,6 +35,11 @@ export const syncCompanySkillsAction = {
       "operationId": "sync_company_skills",
       "input": {}
     },
+    "scenarioCall": {
+      "operationId": "sync_company_skills",
+      "idempotencyKey": "example",
+      "input": {}
+    },
     "success": {
       "ok": true,
       "operationId": "sync_company_skills",

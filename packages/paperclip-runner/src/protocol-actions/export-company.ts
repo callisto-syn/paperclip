@@ -35,6 +35,11 @@ export const exportCompanyAction = {
       "operationId": "export_company",
       "input": {}
     },
+    "scenarioCall": {
+      "operationId": "export_company",
+      "idempotencyKey": "example",
+      "input": {}
+    },
     "success": {
       "ok": true,
       "operationId": "export_company",

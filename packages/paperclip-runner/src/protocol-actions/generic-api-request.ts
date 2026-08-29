@@ -38,6 +38,14 @@ export const genericApiRequestAction = {
         "path": "/mock/example"
       }
     },
+    "scenarioCall": {
+      "operationId": "generic_api_request",
+      "idempotencyKey": "example",
+      "input": {
+        "method": "GET",
+        "path": "/mock/example"
+      }
+    },
     "success": {
       "ok": true,
       "operationId": "generic_api_request",

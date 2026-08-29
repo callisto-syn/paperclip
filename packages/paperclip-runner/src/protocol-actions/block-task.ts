@@ -36,6 +36,13 @@ export const blockTaskAction = {
         "reason": "example"
       }
     },
+    "scenarioCall": {
+      "operationId": "block_task",
+      "idempotencyKey": "example",
+      "input": {
+        "reason": "example"
+      }
+    },
     "success": {
       "ok": true,
       "operationId": "block_task",

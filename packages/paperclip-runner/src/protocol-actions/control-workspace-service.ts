@@ -39,6 +39,14 @@ export const controlWorkspaceServiceAction = {
         "action": "start"
       }
     },
+    "scenarioCall": {
+      "operationId": "control_workspace_service",
+      "idempotencyKey": "example",
+      "input": {
+        "serviceId": "example",
+        "action": "start"
+      }
+    },
     "success": {
       "ok": true,
       "operationId": "control_workspace_service",
