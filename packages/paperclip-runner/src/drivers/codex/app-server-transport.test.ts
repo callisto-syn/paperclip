@@ -101,6 +101,17 @@ describe("Codex app-server transport limits", () => {
     await transport.close();
   });
 
+  it("fails closed when stdout is destroyed without a usable response channel", async () => {
+    const transport = nodeTransport(
+      'process.stdin.resume(); require("node:fs").closeSync(1); setInterval(() => {}, 1000)',
+    );
+    await expect(transport.request("pending", {})).rejects.toThrow(/stdout (ended|closed)/u);
+    await expect(transport.request("after-stdout-close", {})).rejects.toThrow(
+      "codex app-server transport is closed",
+    );
+    await transport.close();
+  });
+
   it("fails closed when outbound buffering exceeds its bound", async () => {
     const diagnostics: string[] = [];
     const transport = nodeTransport("process.stdin.pause(); setInterval(() => {}, 1000)", {
