@@ -529,7 +529,8 @@ impl CodexProvider {
                         "Codex tool call named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none() && self.completed_turn_authoritative {
+                if self.active_provider_turn_id.is_none() && self.completed_turn_authority.is_some()
+                {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.as_deref().ok_or_else(|| {
@@ -626,7 +627,8 @@ impl CodexProvider {
                         "Codex runtime request named another thread",
                     ));
                 }
-                if self.active_provider_turn_id.is_none() && self.completed_turn_authoritative {
+                if self.active_provider_turn_id.is_none() && self.completed_turn_authority.is_some()
+                {
                     return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
