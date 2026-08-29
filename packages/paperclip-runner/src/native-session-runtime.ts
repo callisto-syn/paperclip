@@ -349,7 +349,15 @@ async function consumeTurn(
         );
       }
     } else {
-      await teardownSettlement;
+      if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+        // A terminal provider fact does not make an uncooperative handoff safe
+        // to forget. Revoke its signal, transfer the exact settlement-and-close
+        // chain to the process owner, and fail this execution within a bound so
+        // callers do not wait forever or publish a result ahead of a late
+        // control-plane mutation.
+        retainFailedCleanup(teardownSettlement.then(() => closeFailedSession()));
+        throw new Error("native_terminal_handoff_settlement_timeout");
+      }
     }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();

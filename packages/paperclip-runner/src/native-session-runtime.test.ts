@@ -1764,7 +1764,7 @@ describe("executeNativeSession recovery", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
   });
 
-  it("revokes and joins a pending durable handoff before successful finalization", async () => {
+  it("bounds a stalled terminal handoff without publishing success, then closes after settlement", async () => {
     const request = {
       schema: "paperclip.runtime_request.v2",
       requestKind: "runtime",
@@ -1888,10 +1888,12 @@ describe("executeNativeSession recovery", () => {
     await vi.waitFor(() => expect(handoffSignal?.aborted).toBe(true));
     expect(readResult).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
+    await expect(execution).rejects.toThrow("native_terminal_handoff_settlement_timeout");
+    expect(readResult).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
     releaseHandoff();
-    await expect(execution).resolves.toMatchObject({ result });
-    expect(readResult).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(readResult).not.toHaveBeenCalled();
   });
 
   it("keeps a structured input in the original turn when it resolves before expiry", async () => {
