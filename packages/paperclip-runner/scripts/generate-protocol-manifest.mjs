@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   SUPPORTED_FIXTURE_VERSION,
   SUPPORTED_PROTOCOL_VERSION,
+  assertAcpxQuestionFixture,
   assertCodexQuestionFixture,
   assertConformanceFixturePair,
   assertQuestionAdapterFixture,
@@ -74,6 +75,8 @@ export async function buildProtocolManifest() {
       assertQuestionAdapterFixture(value);
       if (relativePath === "fixtures/questions/codex.json") {
         assertCodexQuestionFixture(value);
+      } else if (relativePath === "fixtures/questions/acpx.json") {
+        assertAcpxQuestionFixture(value);
       }
       compatibilityCase = `${value.adapter}-structured-input`;
     } else if (relativePath === "fixtures/conformance-minimal-run.json") {

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildProtocolManifest } from "../scripts/generate-protocol-manifest.mjs";
 import {
+  assertAcpxQuestionFixture,
   assertCodexQuestionFixture,
   assertConformanceFixturePair,
   assertQuestionAdapterFixture,
@@ -111,6 +112,32 @@ test("the Codex question fixture uses stable provider-neutral IDs", async () => 
   const value = await fixture("questions/codex.json");
   assert.doesNotThrow(() => assertCodexQuestionFixture(value));
   assert.deepEqual(Object.keys(value.canonicalResponse.answers), ["environment"]);
+});
+
+test("the ACPX question fixture enforces its provider-native contract", async () => {
+  const canonical = await fixture("questions/acpx.json");
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(canonical));
+
+  const malformedRequest = structuredClone(canonical);
+  malformedRequest.nativeRequest.params.requestedSchema.properties.environment.type = "object";
+  assert.throws(
+    () => assertAcpxQuestionFixture(malformedRequest),
+    /unsupported native property environment/,
+  );
+
+  const malformedResponse = structuredClone(canonical);
+  malformedResponse.nativeResponse.content.environment = "unknown";
+  assert.throws(
+    () => assertAcpxQuestionFixture(malformedResponse),
+    /native response option for environment/,
+  );
+
+  const missingResponse = structuredClone(canonical);
+  missingResponse.nativeResponse.content = {};
+  assert.throws(
+    () => assertAcpxQuestionFixture(missingResponse),
+    /native response omits required property environment/,
+  );
 });
 
 test("every question adapter fixture satisfies its declared schema", async () => {

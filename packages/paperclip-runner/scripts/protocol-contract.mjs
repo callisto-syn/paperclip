@@ -335,6 +335,124 @@ export function assertCodexQuestionFixture(fixture) {
   return fixture;
 }
 
+export function assertAcpxQuestionFixture(fixture) {
+  assertQuestionAdapterFixture(fixture);
+  if (fixture.adapter !== "acpx") {
+    throw contractError("unsupported_provider", String(fixture.adapter));
+  }
+  const request = fixture.nativeRequest;
+  if (!isPlainRecord(request) || request.method !== "elicitation/create") {
+    throw contractError("invalid_acpx_question_fixture", "native request method");
+  }
+  const params = request.params;
+  const requestedSchema = isPlainRecord(params) ? params.requestedSchema : null;
+  if (
+    !isPlainRecord(params)
+    || params.mode !== "form"
+    || !isPlainRecord(requestedSchema)
+    || requestedSchema.type !== "object"
+    || !isPlainRecord(requestedSchema.properties)
+  ) {
+    throw contractError("invalid_acpx_question_fixture", "native form request");
+  }
+  const properties = Object.entries(requestedSchema.properties);
+  if (properties.length === 0 || properties.length > 64) {
+    throw contractError("invalid_acpx_question_fixture", "native form property count");
+  }
+  const required = requestedSchema.required ?? [];
+  if (
+    !Array.isArray(required)
+    || required.some((name) => typeof name !== "string")
+    || new Set(required).size !== required.length
+    || required.some((name) => !Object.hasOwn(requestedSchema.properties, name))
+  ) {
+    throw contractError("invalid_acpx_question_fixture", "native required properties");
+  }
+  for (const [name, property] of properties) {
+    assertAcpxProperty(name, property);
+  }
+
+  const response = fixture.nativeResponse;
+  if (
+    !isPlainRecord(response)
+    || response.action !== "accept"
+    || !isPlainRecord(response.content)
+  ) {
+    throw contractError("invalid_acpx_question_fixture", "native accept response");
+  }
+  for (const name of required) {
+    if (!Object.hasOwn(response.content, name)) {
+      throw contractError("invalid_acpx_question_fixture", `native response omits required property ${name}`);
+    }
+  }
+  for (const [name, value] of Object.entries(response.content)) {
+    const property = requestedSchema.properties[name];
+    if (!isPlainRecord(property)) {
+      throw contractError("invalid_acpx_question_fixture", `native response has unknown property ${name}`);
+    }
+    assertAcpxPropertyValue(name, property, value);
+  }
+  return fixture;
+}
+
+function assertAcpxProperty(name, value) {
+  if (!isPlainRecord(value)) {
+    throw contractError("invalid_acpx_question_fixture", `native property ${name}`);
+  }
+  if (!["string", "number", "integer", "boolean", "array"].includes(value.type)) {
+    throw contractError("invalid_acpx_question_fixture", `unsupported native property ${name}`);
+  }
+  if (value.type === "array") {
+    if (!isPlainRecord(value.items) || acpxEnumValues(value.items).length === 0) {
+      throw contractError("invalid_acpx_question_fixture", `native array property ${name} requires options`);
+    }
+  } else if (value.type === "string") {
+    acpxEnumValues(value);
+  }
+}
+
+function assertAcpxPropertyValue(name, property, value) {
+  const typeMatches = property.type === "string"
+    ? typeof value === "string"
+    : property.type === "number"
+      ? typeof value === "number" && Number.isFinite(value)
+      : property.type === "integer"
+        ? Number.isInteger(value)
+        : property.type === "boolean"
+          ? typeof value === "boolean"
+          : Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (!typeMatches) {
+    throw contractError("invalid_acpx_question_fixture", `native response type for ${name}`);
+  }
+  const enumValues = property.type === "array"
+    ? acpxEnumValues(property.items)
+    : acpxEnumValues(property);
+  const responseValues = Array.isArray(value) ? value : [value];
+  if (enumValues.length > 0 && responseValues.some((item) => !enumValues.includes(item))) {
+    throw contractError("invalid_acpx_question_fixture", `native response option for ${name}`);
+  }
+}
+
+function acpxEnumValues(property) {
+  if (!isPlainRecord(property)) return [];
+  const titled = Array.isArray(property.oneOf)
+    ? property.oneOf
+    : Array.isArray(property.anyOf)
+      ? property.anyOf
+      : null;
+  const values = titled === null ? property.enum ?? [] : titled.map((entry) =>
+    isPlainRecord(entry) ? entry.const : undefined
+  );
+  if (!Array.isArray(values) || values.length > 128 || values.some((value) => typeof value !== "string")) {
+    throw contractError("invalid_acpx_question_fixture", "native options must be bounded strings");
+  }
+  return values;
+}
+
+function isPlainRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function assertConformanceFixturePair(fixture, output) {
   if (fixture?.schemaVersion !== "paperclip.runner.conformance.fixture.v1") {
     throw contractError("unsupported_required_schema", `conformance fixture requires ${String(fixture?.schemaVersion)}`);
