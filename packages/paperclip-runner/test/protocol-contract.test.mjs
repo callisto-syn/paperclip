@@ -238,6 +238,40 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
   assert.doesNotThrow(() => assertAcpxQuestionFixture(specialPropertyFixture));
 });
 
+test("the ACPX question fixture accepts typed boolean enums", async () => {
+  const booleanEnum = structuredClone(await fixture("questions/acpx.json"));
+  booleanEnum.nativeRequest.params.requestedSchema.properties.environment = {
+    type: "boolean",
+    title: "Confirm deployment",
+    description: "Should deployment proceed?",
+    enum: [true, false],
+  };
+  booleanEnum.canonicalQuestionSet.questions[0] = {
+    id: "field-1-environment-ba5285161ba6",
+    header: "Confirm deployment",
+    prompt: "Should deployment proceed?",
+    required: true,
+    answerMode: "single_select",
+    options: [
+      { id: "option-1", label: "Yes" },
+      { id: "option-2", label: "No" },
+    ],
+  };
+  booleanEnum.nativeResponse.content.environment = true;
+
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(booleanEnum));
+
+  const malformed = structuredClone(booleanEnum);
+  malformed.nativeRequest.params.requestedSchema.properties.environment.enum = [
+    true,
+    "false",
+  ];
+  assert.throws(
+    () => assertAcpxQuestionFixture(malformed),
+    /native options must be bounded boolean values/,
+  );
+});
+
 test("every question adapter fixture satisfies its declared schema", async () => {
   const schemas = await loadSchemaCatalog(resolve(protocolRoot, "schemas"));
   const validators = compileProtocolValidators(schemas);
