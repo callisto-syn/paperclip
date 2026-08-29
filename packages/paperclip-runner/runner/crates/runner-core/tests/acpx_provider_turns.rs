@@ -183,6 +183,23 @@ fn returns_pending_tool_cancellations_before_the_terminal_event() {
         terminal.last().unwrap(),
         AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
     ));
+
+    assert!(session.state().pending_tool("call-1").is_none());
+    session
+        .start_turn("turn-2", "Please continue", &std::env::temp_dir())
+        .expect("terminal settlement must leave the session reusable");
+    let next_tool = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &next_tool[0],
+        AcpxProviderStateEvent::ToolCall { call_id, operation_id, .. }
+            if call_id == "call-1" && operation_id == "issues.read"
+    ));
+    let next_terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        next_terminal.last().unwrap(),
+        AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-2"
+    ));
+    assert!(session.state().pending_tool("call-1").is_none());
     session.shutdown("test complete").unwrap();
 }
 

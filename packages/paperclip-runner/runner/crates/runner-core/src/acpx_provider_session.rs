@@ -426,6 +426,19 @@ impl AcpxProviderSession {
                             "ACPX turn terminated before its reserved terminal invocation produced a correlated result",
                         )));
                     }
+                    // `accept_event` clears the candidate reducer's pending
+                    // tools while the bridge clones settle the corresponding
+                    // calls above. Prove both halves reached the same terminal
+                    // state before committing any of them to the reusable
+                    // session.
+                    if next_state.has_pending_tools()
+                        || next_bridge.pending_calls().next().is_some()
+                        || next_reserved_bridge.pending_calls().next().is_some()
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(
+                            "ACPX terminal settlement left provider tool state inconsistent",
+                        )));
+                    }
                     reconciled_events.extend(
                         settlements
                             .into_iter()

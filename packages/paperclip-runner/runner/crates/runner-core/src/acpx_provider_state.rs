@@ -264,6 +264,10 @@ impl AcpxProviderState {
         self.pending_tools.get(call_id)
     }
 
+    pub fn has_pending_tools(&self) -> bool {
+        !self.pending_tools.is_empty()
+    }
+
     pub fn complete_tool(
         &mut self,
         call_id: &str,
