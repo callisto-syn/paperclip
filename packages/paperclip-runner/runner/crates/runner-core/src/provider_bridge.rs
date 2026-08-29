@@ -96,11 +96,10 @@ impl ProviderToolBridge {
     }
 
     pub fn attach_existing_run(&mut self) -> Result<(), ProviderBridgeError> {
-        if !self.pending.is_empty() {
-            return Err(ProviderBridgeError::invalid(
-                "cannot attach a new run while provider tool calls are pending",
-            ));
-        }
+        // Pending calls are durable run state. Re-attaching the same run must
+        // preserve them so an interrupted dispatcher can resume or replay the
+        // authoritative result. `attach_run` remains the boundary that rejects
+        // carrying pending calls into a different run.
         Ok(())
     }
 

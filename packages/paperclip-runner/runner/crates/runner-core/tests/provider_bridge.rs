@@ -208,3 +208,23 @@ fn recovery_preserves_completed_call_replay_identities() {
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .is_err());
 }
+
+#[test]
+fn recovery_preserves_pending_calls_for_the_existing_run() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+
+    let encoded = serde_json::to_string(&bridge).unwrap();
+    let mut recovered: ProviderToolBridge = serde_json::from_str(&encoded).unwrap();
+    recovered.attach_existing_run().unwrap();
+
+    let pending = recovered.pending_calls().collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].call_id, "call-1");
+    assert!(recovered
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .is_ok());
+}
