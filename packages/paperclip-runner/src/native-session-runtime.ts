@@ -139,6 +139,7 @@ async function consumeTurn(
   let governedCancellationStarted = false;
   let deferredGovernedSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const handoffOperations = new Set<Promise<unknown>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
   let stopConsumer = false;
   let rejectHandoff: ((error: unknown) => void) | null = null;
@@ -205,11 +206,15 @@ async function consumeTurn(
                   rejectHandoff?.(new Error("native_runtime_request_handoff_unavailable"));
                   return;
                 }
-                void session.handoffRuntimeRequest({
+                const handoff = session.handoffRuntimeRequest({
                   requestId,
                   turnId,
                   reason: "durable_handoff",
-                }).catch((error) => rejectHandoff?.(error));
+                });
+                handoffOperations.add(handoff);
+                void handoff
+                  .catch((error) => rejectHandoff?.(error))
+                  .finally(() => handoffOperations.delete(handoff));
               }, runtimeInputLiveWindowMs);
               inputTimer.unref?.();
               inputTimers.set(requestId, inputTimer);
@@ -265,6 +270,15 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
+    for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
+    inputTimers.clear();
+    // Handoff is a durable mutation boundary. Join every operation that
+    // crossed the live-window deadline before failure can escape or the
+    // provider session can close, so no pending request commits after the
+    // execution has already reported failure.
+    if (handoffOperations.size > 0) {
+      await Promise.allSettled([...handoffOperations]);
+    }
     // Governed callbacks carry control-plane mutation authority. Give them a
     // bounded cooperative-cancellation window. Once it expires, the aborted
     // signal is authoritative: retain observation of the broken callback, but
