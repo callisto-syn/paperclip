@@ -368,6 +368,45 @@ describe("ACPX runtime host", () => {
       vi.useRealTimers();
     }
   });
+
+  it("retains a settled turn when shutdown cleanup must be retried", async () => {
+    const fixture = await hostFixture();
+    let settleTurn!: (value: { stopReason: string }) => void;
+    const turn = {
+      ...runtimeTurn(),
+      result: new Promise<{ stopReason: string }>((resolve) => {
+        settleTurn = resolve;
+      }),
+    };
+    let failRuntimeClose = true;
+    const runtime = runtimePort({
+      startTurn: () => turn,
+      onClose: async () => {
+        if (failRuntimeClose) throw new Error("runtime cleanup failed");
+      },
+    });
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-reads",
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      },
+      fixture.dependencies({ openRuntime: async () => runtime }),
+    );
+    host.startTurn({ text: "Complete the task.", requestId: "turn-1" });
+
+    const firstClose = host.close({ reason: "first shutdown" });
+    settleTurn({ stopReason: "end_turn" });
+    await expect(firstClose).rejects.toThrow(/cleanup failed/);
+    expect(turn.cancel).toHaveBeenCalledOnce();
+
+    failRuntimeClose = false;
+    await expect(host.close({ reason: "retry shutdown" })).resolves.toBeUndefined();
+    expect(turn.cancel).toHaveBeenCalledTimes(2);
+    expect(runtime.close).toHaveBeenCalledTimes(2);
+  });
 });
 
 function runtimePort(

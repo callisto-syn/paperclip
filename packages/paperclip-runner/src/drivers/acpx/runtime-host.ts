@@ -258,7 +258,12 @@ export class AcpxRuntimeHost {
     this.#activeTurn = turn;
     void turn.result
       .finally(() => {
-        if (this.#activeTurn === turn) this.#activeTurn = null;
+        // Once shutdown owns this turn, retain its cancellation handle until
+        // runtime cleanup succeeds. The result may settle while cleanup is
+        // failing, and a later close must still be able to retry cancellation.
+        if (this.#activeTurn === turn && !this.#closingStarted) {
+          this.#activeTurn = null;
+        }
       })
       .catch(() => undefined);
     return turn;
