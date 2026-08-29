@@ -899,6 +899,25 @@ class CodexAcpxSession implements HarnessSession {
       if (this.#terminalTurns.has(turnId)) return;
       if (this.#activeTurnId === turnId) this.#activeTurnId = null;
       if (result.status === "completed") {
+        if (
+          this.#semanticFingerprint !== null &&
+          this.#semanticTurnId !== null &&
+          this.#semanticTurnId !== turnId
+        ) {
+          const ownerTerminal = this.#terminalTurns.get(this.#semanticTurnId);
+          if (
+            ownerTerminal !== undefined &&
+            !terminalFingerprintOwnsResult(
+              ownerTerminal,
+              this.#semanticFingerprint,
+            )
+          ) {
+            // A provider retry may confirm the already durable semantic result
+            // without invoking the terminal tool again. Bind that result to
+            // the successful settlement so the checkpoint remains recoverable.
+            this.#semanticTurnId = turnId;
+          }
+        }
         const finalText = this.#assistantText.trim();
         if (finalText) {
           this.#emit(

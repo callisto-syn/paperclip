@@ -814,6 +814,61 @@ describe("Codex ACPX harness driver", () => {
     });
   });
 
+  it("transfers a failed turn's semantic result to a resultless successful retry", async () => {
+    const fixture = driverFixture();
+    const session = await fixture.driver.openSession({
+      runId: "run-resultless-semantic-retry",
+      normalizedSessionId: "session-1",
+      workingDirectory: "/workspace",
+    });
+
+    const firstTerminal = collectUntil(session.events(), "turn.failed");
+    const first = await session.startTurn({
+      message: { role: "user", text: "Attempt the task." },
+    });
+    await fixture.hostOptions!.semanticTools!.handler({
+      tool: PRP_COMPLETION_TOOL_NAME,
+      callId: "finish-before-provider-retry",
+      arguments: completedResult(),
+      signal: new AbortController().signal,
+    });
+    fixture.finishTurn({
+      status: "failed",
+      error: {
+        code: "provider_retry",
+        message: "Retry the turn",
+        retryable: true,
+      },
+    });
+    await firstTerminal;
+
+    const secondTerminal = collectUntil(session.events(), "turn.completed");
+    const second = await session.startTurn({
+      message: { role: "user", text: "Confirm the completed work." },
+    });
+    fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+    await secondTerminal;
+
+    const snapshot = await session.snapshot();
+    expect(snapshot.semanticResult).toMatchObject({
+      callId: "finish-before-provider-retry",
+      turnId: second.turnId,
+    });
+    expect(snapshot.semanticResult?.turnId).not.toBe(first.turnId);
+    const successfulTerminal = snapshot.terminalTurns?.find(
+      (terminal) => terminal.turnId === second.turnId,
+    );
+    expect(JSON.parse(successfulTerminal!.fingerprint)).toEqual({
+      status: "completed",
+      semanticResult: snapshot.semanticResult!.fingerprint,
+    });
+    await session.close({ reason: "simulate resultless retry recovery" });
+
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toMatchObject({
+      recovered: true,
+    });
+  });
+
   it("clears a checkpoint race when the active turn is already terminal", async () => {
     const fixture = driverFixture();
     const session = await fixture.driver.openSession({
