@@ -218,7 +218,7 @@ describe("managed Codex credentials", () => {
   );
 
   it.runIf(process.platform !== "win32")(
-    "fails within a bound when directory durability remains unavailable",
+    "fails within a bound and retains cleanup ownership until durability recovers",
     async () => {
       const fixture = await credentialFixture();
       const probe = await open(fixture.home, "r");
@@ -237,7 +237,56 @@ describe("managed Codex credentials", () => {
         await expect(staging).rejects.toThrow(
           "remained non-durable after 8 attempts",
         );
-        expect(syncSpy).toHaveBeenCalledTimes(8);
+        expect(syncSpy.mock.calls.length).toBeGreaterThanOrEqual(8);
+        syncSpy.mockRestore();
+        const lease = await stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { OPENAI_API_KEY: "launch-only-key" },
+        });
+        await expect(lease.close()).resolves.toBeUndefined();
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "owns cleanup when post-rename directory durability fails",
+    async () => {
+      const fixture = await credentialFixture();
+      const destination = join(fixture.home, "auth.json");
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const originalSync = prototype.sync;
+      let directorySyncAttempts = 0;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          if ((await this.stat()).isDirectory()) {
+            directorySyncAttempts += 1;
+            if (directorySyncAttempts > 1) {
+              throw new Error("persistent post-rename sync failure");
+            }
+          }
+          await originalSync.call(this);
+        },
+      );
+      try {
+        await expect(stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        })).rejects.toThrow("remained non-durable after 8 attempts");
+        await expect(readFile(destination, "utf8")).resolves.toBe("{}");
+
+        syncSpy.mockRestore();
+        const lease = await stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+        });
+        await expect(readFile(destination, "utf8")).resolves.toBe("{}");
+        await lease.close();
       } finally {
         syncSpy.mockRestore();
       }

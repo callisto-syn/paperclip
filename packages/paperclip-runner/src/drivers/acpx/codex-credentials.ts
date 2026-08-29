@@ -13,6 +13,18 @@ import { isAbsolute, join, resolve } from "node:path";
 const MAX_CODEX_CREDENTIAL_BYTES = 256 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_DIRECTORY_SYNC_ATTEMPTS = 8;
+const MAX_AUTONOMOUS_CREDENTIAL_CLEANUP_ATTEMPTS = 8;
+
+interface QuarantinedCredentialCleanup {
+  path: string;
+  home: string;
+  recovery: Promise<void> | null;
+}
+
+const quarantinedCredentialCleanups = new Map<
+  string,
+  QuarantinedCredentialCleanup
+>();
 
 export type ManagedCodexCredentialMode =
   "api_key" | "inline_json" | "managed_file";
@@ -43,6 +55,7 @@ export async function stageManagedCodexCredential(input: {
     throw new Error("Managed Codex credential home permissions are unsafe");
   }
   const destination = join(home, "auth.json");
+  await recoverQuarantinedCredentialCleanup(destination, home);
   const environment = input.environment ?? {};
   const hasApiKey = Boolean(
     environment.CODEX_API_KEY || environment.OPENAI_API_KEY,
@@ -79,7 +92,12 @@ export async function stageManagedCodexCredential(input: {
     // directory sync fails, fail staging and require the caller (or a later
     // process) to repeat this preflight; an in-memory lease is not a durable
     // owner across the crash that could restore the old directory entry.
-    await removeCredential(destination, home);
+    try {
+      await removeCredential(destination, home);
+    } catch (error) {
+      quarantineCredentialCleanup(destination, home);
+      throw error;
+    }
     return credentialLease(destination, home, "api_key");
   }
 
@@ -93,6 +111,13 @@ export async function stageManagedCodexCredential(input: {
     // crash even when the following rename is interrupted.
     await removeCredential(destination, home);
     await writeCredential(destination, home, credential);
+  } catch (error) {
+    // Either unlink or rename may already have mutated the credential
+    // namespace before directory durability failed. Retain a bounded process
+    // owner that removes auth.json, and make later staging recover that owner
+    // before admitting another provider.
+    quarantineCredentialCleanup(destination, home);
+    throw error;
   } finally {
     credential.fill(0);
   }
@@ -101,6 +126,68 @@ export async function stageManagedCodexCredential(input: {
     home,
     hasInlineJson ? "inline_json" : "managed_file",
   );
+}
+
+function quarantineCredentialCleanup(path: string, home: string): void {
+  const existing = quarantinedCredentialCleanups.get(home);
+  if (existing !== undefined) return;
+  const cleanup: QuarantinedCredentialCleanup = {
+    path,
+    home,
+    recovery: null,
+  };
+  quarantinedCredentialCleanups.set(home, cleanup);
+  startCredentialCleanupRecovery(
+    cleanup,
+    MAX_AUTONOMOUS_CREDENTIAL_CLEANUP_ATTEMPTS,
+  );
+}
+
+function startCredentialCleanupRecovery(
+  cleanup: QuarantinedCredentialCleanup,
+  maxAttempts: number,
+): Promise<void> {
+  if (cleanup.recovery) return cleanup.recovery;
+  const recovery = (async () => {
+    let retryDelayMs = 10;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await removeReplaceableCredential(cleanup.path);
+        await syncDirectory(cleanup.home);
+        quarantinedCredentialCleanups.delete(cleanup.home);
+        return;
+      } catch {
+        if (attempt === maxAttempts) return;
+        await new Promise<void>((resolveRetry) => {
+          const timer = setTimeout(resolveRetry, retryDelayMs);
+          timer.unref?.();
+        });
+        retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
+      }
+    }
+  })();
+  cleanup.recovery = recovery;
+  void recovery.finally(() => {
+    if (cleanup.recovery === recovery) cleanup.recovery = null;
+  }).catch(() => undefined);
+  return recovery;
+}
+
+async function recoverQuarantinedCredentialCleanup(
+  path: string,
+  home: string,
+): Promise<void> {
+  const cleanup = quarantinedCredentialCleanups.get(home);
+  if (cleanup === undefined) return;
+  await (cleanup.recovery ?? startCredentialCleanupRecovery(cleanup, 1));
+  if (!quarantinedCredentialCleanups.has(home)) return;
+  const admissionRecovery = startCredentialCleanupRecovery(cleanup, 1);
+  await admissionRecovery;
+  if (quarantinedCredentialCleanups.has(home)) {
+    throw new Error(
+      `Managed Codex credential cleanup remains non-durable for ${path}`,
+    );
+  }
 }
 
 function credentialLease(
