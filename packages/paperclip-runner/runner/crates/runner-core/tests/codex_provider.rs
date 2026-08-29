@@ -518,9 +518,9 @@ fn completion_authority_is_scoped_to_process_generation_and_fresh_work() {
     assert_eq!(persisted["providerProcessGeneration"], 1);
     assert_eq!(persisted["completedTurnProcessGeneration"], 1);
 
-    // The fresh process has answered the resume-time thread/read probe. Its
-    // configured nonzero exit is therefore an independent session failure;
-    // completion authority from the prior process must not hide it.
+    // A fresh process restoring the durable completed turn is a recovery
+    // observation, not new provider work. Its configured nonzero exit must
+    // reconcile the already completed session until turn.start revokes it.
     let mut recovered = CodexCommandExecutor::new(&directory);
     let mut recovered_event_types = Vec::new();
     let recovered_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -533,15 +533,18 @@ fn completion_authority_is_scoped_to_process_generation_and_fresh_work() {
         );
         if recovered_event_types
             .iter()
-            .any(|event| event == "session.failed")
+            .any(|event| event == "session.reconciled")
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(recovered_event_types
+    assert!(!recovered_event_types
         .iter()
         .any(|event| event == "session.failed"));
+    assert!(recovered_event_types
+        .iter()
+        .any(|event| event == "session.reconciled"));
     let recovered_persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after resumed exit"),
