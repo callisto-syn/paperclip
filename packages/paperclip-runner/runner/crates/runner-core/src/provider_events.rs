@@ -673,62 +673,20 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .or_else(|| value.get("uri"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let windows_normalized_path = raw_path.replace('\\', "/");
-    let path = if cfg!(windows) {
-        windows_normalized_path.as_str()
-    } else {
-        raw_path
-    };
-    if path.is_empty()
-        || path.starts_with('/')
-        // Reject unmistakable foreign absolute paths on every host. Root-
-        // relative backslash spellings, drive-relative prefixes, and
-        // backslash-separated `..` are only path syntax on Windows; on POSIX
-        // those bytes are valid relative filename content and must survive.
-        || windows_normalized_path.starts_with("//")
-        || is_absolute_windows_drive_path(&windows_normalized_path)
-        || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
-        || (cfg!(windows) && raw_path.contains(':'))
-        || path.split('/').any(|segment| segment == "..")
-        || has_unsafe_uri_spelling(raw_path)
+    // PRP targets cross machines and are later consumed by platform-neutral
+    // transcript code. Admit only the portable relative subset: a value that
+    // could change meaning as a Windows drive/root, URI, or backslash traversal
+    // is omitted instead of being interpreted according to the runner host.
+    if raw_path.is_empty()
+        || raw_path.starts_with('/')
+        || raw_path.contains('\\')
+        || raw_path.contains(':')
+        || raw_path.split('/').any(|segment| segment == "..")
     {
         Value::Null
     } else {
-        // This field is an inert display target, not a path to reopen. Preserve
-        // valid platform-native spelling exactly so transcript renderers do
-        // not show URI-style escapes in ordinary filenames.
-        let display_path = path.to_owned();
-        Value::String(display_path.chars().take(4_000).collect())
+        Value::String(raw_path.chars().take(4_000).collect())
     }
-}
-
-fn has_drive_relative_prefix(path: &str) -> bool {
-    path.split_once(':').is_some_and(|(drive, suffix)| {
-        drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && !suffix.starts_with('/')
-    })
-}
-
-fn is_absolute_windows_drive_path(path: &str) -> bool {
-    path.split_once(':').is_some_and(|(drive, suffix)| {
-        drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic() && suffix.starts_with('/')
-    })
-}
-
-fn has_unsafe_uri_spelling(path: &str) -> bool {
-    path.split_once(':').is_some_and(|(scheme, suffix)| {
-        // A one-letter prefix is ambiguous with a valid POSIX filename (and
-        // is handled as a drive selector on Windows). A multi-letter RFC 3986
-        // scheme followed by either path separator is transport syntax even
-        // when the particular scheme is not in a local allowlist. Fail closed
-        // on that ambiguous boundary; ordinary POSIX colon components such as
-        // `src:main.rs` remain displayable.
-        let valid_scheme = scheme.len() > 1
-            && scheme.bytes().enumerate().all(|(index, byte)| {
-                byte.is_ascii_alphabetic()
-                    || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
-            });
-        valid_scheme && (suffix.starts_with('/') || suffix.starts_with('\\'))
-    })
 }
 
 #[cfg(test)]
@@ -746,13 +704,9 @@ mod tests {
     }
 
     #[test]
-    fn applies_drive_relative_syntax_only_on_windows() {
+    fn rejects_drive_relative_syntax_on_every_platform() {
         let normalized = safe_acpx_location(Some(&json!({"path": "a:b/file.txt"})));
-        if cfg!(windows) {
-            assert_eq!(normalized, Value::Null);
-        } else {
-            assert_eq!(normalized, Value::String("a:b/file.txt".to_owned()));
-        }
+        assert_eq!(normalized, Value::Null);
     }
 
     #[test]
@@ -771,57 +725,37 @@ mod tests {
     }
 
     #[test]
-    fn preserves_posix_relative_filenames_with_colons_and_backslashes() {
+    fn rejects_nonportable_colon_and_backslash_targets() {
         let normalized = safe_acpx_location(Some(&json!({"path": r"foo:bar\baz"})));
-        if cfg!(windows) {
-            assert_eq!(normalized, Value::Null);
-        } else {
-            assert_eq!(normalized, Value::String(r"foo:bar\baz".to_owned()));
-        }
+        assert_eq!(normalized, Value::Null);
     }
 
     #[test]
-    fn applies_backslash_root_and_traversal_only_on_windows() {
+    fn rejects_backslash_root_and_traversal_on_every_platform() {
         for location in [r"foo\..\bar", r"\rooted\name"] {
             let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            if cfg!(windows) {
-                assert_eq!(normalized, Value::Null);
-            } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
-            }
+            assert_eq!(normalized, Value::Null);
         }
     }
 
     #[test]
-    fn preserves_safe_posix_literal_backslash_components() {
+    fn preserves_portable_percent_components_but_omits_ambiguous_separators() {
         let literal = safe_acpx_location(Some(&json!({"path": r"folder\name"})));
-        if cfg!(windows) {
-            assert_eq!(literal, Value::String("folder/name".to_owned()));
-        } else {
-            assert_eq!(literal, Value::String(r"folder\name".to_owned()));
-        }
+        assert_eq!(literal, Value::Null);
         let percent = safe_acpx_location(Some(&json!({"path": "reports/100%/summary.txt"})));
         assert_eq!(
             percent,
             Value::String("reports/100%/summary.txt".to_owned())
         );
         let custom = safe_acpx_location(Some(&json!({"path": r"team:alpha\path"})));
-        if cfg!(windows) {
-            assert_eq!(custom, Value::Null);
-        } else {
-            assert_eq!(custom, Value::String(r"team:alpha\path".to_owned()),);
-        }
+        assert_eq!(custom, Value::Null);
     }
 
     #[test]
-    fn preserves_posix_colon_components() {
+    fn rejects_colon_components_that_are_not_portable() {
         for location in ["src:main.rs", "foo:bar/baz"] {
             let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            if cfg!(windows) {
-                assert_eq!(normalized, Value::Null);
-            } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
-            }
+            assert_eq!(normalized, Value::Null);
         }
     }
 

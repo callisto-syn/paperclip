@@ -129,14 +129,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 "locations":[{"path":platform_path}]
             }),
         );
-        if cfg!(windows) {
-            assert_eq!(
-                backslash_escape[0].payload["target"],
-                serde_json::Value::Null
-            );
-        } else {
-            assert_eq!(backslash_escape[0].payload["target"], platform_path);
-        }
+        assert_eq!(
+            backslash_escape[0].payload["target"],
+            serde_json::Value::Null
+        );
     }
 
     let windows_absolute = normalize(
@@ -179,14 +175,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"a:b/file.txt"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            windows_drive_relative[0].payload["target"],
-            serde_json::Value::Null,
-        );
-    } else {
-        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt");
-    }
+    assert_eq!(
+        windows_drive_relative[0].payload["target"],
+        serde_json::Value::Null,
+    );
 
     for posix_path in ["src:main.rs", "foo:bar/baz"] {
         let colon_component = normalize(
@@ -200,14 +192,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 "locations":[{"path":posix_path}]
             }),
         );
-        if cfg!(windows) {
-            assert_eq!(
-                colon_component[0].payload["target"],
-                serde_json::Value::Null
-            );
-        } else {
-            assert_eq!(colon_component[0].payload["target"], posix_path,);
-        }
+        assert_eq!(
+            colon_component[0].payload["target"],
+            serde_json::Value::Null
+        );
     }
 
     let extensible_scheme = normalize(
@@ -267,14 +255,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":r"foo:bar\baz"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            posix_colon_backslash[0].payload["target"],
-            serde_json::Value::Null
-        );
-    } else {
-        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:bar\baz");
-    }
+    assert_eq!(
+        posix_colon_backslash[0].payload["target"],
+        serde_json::Value::Null
+    );
 
     let percent_path = normalize(
         AcpxRuntimeEventKind::ToolCall,
