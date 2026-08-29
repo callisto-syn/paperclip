@@ -669,11 +669,11 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         return Value::Null;
     };
     // Only the pinned sidecar may attest that it resolved this value within
-    // the workspace under the provider host's path semantics. Requiring the
-    // versioned marker makes raw provider paths and URI-shaped lookalikes fail
-    // closed here without reinterpreting valid POSIX filename characters.
+    // the workspace under the provider host's path semantics. Ambiguous URI
+    // scheme and Windows drive shapes additionally require proof that the
+    // sidecar resolved an existing workspace entry as POSIX filename data.
     if value.get("pathBoundary").and_then(Value::as_str)
-        != Some("paperclip.workspace_relative_display.v1")
+        != Some("paperclip.workspace_relative_display.v2")
     {
         return Value::Null;
     }
@@ -684,43 +684,38 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     if raw_path.is_empty()
         || raw_path.starts_with('/')
         || raw_path.starts_with('\\')
-        || has_windows_drive_backslash_prefix(raw_path)
-        || has_provider_uri_scheme_prefix(raw_path)
         || raw_path.contains('\0')
         || raw_path.split('/').any(|segment| segment == "..")
     {
-        Value::Null
-    } else {
-        Value::String(raw_path.chars().take(4_000).collect())
+        return Value::Null;
     }
+    let requires_entry_attestation =
+        has_windows_drive_prefix(raw_path) || has_rfc_uri_scheme_prefix(raw_path);
+    if requires_entry_attestation
+        && value.get("pathAttestation").and_then(Value::as_str)
+            != Some("paperclip.workspace_entry.v1")
+    {
+        return Value::Null;
+    }
+    Value::String(raw_path.chars().take(4_000).collect())
 }
 
-fn has_windows_drive_backslash_prefix(value: &str) -> bool {
+fn has_windows_drive_prefix(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-fn has_provider_uri_scheme_prefix(value: &str) -> bool {
+fn has_rfc_uri_scheme_prefix(value: &str) -> bool {
     let Some((scheme, _rest)) = value.split_once(':') else {
         return false;
     };
-    matches!(
-        scheme.to_ascii_lowercase().as_str(),
-        "data"
-            | "file"
-            | "ftp"
-            | "ftps"
-            | "git"
-            | "gs"
-            | "http"
-            | "https"
-            | "mailto"
-            | "s3"
-            | "sftp"
-            | "ssh"
-            | "ws"
-            | "wss"
-    )
+    let mut characters = scheme.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+        })
 }
 
 #[cfg(test)]
@@ -755,12 +750,16 @@ mod tests {
             "/absolute/path",
             "../secret",
             "src/../../secret",
+            "custom:payload",
+            "urn:isbn:9780131103627",
+            r"C:Users\alice\secret.txt",
+            "D:relative.txt",
             "bad\0name",
         ] {
             assert_eq!(
                 safe_acpx_location(Some(&json!({
                     "path": location,
-                    "pathBoundary": "paperclip.workspace_relative_display.v1"
+                    "pathBoundary": "paperclip.workspace_relative_display.v2"
                 }))),
                 Value::Null,
             );
@@ -782,7 +781,8 @@ mod tests {
             assert_eq!(
                 safe_acpx_location(Some(&json!({
                     "path": location,
-                    "pathBoundary": "paperclip.workspace_relative_display.v1"
+                    "pathBoundary": "paperclip.workspace_relative_display.v2",
+                    "pathAttestation": "paperclip.workspace_entry.v1"
                 }))),
                 Value::String(location.to_owned()),
             );

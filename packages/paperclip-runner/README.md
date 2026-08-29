@@ -75,10 +75,11 @@ families as the direct Codex transport. Reasoning contents stay private. Tool
 targets are resolved within the workspace under the provider host's path
 semantics and receive a versioned sidecar boundary marker before becoming
 bounded, display-only PRP safe paths. Raw or unmarked provider locations fail
-closed. Windows
-separators are canonicalized while valid POSIX colon, backslash, and percent
-characters remain unchanged; consumers must not reinterpret the display value
-as file-access authority. Operational semantic-result and terminal events
+closed. URI-scheme and Windows drive-shaped values require a separate sidecar
+attestation backed by an existing in-workspace entry, which preserves real
+POSIX colon filenames without treating arbitrary URI text as a path. Windows
+separators are canonicalized, and consumers must not reinterpret the display
+value as file-access authority. Operational semantic-result and terminal events
 remain reserved for the stateful adapter rather than being duplicated.
 
 Run the complete contract gate with:

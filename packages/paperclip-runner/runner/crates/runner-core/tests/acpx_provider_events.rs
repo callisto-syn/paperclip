@@ -93,7 +93,7 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
             "status":"pending",
             "locations":[{
                 "path":"src/main.rs",
-                "pathBoundary":"paperclip.workspace_relative_display.v1"
+                "pathBoundary":"paperclip.workspace_relative_display.v2"
             }],
             "text":"Opening"
         }),
@@ -140,7 +140,8 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
                 "status":"completed",
                 "locations":[{
                     "path":display_path,
-                    "pathBoundary":"paperclip.workspace_relative_display.v1"
+                    "pathBoundary":"paperclip.workspace_relative_display.v2",
+                    "pathAttestation":"paperclip.workspace_entry.v1"
                 }]
             }),
         );
@@ -154,6 +155,11 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
         "https://example.test/private",
         "https:example.test/private",
         "file:secret.txt",
+        "custom:payload",
+        "urn:isbn:9780131103627",
+        "tel:+15555550100",
+        r"C:Users\alice\secret.txt",
+        "D:relative.txt",
     ] {
         let rejected = normalize(
             AcpxRuntimeEventKind::ToolCall,
@@ -165,7 +171,7 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
                 "status":"completed",
                 "locations":[{
                     "path":unsafe_path,
-                    "pathBoundary":"paperclip.workspace_relative_display.v1"
+                    "pathBoundary":"paperclip.workspace_relative_display.v2"
                 }]
             }),
         );
