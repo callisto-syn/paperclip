@@ -372,14 +372,10 @@ impl CodexCommandExecutor {
             DurableRunnerError::invalid("recoverable Codex state omitted its thread id")
         })?;
         let previous_active_turn_id = state.active_provider_turn_id.clone();
-        let mut provider =
-            CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
-                DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
-            })?;
+        let provider = CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
+            DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
+        })?;
         let recovered_active_turn_id = provider.active_provider_turn_id().map(str::to_owned);
-        provider.restore_completed_turn_authority(
-            state.completed_turn_authoritative && recovered_active_turn_id.is_none(),
-        );
         self.provider = Some(provider);
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
             let state = self
@@ -507,11 +503,10 @@ impl CodexCommandExecutor {
                     "Codex provider session is closed",
                 ));
             }
-            let mut provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
+            let provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
                 .map_err(|error| {
                     DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
                 })?;
-            provider.restore_completed_turn_authority(state.completed_turn_authoritative);
             self.provider = Some(provider);
         }
         self.provider

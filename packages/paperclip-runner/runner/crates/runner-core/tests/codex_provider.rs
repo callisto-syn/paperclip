@@ -379,7 +379,7 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn delayed_nonzero_provider_exit_taints_reuse_without_refailing_the_completed_turn() {
+fn idle_resumed_provider_crash_fails_the_new_session_without_refailing_the_old_turn() {
     let directory = temporary_directory("completion-then-nonzero-exit");
     let config = provider_config(
         &directory,
@@ -443,16 +443,13 @@ fn delayed_nonzero_provider_exit_taints_reuse_without_refailing_the_completed_tu
         );
         if recovered_event_types
             .iter()
-            .any(|event| event == "harness.diagnostic")
+            .any(|event| event == "session.failed")
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(recovered_event_types
-        .iter()
-        .any(|event| event == "harness.diagnostic"));
-    assert!(!recovered_event_types
         .iter()
         .any(|event| event == "session.failed"));
 

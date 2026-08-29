@@ -268,10 +268,6 @@ impl CodexProvider {
         self.active_provider_turn_id.as_deref()
     }
 
-    pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
-        self.completed_turn_authoritative = authoritative;
-    }
-
     pub fn start_turn(&mut self, message: &str, cwd: &str) -> Result<Value, LocalRunnerError> {
         if self.active_provider_turn_id.is_some() {
             return Err(LocalRunnerError::invalid(
