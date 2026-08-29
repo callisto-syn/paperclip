@@ -89,6 +89,48 @@ describe("Codex structured question adapter", () => {
     })).toThrow("must be unique");
   });
 
+  it("keeps explicit option ids distinct from generated option ids", () => {
+    const responseContext = createCodexQuestionResponseContext();
+    const input = normalizeCodexQuestionSetWithContext("tool/requestUserInput", {
+      questions: [{
+        id: "target",
+        question: "Where?",
+        options: [
+          { id: "question-1", label: "First" },
+          { id: "option-1", label: "Second" },
+          { label: "Third" },
+        ],
+      }],
+    }, responseContext)!;
+    const request: HarnessRuntimeRequest = {
+      requestId: "request-distinct-option-ids",
+      requestKind: "user_input",
+      method: "tool/requestUserInput",
+      turnId: "turn-1",
+      itemId: "item-1",
+      status: "pending",
+      prompt: "Codex requests user input.",
+      details: {},
+      input,
+      origin: { adapter: "codex", method: "tool/requestUserInput" },
+    };
+
+    expect(input.questions[0]?.options?.map((option) => option.id)).toEqual([
+      "question-1",
+      "option-1",
+      "option-3",
+    ]);
+    expect(runtimeRequestResponseWithContext(request, {
+      action: "submit",
+      response: {
+        schema: "paperclip.question_response.v1",
+        answers: { target: { selectedOptionIds: ["question-1", "option-1"] } },
+      },
+    }, responseContext)).toEqual({
+      answers: { target: { answers: ["First", "Second"] } },
+    });
+  });
+
   it("fails closed instead of truncating oversized native forms", () => {
     expect(() => normalizeCodexQuestionSet("tool/requestUserInput", {
       questions: Array.from({ length: 65 }, (_, index) => ({

@@ -172,7 +172,9 @@ function codexOptions(value: unknown): NormalizedQuestionOptions | undefined {
       option.label,
       text(option.value, text(rawOption, `Option ${index + 1}`)),
     );
-    const id = stableQuestionId(option.id, index).replace(/^question-/, "option-");
+    const id = text(option.id).trim().length > 0
+      ? stableQuestionId(option.id, index)
+      : `option-${index + 1}`;
     nativeValues.set(id, nativeLabel);
     return {
       id,
