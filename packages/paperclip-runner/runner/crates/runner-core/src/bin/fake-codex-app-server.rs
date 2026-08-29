@@ -119,6 +119,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let fail_after_second_turn_start = args
         .iter()
         .any(|value| value == "--fail-after-second-turn-start");
+    let fail_after_thread_read = args.iter().any(|value| value == "--fail-after-thread-read");
     let fail_after_turn_completion_delay_ms =
         argument(&args, "--fail-after-turn-completion-delay-ms")
             .map(|value| value.parse::<u64>())
@@ -206,6 +207,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "id": id,
                     "result": {"thread": {"id": state.thread_id, "turns": turns}}
                 }))?;
+                if fail_after_thread_read {
+                    return Err("configured failure after thread read".into());
+                }
             }
             "turn/start" => {
                 turn_start_count += 1;

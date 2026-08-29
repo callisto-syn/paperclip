@@ -387,6 +387,7 @@ fn delayed_nonzero_provider_exit_taints_reuse_without_refailing_the_completed_tu
             "--fail-after-turn-completion",
             "--fail-after-turn-completion-delay-ms",
             "250",
+            "--fail-after-thread-read",
         ],
     );
     let mut executor = CodexCommandExecutor::new(&directory);
@@ -429,7 +430,31 @@ fn delayed_nonzero_provider_exit_taints_reuse_without_refailing_the_completed_tu
     )
     .expect("parse provider state after nonzero exit");
     assert_eq!(persisted["lifecycle"], "provider_exited");
-    assert!(persisted.get("completedProviderTurn").is_none());
+    assert_eq!(persisted["completedTurnAuthoritative"], true);
+
+    let mut recovered = CodexCommandExecutor::new(&directory);
+    let mut recovered_event_types = Vec::new();
+    for _ in 0..200 {
+        recovered_event_types.extend(
+            poll_and_ack(&mut recovered)
+                .expect("poll restored provider after idle crash")
+                .into_iter()
+                .map(|event| event.event_type),
+        );
+        if recovered_event_types
+            .iter()
+            .any(|event| event == "harness.diagnostic")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(recovered_event_types
+        .iter()
+        .any(|event| event == "harness.diagnostic"));
+    assert!(!recovered_event_types
+        .iter()
+        .any(|event| event == "session.failed"));
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

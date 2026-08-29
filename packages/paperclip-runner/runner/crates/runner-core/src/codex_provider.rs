@@ -153,6 +153,7 @@ pub struct CodexProvider {
     pending_tool_request_bytes: usize,
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
+    completed_turn_authoritative: bool,
 }
 
 impl CodexProvider {
@@ -187,6 +188,7 @@ impl CodexProvider {
             pending_tool_request_bytes: 0,
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
+            completed_turn_authoritative: false,
         };
         let initialized = provider.request(
             "initialize",
@@ -266,6 +268,10 @@ impl CodexProvider {
         self.active_provider_turn_id.as_deref()
     }
 
+    pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
+        self.completed_turn_authoritative = authoritative;
+    }
+
     pub fn start_turn(&mut self, message: &str, cwd: &str) -> Result<Value, LocalRunnerError> {
         if self.active_provider_turn_id.is_some() {
             return Err(LocalRunnerError::invalid(
@@ -278,6 +284,7 @@ impl CodexProvider {
             ));
         }
         self.expected_shutdown = false;
+        self.completed_turn_authoritative = false;
         let result = self.request(
             "turn/start",
             json!({
@@ -371,7 +378,7 @@ impl CodexProvider {
                         // process exit healthy. Preserve the completed turn and
                         // independently fail the reusable provider session.
                         success: exit.success && self.expected_shutdown,
-                        completed_turn_authoritative: self.expected_shutdown
+                        completed_turn_authoritative: self.completed_turn_authoritative
                             && self.active_provider_turn_id.is_none(),
                     }))
                 } else {
@@ -541,6 +548,7 @@ impl CodexProvider {
             if method == "turn/completed" {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
+                self.completed_turn_authoritative = true;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the

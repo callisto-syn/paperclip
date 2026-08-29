@@ -163,6 +163,8 @@ struct CodexProviderState {
     provider_session_id: Option<String>,
     #[serde(default)]
     active_provider_turn_id: Option<String>,
+    #[serde(default)]
+    completed_turn_authoritative: bool,
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -184,6 +186,7 @@ impl CodexProviderState {
             thread_id,
             provider_session_id: None,
             active_provider_turn_id: None,
+            completed_turn_authoritative: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),
@@ -232,6 +235,7 @@ impl CodexProviderState {
                     || self.active_provider_turn_id.is_some()
                     || matches!(self.lifecycle.as_str(), "session_open" | "turn_active")))
             || (self.lifecycle == "turn_active" && self.active_provider_turn_id.is_none())
+            || (self.completed_turn_authoritative && self.active_provider_turn_id.is_some())
             || (matches!(
                 self.lifecycle.as_str(),
                 "prepared" | "session_open" | "closed"
@@ -353,9 +357,11 @@ impl CodexCommandExecutor {
             DurableRunnerError::invalid("recoverable Codex state omitted its thread id")
         })?;
         let previous_active_turn_id = state.active_provider_turn_id.clone();
-        let provider = CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
-            DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
-        })?;
+        let mut provider =
+            CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
+                DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
+            })?;
+        provider.restore_completed_turn_authority(state.completed_turn_authoritative);
         let recovered_active_turn_id = provider.active_provider_turn_id().map(str::to_owned);
         self.provider = Some(provider);
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
@@ -489,10 +495,11 @@ impl CodexCommandExecutor {
                     "Codex provider session is closed",
                 ));
             }
-            let provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
+            let mut provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
                 .map_err(|error| {
                     DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
                 })?;
+            provider.restore_completed_turn_authority(state.completed_turn_authoritative);
             self.provider = Some(provider);
         }
         self.provider
@@ -605,6 +612,7 @@ impl CodexCommandExecutor {
             .as_mut()
             .expect("Codex state exists after turn start");
         state.active_provider_turn_id = Some(provider_turn_id.clone());
+        state.completed_turn_authoritative = false;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -777,6 +785,7 @@ impl CodexCommandExecutor {
                     }
                     if method == "turn/completed" {
                         state.active_provider_turn_id = None;
+                        state.completed_turn_authoritative = true;
                         state.lifecycle = "session_open".to_owned();
                     }
                     state.extend_events(normalized)?;
@@ -845,6 +854,17 @@ impl CodexCommandExecutor {
                                     "code": "provider_exited",
                                     "exitCode": exit_code,
                                     "expected": success,
+                                }),
+                            })?;
+                        } else {
+                            state.push_event(NormalizedProviderEvent {
+                                event_type: "harness.diagnostic".to_owned(),
+                                priority: EventPriority::P0,
+                                payload: json!({
+                                    "code": "provider_exited_after_terminal",
+                                    "provider": "codex",
+                                    "exitCode": exit_code,
+                                    "message": "Codex exited after an authoritative turn terminal; the session cannot be reused.",
                                 }),
                             })?;
                         }
@@ -964,6 +984,7 @@ mod tests {
             thread_id: Some("thread-1".to_owned()),
             provider_session_id: None,
             active_provider_turn_id: None,
+            completed_turn_authoritative: false,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             next_provider_event_seq: initial_provider_event_seq(),
