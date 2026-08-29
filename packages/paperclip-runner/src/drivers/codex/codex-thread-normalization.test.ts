@@ -73,6 +73,15 @@ describe("Codex thread normalization", () => {
     }, binding)).toBe(true);
     expect(isBoundCodexNotification({
       method: "item/completed",
+      params: {
+        thread: {
+          id: "unbound-child",
+          source: { subagent: { thread_spawn: { parent_thread_id: "thread-1" } } },
+        },
+      },
+    }, binding)).toBe(false);
+    expect(isBoundCodexNotification({
+      method: "item/completed",
       params: { runId: "run-1" },
     }, binding)).toBe(false);
     expect(isBoundCodexNotification({

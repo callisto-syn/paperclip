@@ -171,7 +171,9 @@ export function isBoundCodexNotification(
   const subAgent = record(source.subAgent ?? source.subagent);
   const spawn = record(subAgent.thread_spawn ?? subAgent.threadSpawn);
   const parentThreadId = text(spawn.parent_thread_id ?? spawn.parentThreadId);
-  if (parentThreadId.length > 0) return allowedThreads.has(parentThreadId);
+  if (notification.method === "thread/started" && parentThreadId.length > 0) {
+    return allowedThreads.has(parentThreadId);
+  }
   if (threadId.length > 0) return false;
 
   return false;
