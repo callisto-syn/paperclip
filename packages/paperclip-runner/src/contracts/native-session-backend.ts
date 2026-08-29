@@ -58,6 +58,17 @@ export interface NativeSessionRecoveryResult {
   reason?: string;
 }
 
+/**
+ * Cancellation is a synchronous authority transition followed by passive
+ * provider cleanup. Once `cancel` returns, the provider session must no longer
+ * be able to publish accepted output or acquire new mutation authority for the
+ * cancelled turn. Cleanup may stop processes or transports, but it must not
+ * perform durable control-plane mutations.
+ */
+export interface NativeSessionCancellation {
+  cleanup: Promise<void>;
+}
+
 export interface NativeSession {
   identity(): NativeRunIdentity;
   capabilities(): Promise<NativeSessionCapabilities>;
@@ -69,8 +80,8 @@ export interface NativeSession {
   }): Promise<{ turnId: string; effectiveCollaborationMode?: "default" | "plan" }>;
   steer?(input: { turnId: string; message: NativeUserMessage; correlationId?: string }): Promise<void>;
   interrupt?(input: { turnId?: string; reason?: string }): Promise<void>;
-  /** Revokes provider cancellation work when the execution that requested it ends. */
-  cancel?(input: { reason: string; signal: AbortSignal }): Promise<void>;
+  /** Commit cancellation synchronously; the returned promise owns cleanup only. */
+  cancel?(input: { reason: string; signal: AbortSignal }): NativeSessionCancellation;
   resolveRuntimeRequest?(input: {
     requestId: string;
     turnId: string;

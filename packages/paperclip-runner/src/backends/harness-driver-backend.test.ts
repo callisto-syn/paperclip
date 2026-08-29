@@ -395,7 +395,7 @@ describe("HarnessDriverBackend", () => {
     await session.cancel({
       reason: "operator cancelled the run",
       signal: new AbortController().signal,
-    });
+    }).cleanup;
     await expect(iterator.next()).rejects.toThrow("provider stopped after cancellation");
   });
 });

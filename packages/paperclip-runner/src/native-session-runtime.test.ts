@@ -20,7 +20,10 @@ import {
   canonicalNativeRuntimeContextDigest,
   nativeRuntimePromptDigest,
 } from "./contracts/runtime-context.js";
-import { executeNativeSession } from "./native-session-runtime.js";
+import {
+  executeNativeSession,
+  type ExecuteNativeSessionOptions,
+} from "./native-session-runtime.js";
 
 const identity = {
   runId: "run-recovery",
@@ -159,6 +162,18 @@ function highestContiguous(events: PrpEvent[]): number {
 }
 
 describe("executeNativeSession recovery", () => {
+  it("keeps governed-wait discovery synchronous", () => {
+    type GovernedWaitResolver = NonNullable<ExecuteNativeSessionOptions["resolveGovernedWait"]>;
+    const resolver: GovernedWaitResolver = () => null;
+    // An async resolver could retain control-plane mutation authority after
+    // execution settles, so the public boundary rejects it at compile time.
+    // @ts-expect-error governed-wait discovery must not return a promise
+    const asynchronousResolver: GovernedWaitResolver = async () => null;
+
+    expect(resolver).toBeTypeOf("function");
+    void asynchronousResolver;
+  });
+
   it("fails closed before launch when a v3 driver does not declare complete native context realization", async () => {
     const digest = "0".repeat(64);
     const context = {
@@ -338,7 +353,10 @@ describe("executeNativeSession recovery", () => {
         disposition: "committed" as const,
       };
     });
-    const cancel = vi.fn(async () => { releaseTeardown(); });
+    const cancel = vi.fn(() => {
+      releaseTeardown();
+      return { cleanup: Promise.resolve() };
+    });
     const close = vi.fn(async () => { releaseTeardown(); });
     const session: NativeSession = {
       identity: () => identity,
@@ -471,13 +489,17 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("bounds a failed session when optional cancellation never settles", async () => {
+  it("commits cancellation before bounding failed provider cleanup", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     let releaseCancellation = () => {};
     const cancellationReleased = new Promise<void>((resolve) => { releaseCancellation = resolve; });
     const interrupt = vi.fn(() => cancellationReleased);
-    const cancel = vi.fn(() => cancellationReleased);
+    let cancellationCommitted = false;
+    const cancel = vi.fn(() => {
+      cancellationCommitted = true;
+      return { cleanup: cancellationReleased };
+    });
     const close = vi.fn(async () => { releaseStream(); });
     const session: NativeSession = {
       identity: () => identity,
@@ -535,9 +557,10 @@ describe("executeNativeSession recovery", () => {
       keepSessionOpen: true,
     });
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-    expect(interrupt).toHaveBeenCalledOnce();
+    expect(interrupt).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
     await expect(execution).rejects.toThrow("native session timed out");
+    expect(cancellationCommitted).toBe(true);
     releaseCancellation();
   });
 
@@ -728,20 +751,17 @@ describe("executeNativeSession recovery", () => {
     expect(lifecycle).toEqual(["closed"]);
   });
 
-  it("revokes governed-wait cancellation when execution times out", async () => {
-    let markCancelStarted = () => {};
-    const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
+  it("commits a governed wait without waiting for abort-insensitive provider cleanup", async () => {
     const lifecycle: string[] = [];
     let cancellationSignal: AbortSignal | undefined;
     const cancel = vi.fn(({ signal }: { signal: AbortSignal }) => {
       cancellationSignal = signal;
-      markCancelStarted();
-      return new Promise<void>((resolve) => {
-        if (signal.aborted) resolve();
-        else signal.addEventListener("abort", () => resolve(), { once: true });
-      });
+      lifecycle.push("cancelled");
+      return { cleanup: new Promise<void>(() => undefined) };
     });
     const close = vi.fn(async () => { lifecycle.push("closed"); });
+    const events: PrpEvent[] = [];
+    const retainedSessions: Array<NativeSession | null> = [];
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -781,8 +801,13 @@ describe("executeNativeSession recovery", () => {
     const port: ControlPlanePort = {
       async openRun() {},
       async checkpointSession() {},
-      async appendEvent() {
-        return { cursor: 1, highestContiguousSourceSeq: 1, disposition: "committed" };
+      async appendEvent(event) {
+        events.push(structuredClone(event as PrpEvent));
+        return {
+          cursor: events.length,
+          highestContiguousSourceSeq: event.sourceSeq,
+          disposition: "committed",
+        };
       },
       async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
       async completeRun() {},
@@ -796,14 +821,20 @@ describe("executeNativeSession recovery", () => {
       controlPlaneInstanceId: "control-recovery",
       timeoutMs: 5,
       resolveGovernedWait: () => yieldedResult,
+      keepSessionOpen: true,
+      onSession: (current) => retainedSessions.push(current),
     });
-    await cancelStarted;
-    await expect(execution).rejects.toThrow("native session timed out");
-    expect(cancel).toHaveBeenCalled();
+    await expect(execution).resolves.toMatchObject({ result: yieldedResult });
     expect(cancel).toHaveBeenCalledOnce();
     expect(cancellationSignal?.aborted).toBe(true);
     expect(close).toHaveBeenCalledOnce();
-    expect(lifecycle).toEqual(["closed"]);
+    expect(lifecycle).toEqual(["cancelled", "closed"]);
+    expect(retainedSessions.at(-1)).toBeNull();
+    expect(events.map((event) => event.eventType)).toEqual([
+      "item.completed",
+      "run.result.accepted",
+      "run.terminal",
+    ]);
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
@@ -1668,7 +1699,10 @@ describe("executeNativeSession recovery", () => {
     const cancelled = new Promise<void>((resolve) => {
       releaseCancelled = resolve;
     });
-    const cancel = vi.fn(async () => releaseCancelled());
+    const cancel = vi.fn(() => {
+      releaseCancelled();
+      return { cleanup: Promise.resolve() };
+    });
     const events: PrpEvent[] = [];
     const completeRun = vi.fn(async () => undefined);
     const session: NativeSession = {
@@ -1773,7 +1807,6 @@ describe("executeNativeSession recovery", () => {
     });
     expect(events.map((event) => event.eventType)).toEqual([
       "item.completed",
-      "turn.interrupted",
       "run.result.accepted",
       "run.terminal",
     ]);
@@ -1826,7 +1859,10 @@ describe("executeNativeSession recovery", () => {
         releaseHandoff();
         return { result: "handed_off" as const, cleanup: Promise.resolve() };
       });
-      const cancel = vi.fn(async () => releaseCancelled());
+      const cancel = vi.fn(() => {
+        releaseCancelled();
+        return { cleanup: Promise.resolve() };
+      });
       const events: PrpEvent[] = [];
       const session: NativeSession = {
         identity: () => identity,
@@ -1998,8 +2034,9 @@ describe("executeNativeSession recovery", () => {
           cleanup: new Promise<void>((resolve) => { releaseHandoff = resolve; }),
         };
       },
-      async cancel() {
+      cancel() {
         releaseEvents();
+        return { cleanup: Promise.resolve() };
       },
       async result() {
         return null;

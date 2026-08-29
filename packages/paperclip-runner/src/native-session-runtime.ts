@@ -77,14 +77,21 @@ async function attemptOptionalSessionCancellation(
   session: NativeSession,
   reason: string,
 ): Promise<{ settlement: Promise<PromiseSettledResult<void>[]> } | null> {
+  if (session.cancel === undefined) return null;
   const cancellationAbort = new AbortController();
-  const attempts = Promise.allSettled([
-    Promise.resolve().then(() => session.interrupt?.({ reason })),
-    Promise.resolve().then(() => session.cancel?.({
+  let cleanup: Promise<void>;
+  try {
+    // The session commits cancellation before returning. Only provider
+    // cleanup remains asynchronous, so bounded failure settlement cannot
+    // leave an operation with accepted-output or mutation authority.
+    cleanup = session.cancel({
       reason,
       signal: cancellationAbort.signal,
-    })),
-  ]);
+    }).cleanup;
+  } catch {
+    return null;
+  }
+  const attempts = Promise.allSettled([cleanup]);
   if (await settlesWithin(attempts, OPTIONAL_SESSION_CANCELLATION_GRACE_MS)) {
     return null;
   }
@@ -123,24 +130,6 @@ async function quarantineRetainedSession(
   );
 }
 
-async function settleBeforeAbort<T>(
-  operation: () => Promise<T>,
-  signal: AbortSignal,
-  inFlight: Set<Promise<unknown>>,
-): Promise<T> {
-  if (signal.aborted) throw signal.reason ?? new Error("native event consumption aborted");
-  // Promise work cannot be forcibly cancelled in JavaScript. Keep it observed
-  // after abort; the signal is the hard revocation boundary for any mutation
-  // authority held by the embedding callback.
-  const pending = operation();
-  inFlight.add(pending);
-  try {
-    return await pending;
-  } finally {
-    inFlight.delete(pending);
-  }
-}
-
 async function consumeTurn(
   session: NativeSession,
   controlPlane: ControlPlanePort,
@@ -153,9 +142,9 @@ async function consumeTurn(
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const appendAbort = new AbortController();
-  const governedOperations = new Set<Promise<unknown>>();
-  let governedCancellationStarted = false;
-  let deferredGovernedSettlement: Promise<unknown> | null = null;
+  const governedCleanupOperations = new Set<Promise<unknown>>();
+  let governedCancellationCommitted = false;
+  let deferredGovernedCleanupSettlement: Promise<unknown> | null = null;
   let deferredSessionCancellationSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const handoffCleanupOperations = new Set<Promise<unknown>>();
@@ -275,15 +264,25 @@ async function consumeTurn(
               event,
             });
             if (governedResult !== null && !isTurnTerminal(event)) {
-              governedCancellationStarted = true;
-              await settleBeforeAbort(
-                () => Promise.resolve().then(() => session.cancel?.({
-                  reason: "Paperclip parked this turn on a durable governed interaction.",
-                  signal: appendAbort.signal,
-                })).catch(() => undefined),
-                appendAbort.signal,
-                governedOperations,
-              );
+              if (session.cancel === undefined) {
+                throw new Error("native_governed_wait_cancellation_unavailable");
+              }
+              // A governed result is already durable. Commit cancellation
+              // synchronously, then stop consuming provider output now rather
+              // than waiting for an abort-insensitive cleanup or terminal event.
+              // The returned promise owns cleanup only and remains observed in
+              // finally, where its wait is bounded and the session quarantined.
+              const cancellation = session.cancel({
+                reason: "Paperclip parked this turn on a durable governed interaction.",
+                signal: appendAbort.signal,
+              });
+              governedCancellationCommitted = true;
+              const cleanup = cancellation.cleanup;
+              governedCleanupOperations.add(cleanup);
+              void cleanup
+                .catch(() => quarantineSession())
+                .finally(() => governedCleanupOperations.delete(cleanup));
+              return { event, eventCount, highestContiguousSourceSeq, governedResult };
             }
           }
           if (isTurnTerminal(event)) {
@@ -312,17 +311,16 @@ async function consumeTurn(
     appendAbort.abort(error);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
     inputTimers.clear();
-    // Governed callbacks carry control-plane mutation authority. Give them a
-    // bounded cooperative-cancellation window. Once it expires, the aborted
-    // signal is authoritative: retain observation of the broken callback, but
-    // do not let it keep a provider session allocated indefinitely.
-    if (governedOperations.size > 0) {
-      const governedSettlement = Promise.allSettled([...governedOperations]);
-      if (!(await settlesWithin(governedSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
-        deferredGovernedSettlement = governedSettlement;
+    // Governed-wait discovery is synchronous and observational, and provider
+    // cancellation has already committed synchronously. Bound only the
+    // authority-free provider cleanup while keeping its outcome observed.
+    if (governedCleanupOperations.size > 0) {
+      const governedCleanupSettlement = Promise.allSettled([...governedCleanupOperations]);
+      if (!(await settlesWithin(governedCleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+        deferredGovernedCleanupSettlement = governedCleanupSettlement;
       }
     }
-    if (!governedCancellationStarted) {
+    if (!governedCancellationCommitted) {
       const deferredCancellation = await attemptOptionalSessionCancellation(
         session,
         "Native session event consumption failed.",
@@ -337,10 +335,14 @@ async function consumeTurn(
     const activeHandoffCleanupSettlement = handoffCleanupOperations.size > 0
       ? Promise.allSettled([...handoffCleanupOperations])
       : null;
+    const activeGovernedCleanupSettlement = deferredGovernedCleanupSettlement === null
+      && governedCleanupOperations.size > 0
+      ? Promise.allSettled([...governedCleanupOperations])
+      : null;
     if (!consumptionFailed && !appendAbort.signal.aborted) {
-      // A provider terminal revokes live-turn authority. Handoff state was
-      // already committed synchronously; abort only tells provider cleanup
-      // that it must not begin any new work.
+      // A provider terminal or synchronous governed cancellation revokes
+      // live-turn authority. Handoff state was already committed; abort only
+      // tells provider cleanup that it must not begin any new work.
       appendAbort.abort(new Error("native turn reached a terminal state"));
     }
     // Do not let failure escape while the provider iterator still owns a live
@@ -357,7 +359,8 @@ async function consumeTurn(
       iteratorTeardown,
       consumer,
       ...(activeHandoffCleanupSettlement ? [activeHandoffCleanupSettlement] : []),
-      ...(deferredGovernedSettlement ? [deferredGovernedSettlement] : []),
+      ...(activeGovernedCleanupSettlement ? [activeGovernedCleanupSettlement] : []),
+      ...(deferredGovernedCleanupSettlement ? [deferredGovernedCleanupSettlement] : []),
       ...(deferredSessionCancellationSettlement
         ? [deferredSessionCancellationSettlement]
         : []),

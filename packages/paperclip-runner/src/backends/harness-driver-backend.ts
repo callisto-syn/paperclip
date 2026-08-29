@@ -321,14 +321,23 @@ class HarnessNativeSession implements NativeSession {
     return this.#session.interrupt(input);
   }
 
-  async cancel(input: { reason: string; signal: AbortSignal }) {
-    this.#explicitlyCancelled = true;
+  cancel(input: { reason: string; signal: AbortSignal }) {
     if (input.signal.aborted) {
       throw input.signal.reason ?? new Error("native session cancellation aborted");
     }
-    if (this.#session.interrupt !== undefined) {
-      await this.#session.interrupt({ reason: input.reason, signal: input.signal });
-    }
+    // This flag is the adapter's synchronous publication boundary. Provider
+    // interruption happens afterward as passive cleanup, so a slow or broken
+    // transport cannot synthesize or publish new accepted output for the turn.
+    this.#explicitlyCancelled = true;
+    const interrupt = this.#session.interrupt;
+    return {
+      cleanup: interrupt === undefined
+        ? Promise.resolve()
+        : Promise.resolve().then(() => interrupt.call(this.#session, {
+            reason: input.reason,
+            signal: input.signal,
+          })),
+    };
   }
 
   resolveRuntimeRequest(input: {
