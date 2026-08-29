@@ -282,11 +282,13 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("reports a terminal host cleanup failure without a retry loop", async () => {
+  it("autonomously retries a terminal host cleanup failure once", async () => {
     const fixture = driverFixture({}, {
       closeSettlementTimeoutMs: 1,
     });
-    fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
+    fixture.host.close
+      .mockRejectedValueOnce(new Error("transient cleanup failure"))
+      .mockResolvedValueOnce(undefined);
     const session = await fixture.driver.openSession({
       runId: "run-close-permanent-failure",
       normalizedSessionId: "session-1",
@@ -295,17 +297,22 @@ describe("Codex ACPX harness driver", () => {
     const diagnosticEvents = collectUntil(session.events(), "harness.diagnostic");
 
     await expect(
-      session.close({ reason: "runtime close persistently failed" }),
-    ).rejects.toThrow("persistent cleanup failure");
+      session.close({ reason: "runtime close initially failed" }),
+    ).rejects.toThrow("transient cleanup failure");
     await expect(diagnosticEvents).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({
         eventType: "harness.diagnostic",
         payload: expect.objectContaining({ code: "acpx_host_cleanup_deferred" }),
       }),
     ]));
-    expect(fixture.host.close).toHaveBeenCalledOnce();
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
+    expect(fixture.host.close).toHaveBeenLastCalledWith({
+      reason: "runtime close initially failed (automatic cleanup recovery)",
+    });
+    await expect(
+      session.close({ reason: "observe recovered cleanup" }),
+    ).resolves.toBeUndefined();
+    expect(fixture.host.close).toHaveBeenCalledTimes(2);
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {

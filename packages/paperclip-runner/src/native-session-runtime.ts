@@ -720,9 +720,29 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
   const closeSession = () => {
     if (sessionClosePromise === null) {
       quarantineSession();
-      sessionClosePromise = session.close({
-        reason: "native session execution complete",
-      });
+      sessionClosePromise = (async () => {
+        try {
+          await session.close({
+            reason: "native session execution complete",
+          });
+        } catch (firstError) {
+          try {
+            // A close rejection does not prove cleanup occurred. Retry once in
+            // order, but keep the first failure authoritative for the caller.
+            // The returned execution remains pending until this recovery
+            // settles, so no cleanup operation escapes the run boundary.
+            await session.close({
+              reason: "native session cleanup recovery after close failure",
+            });
+          } catch (recoveryError) {
+            throw new AggregateError(
+              [firstError, recoveryError],
+              "native session cleanup failed after recovery",
+            );
+          }
+          throw firstError;
+        }
+      })();
     }
     return sessionClosePromise;
   };

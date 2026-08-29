@@ -249,6 +249,7 @@ class CodexAcpxSession implements HarnessSession {
   #activePump: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #hostClosePromise: Promise<void> | null = null;
+  #hostCloseRecoveryPromise: Promise<void> | null = null;
   #hostClosed = false;
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
@@ -500,6 +501,9 @@ class CodexAcpxSession implements HarnessSession {
     try {
       await closePromise;
       this.#closed = true;
+    } catch (error) {
+      this.#scheduleHostCloseRecovery(input.reason);
+      throw error;
     } finally {
       if (this.#closePromise === closePromise) this.#closePromise = null;
     }
@@ -559,12 +563,49 @@ class CodexAcpxSession implements HarnessSession {
     });
     this.#hostClosePromise = closePromise;
     this.#retainCleanup(closePromise);
-    void closePromise.catch(() => {
-      if (this.#hostClosePromise === closePromise) {
-        this.#hostClosePromise = null;
-      }
-    });
     return closePromise;
+  }
+
+  #scheduleHostCloseRecovery(reason: string): void {
+    if (this.#hostClosed || this.#hostCloseRecoveryPromise) return;
+    const failedOrPendingClose = this.#hostClosePromise;
+    if (!failedOrPendingClose) return;
+    // Never overlap the exact cleanup that exceeded the caller's wait bound.
+    // If it eventually fails, however, production owns one autonomous retry
+    // instead of requiring an otherwise-finished native execution to call
+    // close again. A permanently pending cleanup remains the sole owner while
+    // the runtime adapter independently terminates its tracked child process.
+    const recovery = failedOrPendingClose.then(
+      () => {
+        this.#closed = true;
+      },
+      async () => {
+        if (this.#hostClosePromise === failedOrPendingClose) {
+          this.#hostClosePromise = null;
+        }
+        const retry = this.#startHostClose({
+          reason: `${reason} (automatic cleanup recovery)`,
+        });
+        try {
+          await retry;
+          this.#closed = true;
+        } catch (error) {
+          if (this.#hostClosePromise === retry) {
+            this.#hostClosePromise = null;
+          }
+          throw error;
+        }
+      },
+    );
+    this.#hostCloseRecoveryPromise = recovery;
+    this.#retainCleanup(recovery);
+    void recovery
+      .finally(() => {
+        if (this.#hostCloseRecoveryPromise === recovery) {
+          this.#hostCloseRecoveryPromise = null;
+        }
+      })
+      .catch(() => undefined);
   }
 
   async #pumpTurn(turnId: string, turn: AcpxRuntimeTurn): Promise<void> {
