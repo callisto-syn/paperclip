@@ -1183,7 +1183,8 @@ impl CodexCommandExecutor {
             .state
             .as_mut()
             .expect("Codex state remains available at its tool receipt limit");
-        let interrupt_pending = state.begin_receipt_limit_stop(call_id, operation_id)?;
+        let interrupt_pending =
+            state.begin_receipt_limit_stop(call_id.clone(), operation_id.clone())?;
         if interrupt_pending {
             self.save_state()?;
             // Persist a retry marker before the fallible provider request, then
@@ -1196,6 +1197,27 @@ impl CodexCommandExecutor {
                 .expect("Codex state remains available after interrupting at its receipt limit")
                 .mark_receipt_limit_interrupt_sent();
             self.save_state()?;
+        }
+        // The durable diagnostic owns the turn-level failure, while every
+        // buffered JSON-RPC call still receives an explicit provider error.
+        // This rejection is deliberately not another durable receipt: the
+        // receipt budget is already exhausted. If Codex closed after accepting
+        // the interrupt, the durable stop remains authoritative and a failed
+        // courtesy response must not prevent terminal polling.
+        let rejection = ToolResult {
+            call_id,
+            operation_id,
+            result: json!({
+                "error": {
+                    "code": "semantic_tool_turn_receipt_limit",
+                    "message": "Paperclip stopped this turn at its durable semantic-tool receipt limit",
+                    "retryable": false,
+                },
+            }),
+            is_error: true,
+        };
+        if let Some(provider) = self.provider.as_mut() {
+            let _ = provider.deliver_tool_result(&rejection);
         }
         Ok(())
     }
