@@ -692,6 +692,7 @@ describe("Codex ACPX runtime adapter", () => {
     const result = openCodexAcpxRuntime(openOptions(command), {
       createRegistry: () => registry(),
       createStore: () => store(),
+      reapUnresponsiveChild: vi.fn().mockResolvedValue(undefined),
       createRuntime: (options) => {
         vi.mocked(runtime.ensureSession).mockImplementation(async () => {
           options.spawnAgent?.({
@@ -878,6 +879,7 @@ describe("Codex ACPX runtime adapter", () => {
     const port = await openCodexAcpxRuntime(openOptions(command), {
       createRegistry: () => registry(),
       createStore: () => store(),
+      reapUnresponsiveChild: vi.fn().mockResolvedValue(undefined),
       createRuntime: (options) => {
         runtimeOptions = options;
         return runtime;
@@ -1129,6 +1131,7 @@ function failingSignalChild(): {
     queueMicrotask(() => child.emit("error", error));
     return true;
   });
+  child.unref = vi.fn(() => child);
   return { child, errors };
 }
 
