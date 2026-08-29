@@ -11,7 +11,6 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
-const failedSessionCleanupOwners = new Set<Promise<void>>();
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -124,7 +123,6 @@ async function consumeTurn(
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
   closeFailedSession: () => Promise<void>,
-  retainFailedCleanup: (cleanup: Promise<void>) => void,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
   externalSignal?: AbortSignal,
 ) {
@@ -336,24 +334,28 @@ async function consumeTurn(
         : []),
     ]);
     if (consumptionFailed) {
-      if (await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS)) {
-        await closeFailedSession();
-      } else {
-        // The aborted signal is the hard mutation-authority boundary. Retain
-        // observation of uncooperative callbacks, but close the provider
-        // independently so one callback that ignores cancellation cannot keep
-        // the session allocated forever.
-        retainFailedCleanup(teardownSettlement.then(() => undefined));
-        retainFailedCleanup(Promise.resolve().then(closeFailedSession));
-      }
+      // Start the required provider close immediately so it can release a
+      // blocked iterator or provider operation. Do not, however, let the
+      // execution reject until every exact operation has settled. JavaScript
+      // promises cannot be forcibly terminated; returning while a callback
+      // that ignored abort was still live would let work escape the failed-run
+      // boundary. NativeSession.close() is therefore a hard join contract, not
+      // merely a best-effort resource release.
+      const [, closeResult] = await Promise.allSettled([
+        teardownSettlement,
+        Promise.resolve().then(closeFailedSession),
+      ]);
+      if (closeResult.status === "rejected") throw closeResult.reason;
     } else {
       if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
         // A terminal provider fact does not make an uncooperative handoff safe
-        // to forget. Revoke its mutation authority, retain observation of the
-        // exact settlement, and close the provider independently so a broken
-        // callback cannot keep the session allocated forever.
-        retainFailedCleanup(teardownSettlement.then(() => undefined));
-        retainFailedCleanup(Promise.resolve().then(closeFailedSession));
+        // to forget. Revoke its mutation authority, start provider close, and
+        // join the exact operation before publishing a failed execution.
+        const [, closeResult] = await Promise.allSettled([
+          teardownSettlement,
+          Promise.resolve().then(closeFailedSession),
+        ]);
+        if (closeResult.status === "rejected") throw closeResult.reason;
         throw new Error("native_terminal_handoff_settlement_timeout");
       }
     }
@@ -521,18 +523,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return sessionClosePromise;
   };
   let executionSucceeded = false;
-  let failedCleanupDeferred = false;
-  const retainFailedCleanup = (cleanup: Promise<void>) => {
-    failedCleanupDeferred = true;
-    // Revoke reuse immediately while retaining a strong process-level owner
-    // for the exact teardown-and-close chain after execution returns.
-    options.onSession?.(null);
-    failedSessionCleanupOwners.add(cleanup);
-    void cleanup.then(
-      () => failedSessionCleanupOwners.delete(cleanup),
-      () => failedSessionCleanupOwners.delete(cleanup),
-    );
-  };
   try {
     const checkpoint = async () => {
       const snapshot = await session.snapshot();
@@ -575,7 +565,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         options.timeoutMs ?? 900_000,
         options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
         closeSession,
-        retainFailedCleanup,
         options.resolveGovernedWait,
         consumptionAbort.signal,
       );
@@ -756,7 +745,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if ((!options.keepSessionOpen || !executionSucceeded) && !failedCleanupDeferred) {
+    if (!options.keepSessionOpen || !executionSucceeded) {
       await closeSession();
     }
   }
