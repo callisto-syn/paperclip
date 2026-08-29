@@ -87,6 +87,20 @@ describe("Codex app-server transport limits", () => {
     await transport.close();
   });
 
+  it("fails pending and future requests when stdout closes cleanly", async () => {
+    const transport = nodeTransport(
+      "process.stdin.resume(); process.stdout.end(); setInterval(() => {}, 1000)",
+    );
+    const pending = transport.request("pending", {});
+    await expect(pending).rejects.toThrow(
+      "codex app-server stdout ended before transport closure",
+    );
+    await expect(transport.request("after-stdout-end", {})).rejects.toThrow(
+      "codex app-server transport is closed",
+    );
+    await transport.close();
+  });
+
   it("fails closed when outbound buffering exceeds its bound", async () => {
     const diagnostics: string[] = [];
     const transport = nodeTransport("process.stdin.pause(); setInterval(() => {}, 1000)", {

@@ -444,7 +444,10 @@ export class ProcessCodexAppServerTransport implements CodexAppServerTransport {
     this.#process.stdout.on("data", (chunk: Buffer) =>
       this.#stdoutDecoder.write(chunk),
     );
-    this.#process.stdout.on("end", () => this.#stdoutDecoder.end());
+    this.#process.stdout.on("end", () => {
+      this.#stdoutDecoder.end();
+      this.#fatal(new Error("codex app-server stdout ended before transport closure"));
+    });
     this.#process.stderr.on("data", (chunk: Buffer) =>
       this.#stderrDecoder.write(chunk),
     );
