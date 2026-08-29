@@ -116,6 +116,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let fail_after_turn_completion = args
         .iter()
         .any(|value| value == "--fail-after-turn-completion");
+    let fail_after_turn_completion_delay_ms =
+        argument(&args, "--fail-after-turn-completion-delay-ms")
+            .map(|value| value.parse::<u64>())
+            .transpose()?;
     let fail_after_completed_turn_signal =
         argument(&args, "--fail-after-completed-turn-signal").map(PathBuf::from);
     let pre_response_notification = args
@@ -200,6 +204,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "id": id,
                     "result": {"thread": {"id": state.thread_id, "turns": turns}}
                 }))?;
+                if state.active_turn_id.is_none() {
+                    if let Some(signal_path) = &fail_after_completed_turn_signal {
+                        while !signal_path.exists() {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        return Err("configured failure after completed turn became idle".into());
+                    }
+                }
             }
             "turn/start" => {
                 state.active_turn_id = Some("provider-turn-1".to_owned());
@@ -256,13 +268,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else if !hold_turn {
                     finish_turn(&state_path, &mut state, "completed")?;
                     if fail_after_turn_completion {
-                        return Err("configured failure after turn completion".into());
-                    }
-                    if let Some(signal_path) = &fail_after_completed_turn_signal {
-                        while !signal_path.exists() {
-                            thread::sleep(Duration::from_millis(1));
+                        if let Some(delay_ms) = fail_after_turn_completion_delay_ms {
+                            thread::sleep(Duration::from_millis(delay_ms));
                         }
-                        return Err("configured failure after completed turn became idle".into());
+                        return Err("configured failure after turn completion".into());
                     }
                     if exit_after_turn_completion {
                         return Ok(());

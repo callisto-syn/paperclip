@@ -379,9 +379,16 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn nonzero_provider_exit_does_not_refail_a_completed_turn() {
+fn delayed_nonzero_provider_exit_does_not_refail_a_completed_turn() {
     let directory = temporary_directory("completion-then-nonzero-exit");
-    let config = provider_config(&directory, &["--fail-after-turn-completion"]);
+    let config = provider_config(
+        &directory,
+        &[
+            "--fail-after-turn-completion",
+            "--fail-after-turn-completion-delay-ms",
+            "250",
+        ],
+    );
     let mut executor = CodexCommandExecutor::new(&directory);
     executor
         .execute(&command(
@@ -404,13 +411,14 @@ fn nonzero_provider_exit_does_not_refail_a_completed_turn() {
         .expect("start provider turn");
 
     let mut event_types = Vec::new();
-    for _ in 0..40 {
+    for _ in 0..600 {
         event_types.extend(
             poll_and_ack(&mut executor)
                 .expect("poll completion and nonzero exit")
                 .into_iter()
                 .map(|event| event.event_type),
         );
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,7 +15,6 @@ const MAX_BUFFERED_MESSAGES: usize = 1_024;
 const MAX_INSTRUCTIONS_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_TOOL_REQUESTS: usize = 4_096;
 const MAX_PENDING_TOOL_REQUEST_BYTES: usize = 16 * 1024 * 1024;
-const POST_COMPLETION_EXIT_RECONCILIATION: Duration = Duration::from_millis(100);
 type QuestionOptionLabels = BTreeMap<String, BTreeMap<String, String>>;
 type QuestionSetMapping = (String, Value, QuestionOptionLabels);
 
@@ -154,6 +153,7 @@ pub struct CodexProvider {
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
     completion_exit_reconciliation_pending: bool,
+    completion_probe_request_id: Option<u64>,
 }
 
 impl CodexProvider {
@@ -189,6 +189,7 @@ impl CodexProvider {
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
             completion_exit_reconciliation_pending: false,
+            completion_probe_request_id: None,
         };
         let initialized = provider.request(
             "initialize",
@@ -281,6 +282,7 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completion_exit_reconciliation_pending = false;
+        self.completion_probe_request_id = None;
         let result = self.request(
             "turn/start",
             json!({
@@ -365,19 +367,32 @@ impl CodexProvider {
             message
         } else {
             let Some(line) = self.process.receive_stdout_line(Duration::from_millis(1))? else {
-                let mut exit = self.process.try_wait()?;
+                let exit = self.process.try_wait()?;
                 let completed_turn_exit = self.completion_exit_reconciliation_pending;
-                if exit.is_none() && completed_turn_exit {
-                    // A provider may close its output just before the OS makes
-                    // its exit status observable. Bound that race here so the
-                    // completion remains authoritative across polling batches,
-                    // without hiding a failure after the provider became idle.
-                    let deadline = Instant::now() + POST_COMPLETION_EXIT_RECONCILIATION;
-                    while exit.is_none() && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(1));
-                        exit = self.process.try_wait()?;
+                if exit.is_none()
+                    && completed_turn_exit
+                    && self.completion_probe_request_id.is_none()
+                {
+                    // Do not expire completion authority on a wall-clock guess.
+                    // A response to this post-completion probe proves the
+                    // provider processed new idle work; only then may a later
+                    // exit be classified as a new session failure.
+                    let request_id = self.next_request_id;
+                    self.next_request_id = self
+                        .next_request_id
+                        .checked_add(1)
+                        .ok_or_else(|| LocalRunnerError::invalid("Codex request id exhausted"))?;
+                    if self
+                        .process
+                        .send(&json!({
+                            "id": request_id,
+                            "method": "thread/read",
+                            "params": {"threadId": self.thread_id, "includeTurns": true},
+                        }))
+                        .is_ok()
+                    {
+                        self.completion_probe_request_id = Some(request_id);
                     }
-                    self.completion_exit_reconciliation_pending = false;
                 }
                 return if let Some(exit) = exit {
                     Ok(Some(CodexProviderEvent::Exited {
@@ -390,6 +405,15 @@ impl CodexProvider {
             };
             parse_provider_message(&line)?
         };
+
+        if self.completion_probe_request_id.is_some_and(|request_id| {
+            message.get("id").and_then(Value::as_u64) == Some(request_id)
+                && message.get("method").is_none()
+        }) {
+            self.completion_probe_request_id = None;
+            self.completion_exit_reconciliation_pending = false;
+            return Ok(None);
+        }
 
         if let (Some(rpc_id), Some(method)) = (
             message.get("id").cloned(),
@@ -552,6 +576,7 @@ impl CodexProvider {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
                 self.completion_exit_reconciliation_pending = true;
+                self.completion_probe_request_id = None;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the
