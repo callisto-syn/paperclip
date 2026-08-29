@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -95,6 +95,35 @@ describe("ACPX sidecar locations", () => {
         tmpdir(),
       ),
     ).toEqual([]);
+  });
+
+  it("attests scheme-shaped targets after relative and absolute normalization", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "paperclip-acpx-locations-"));
+    const entry = join(workspace, "src:main.ts");
+    writeFileSync(entry, "");
+    try {
+      expect(
+        safeAcpxLocations(
+          [{ path: "./src:main.ts" }, { path: resolve(entry) }],
+          workspace,
+        ),
+      ).toEqual([
+        {
+          path: "src:main.ts",
+          line: null,
+          pathBoundary: "paperclip.workspace_relative_display.v2",
+          pathAttestation: "paperclip.workspace_entry.v1",
+        },
+        {
+          path: "src:main.ts",
+          line: null,
+          pathBoundary: "paperclip.workspace_relative_display.v2",
+          pathAttestation: "paperclip.workspace_entry.v1",
+        },
+      ]);
+    } finally {
+      rmSync(workspace, { force: true, recursive: true });
+    }
   });
 
   it("omits every location until the session working directory is bound", () => {

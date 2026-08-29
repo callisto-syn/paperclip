@@ -44,8 +44,14 @@ export function safeAcpxLocations(
     ) {
       return [];
     }
+    // Classify the value we actually emit as well as the provider's spelling.
+    // Dot-relative and absolute paths can normalize to a scheme-shaped display
+    // target even though their raw forms did not begin with a scheme prefix.
     const requiresEntryAttestation =
-      WINDOWS_DRIVE_PREFIX.test(rawPath) || RFC_URI_SCHEME_PREFIX.test(rawPath);
+      WINDOWS_DRIVE_PREFIX.test(rawPath) ||
+      RFC_URI_SCHEME_PREFIX.test(rawPath) ||
+      WINDOWS_DRIVE_PREFIX.test(portable) ||
+      RFC_URI_SCHEME_PREFIX.test(portable);
     let entryAttested = false;
     if (requiresEntryAttestation) {
       try {
