@@ -52,6 +52,11 @@ export interface ExecuteNativeSessionOptions {
   resolveGovernedWait?: (input: {
     turnId: string | null;
     event: PrpEvent;
+    /**
+     * Resolution must settle when this signal aborts. The runtime joins the
+     * resolver before closing the session, so even a non-cooperative resolver
+     * cannot mutate control-plane state after teardown.
+     */
     signal: AbortSignal;
   }) => Promise<PrpStructuredRunResult | null>;
 }
@@ -86,23 +91,22 @@ async function attemptOptionalSessionCancellation(session: NativeSession, reason
   if (graceTimer !== undefined) clearTimeout(graceTimer);
 }
 
-async function settleBeforeAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  // The callback may not support cancellation yet. Keep observing its eventual
-  // rejection after the runtime stops awaiting it so it cannot become an
-  // unhandled rejection.
-  void operation.catch(() => undefined);
+async function settleBeforeAbort<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal,
+  inFlight: Set<Promise<unknown>>,
+): Promise<T> {
   if (signal.aborted) throw signal.reason ?? new Error("native event consumption aborted");
-
-  let removeAbortListener = () => {};
-  const aborted = new Promise<never>((_resolve, reject) => {
-    const abort = () => reject(signal.reason ?? new Error("native event consumption aborted"));
-    signal.addEventListener("abort", abort, { once: true });
-    removeAbortListener = () => signal.removeEventListener("abort", abort);
-  });
+  // Promise work cannot be forcibly cancelled in JavaScript. Keep ownership
+  // of the operation after abort and join it before session.close(); the signal
+  // provides prompt cooperative cancellation, while joining prevents an
+  // abort-ignoring callback from publishing stale state after teardown.
+  const pending = operation();
+  inFlight.add(pending);
   try {
-    return await Promise.race([operation, aborted]);
+    return await pending;
   } finally {
-    removeAbortListener();
+    inFlight.delete(pending);
   }
 }
 
@@ -116,6 +120,8 @@ async function consumeTurn(
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const appendAbort = new AbortController();
+  const governedOperations = new Set<Promise<unknown>>();
+  let governedCancellationStarted = false;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
   let stopConsumer = false;
@@ -202,19 +208,22 @@ async function consumeTurn(
           }
           if (governedResult === null && resolveGovernedWait) {
             governedResult = await settleBeforeAbort(
-              Promise.resolve().then(() => resolveGovernedWait({
+              () => Promise.resolve().then(() => resolveGovernedWait({
                 turnId: event.turnId ?? null,
                 event,
                 signal: appendAbort.signal,
               })),
               appendAbort.signal,
+              governedOperations,
             );
             if (governedResult !== null && !isTurnTerminal(event)) {
+              governedCancellationStarted = true;
               await settleBeforeAbort(
-                Promise.resolve().then(() => session.cancel?.({
+                () => Promise.resolve().then(() => session.cancel?.({
                   reason: "Paperclip parked this turn on a durable governed interaction.",
                 })).catch(() => undefined),
                 appendAbort.signal,
+                governedOperations,
               );
             }
           }
@@ -240,7 +249,15 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
-    await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
+    // A governed resolver or cancellation may ignore abort. Join the exact
+    // operation before teardown so it cannot publish stale control-plane or
+    // provider state after close. Cooperative implementations settle promptly.
+    if (governedOperations.size > 0) {
+      await Promise.allSettled([...governedOperations]);
+    }
+    if (!governedCancellationStarted) {
+      await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
+    }
     // `close` is the required termination boundary. Unlike optional interrupt
     // and cancel support, it must release a pending event read before it
     // resolves, which makes the teardown waits below bounded by the backend.
