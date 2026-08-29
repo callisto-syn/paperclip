@@ -6,6 +6,7 @@ import {
   type HarnessRuntimeRequest,
 } from "../contracts/harness-driver.js";
 import {
+  createCodexQuestionResponseContext,
   runtimeRequestKind,
   runtimeRequestResponse,
 } from "../drivers/codex/codex-question-adapter.js";
@@ -162,7 +163,11 @@ export async function loadLiveConsoleConformanceFixture(
       };
       if (
         !isDeepStrictEqual(
-          runtimeRequestResponse(harnessRequest, parsedResolution),
+          runtimeRequestResponse(
+            harnessRequest,
+            parsedResolution,
+            createCodexQuestionResponseContext(),
+          ),
           request.expectedResponse,
         )
       ) {
