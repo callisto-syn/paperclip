@@ -13,10 +13,23 @@ import {
 } from "../../contracts/harness-driver.js";
 import { redactCodexDiagnostic } from "./app-server-transport.js";
 
+export interface CodexQuestionResponseContext {
+  readonly kind: "codex_question_response_context";
+}
+
 const NATIVE_OPTION_VALUES = new WeakMap<
-  PaperclipQuestionSet,
+  CodexQuestionResponseContext,
   ReadonlyMap<string, ReadonlyMap<string, unknown>>
 >();
+
+/** Create one private response context for one provider runtime request. */
+export function createCodexQuestionResponseContext(): CodexQuestionResponseContext {
+  const context = Object.freeze({
+    kind: "codex_question_response_context" as const,
+  });
+  NATIVE_OPTION_VALUES.set(context, new Map());
+  return context;
+}
 
 interface NormalizedQuestionOptions {
   options: NonNullable<PaperclipQuestion["options"]>;
@@ -214,13 +227,21 @@ function jsonSchemaOptions(schema: Record<string, unknown>): NormalizedQuestionO
 function retainNativeOptionValues(
   questionSet: PaperclipQuestionSet,
   nativeValues: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
+  responseContext: CodexQuestionResponseContext,
 ): PaperclipQuestionSet {
-  NATIVE_OPTION_VALUES.set(questionSet, nativeValues);
+  if (!NATIVE_OPTION_VALUES.has(responseContext)) {
+    throw new Error("Codex question response context was not created by this adapter");
+  }
+  NATIVE_OPTION_VALUES.set(responseContext, nativeValues);
   return questionSet;
 }
 
 /** Codex-native requests are converted once, before they enter PRP. */
-export function normalizeCodexQuestionSet(method: string, params: Record<string, unknown>): PaperclipQuestionSet | null {
+export function normalizeCodexQuestionSet(
+  method: string,
+  params: Record<string, unknown>,
+  responseContext: CodexQuestionResponseContext,
+): PaperclipQuestionSet | null {
   if (method === "item/tool/requestUserInput" || method === "tool/requestUserInput") {
     if (!Array.isArray(params.questions) || params.questions.length === 0) return null;
     if (params.questions.length > 64) throw new Error("Codex question form exceeds 64 questions");
@@ -296,7 +317,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
         1_000,
       ),
       questions,
-    }), nativeValues);
+    }), nativeValues, responseContext);
   }
   if (method !== "mcpServer/elicitation/request") return null;
   const requestedSchema = record(params.requestedSchema ?? params.schema);
@@ -375,7 +396,7 @@ export function normalizeCodexQuestionSet(method: string, params: Record<string,
       : {}),
     submitLabel: "Submit",
     questions,
-  }), nativeValues);
+  }), nativeValues, responseContext);
 }
 
 export function runtimeRequestProtocolPayload(request: HarnessRuntimeRequest): Record<string, unknown> {
@@ -399,6 +420,7 @@ export function runtimeRequestProtocolPayload(request: HarnessRuntimeRequest): R
 function canonicalCodexAnswers(
   request: HarnessRuntimeRequest,
   response: PaperclipQuestionResponse,
+  responseContext: CodexQuestionResponseContext,
 ): Record<string, { answers: string[] }> {
   const result: Record<string, { answers: string[] }> = {};
   for (const question of request.input?.questions ?? []) {
@@ -406,7 +428,7 @@ function canonicalCodexAnswers(
     if (answer === undefined) continue;
     const nativeValues = request.input === undefined
       ? undefined
-      : NATIVE_OPTION_VALUES.get(request.input)?.get(question.id);
+      : NATIVE_OPTION_VALUES.get(responseContext)?.get(question.id);
     const labels = (answer.selectedOptionIds ?? []).map((optionId) =>
       nativeValues?.get(optionId) ??
         question.options?.find((option) => option.id === optionId)?.label,
@@ -436,6 +458,7 @@ function jsonSchemaOptionValue(
 function canonicalElicitationContent(
   request: HarnessRuntimeRequest,
   response: PaperclipQuestionResponse,
+  responseContext: CodexQuestionResponseContext,
 ): Record<string, unknown> {
   const requestedSchema = record(request.details.requestedSchema ?? request.details.schema);
   const properties = record(requestedSchema.properties);
@@ -447,7 +470,7 @@ function canonicalElicitationContent(
     const itemSchema = record(property.items);
     const nativeValues = request.input === undefined
       ? undefined
-      : NATIVE_OPTION_VALUES.get(request.input)?.get(question.id);
+      : NATIVE_OPTION_VALUES.get(responseContext)?.get(question.id);
     if (question.answerMode === "text") {
       const value = answer.text ?? "";
       content[question.id] = property.type === "integer" || property.type === "number" ? Number(value) : value;
@@ -473,6 +496,7 @@ function canonicalElicitationContent(
 export function runtimeRequestResponse(
   request: HarnessRuntimeRequest,
   resolution: HarnessRuntimeRequestResolution,
+  responseContext: CodexQuestionResponseContext,
 ): Record<string, unknown> {
   if (
     request.requestKind === "command_approval" ||
@@ -504,7 +528,13 @@ export function runtimeRequestResponse(
   }
   if (request.requestKind === "user_input") {
     if (resolution.action === "submit" && "response" in resolution) {
-      return { answers: canonicalCodexAnswers(request, resolution.response) };
+      return {
+        answers: canonicalCodexAnswers(
+          request,
+          resolution.response,
+          responseContext,
+        ),
+      };
     }
     if (resolution.action !== "submit" || !("answers" in resolution)) {
       // Declines and cancels are the only non-submit answers the validator
@@ -516,7 +546,11 @@ export function runtimeRequestResponse(
   if (resolution.action === "submit" && "response" in resolution) {
     return {
       action: "accept",
-      content: canonicalElicitationContent(request, resolution.response),
+      content: canonicalElicitationContent(
+        request,
+        resolution.response,
+        responseContext,
+      ),
       _meta: null,
     };
   }

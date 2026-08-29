@@ -2,12 +2,35 @@ import { describe, expect, it } from "vitest";
 
 import type { HarnessRuntimeRequest } from "../../contracts/harness-driver.js";
 import {
+  createCodexQuestionResponseContext,
   hasCodexQuestionForm,
-  normalizeCodexQuestionSet,
+  normalizeCodexQuestionSet as normalizeCodexQuestionSetWithContext,
   runtimeRequestKind,
   runtimeRequestProtocolPayload,
-  runtimeRequestResponse,
+  runtimeRequestResponse as runtimeRequestResponseWithContext,
 } from "./codex-question-adapter.js";
+
+function normalizeCodexQuestionSet(
+  method: string,
+  params: Record<string, unknown>,
+) {
+  return normalizeCodexQuestionSetWithContext(
+    method,
+    params,
+    createCodexQuestionResponseContext(),
+  );
+}
+
+function runtimeRequestResponse(
+  request: Parameters<typeof runtimeRequestResponseWithContext>[0],
+  resolution: Parameters<typeof runtimeRequestResponseWithContext>[1],
+) {
+  return runtimeRequestResponseWithContext(
+    request,
+    resolution,
+    createCodexQuestionResponseContext(),
+  );
+}
 
 describe("Codex structured question adapter", () => {
   it("normalizes requestUserInput without inventing required answers", () => {
@@ -264,13 +287,14 @@ describe("Codex structured question adapter", () => {
   });
 
   it("keeps native option answers private while redacting their display labels", () => {
-    const input = normalizeCodexQuestionSet("tool/requestUserInput", {
+    const responseContext = createCodexQuestionResponseContext();
+    const input = normalizeCodexQuestionSetWithContext("tool/requestUserInput", {
       questions: [{
         id: "credential",
         question: "Choose the configured credential.",
         options: [{ id: "configured", label: "token=native-option-secret" }],
       }],
-    })!;
+    }, responseContext)!;
     const request: HarnessRuntimeRequest = {
       requestId: "request-private-option",
       requestKind: "user_input",
@@ -286,19 +310,21 @@ describe("Codex structured question adapter", () => {
 
     expect(JSON.stringify(input)).not.toContain("native-option-secret");
     expect(input.questions[0]?.options?.[0]?.label).toContain("[REDACTED]");
-    expect(runtimeRequestResponse(request, {
+    const rehydratedRequest = structuredClone(request);
+    expect(runtimeRequestResponseWithContext(rehydratedRequest, {
       action: "submit",
       response: {
         schema: "paperclip.question_response.v1",
         answers: { credential: { selectedOptionIds: ["configured"] } },
       },
-    })).toEqual({
+    }, responseContext)).toEqual({
       answers: { credential: { answers: ["token=native-option-secret"] } },
     });
   });
 
   it("redacts credential text from every MCP elicitation display field", () => {
-    const input = normalizeCodexQuestionSet("mcpServer/elicitation/request", {
+    const responseContext = createCodexQuestionResponseContext();
+    const input = normalizeCodexQuestionSetWithContext("mcpServer/elicitation/request", {
       message: "Authorization: Bearer message-secret",
       requestedSchema: {
         type: "object",
@@ -318,7 +344,7 @@ describe("Codex structured question adapter", () => {
           },
         },
       },
-    });
+    }, responseContext);
 
     expect(input).toMatchObject({
       description: expect.stringContaining("[REDACTED]"),
@@ -350,13 +376,13 @@ describe("Codex structured question adapter", () => {
       input: input!,
       origin: { adapter: "codex", method: "mcpServer/elicitation/request" },
     };
-    expect(runtimeRequestResponse(request, {
+    expect(runtimeRequestResponseWithContext(structuredClone(request), {
       action: "submit",
       response: {
         schema: "paperclip.question_response.v1",
         answers: { environment: { selectedOptionIds: ["option-2"] } },
       },
-    })).toEqual({
+    }, responseContext)).toEqual({
       action: "accept",
       content: { environment: "password=option-value-secret" },
       _meta: null,
