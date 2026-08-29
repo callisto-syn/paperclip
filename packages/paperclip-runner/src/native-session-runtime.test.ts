@@ -1672,6 +1672,7 @@ describe("executeNativeSession recovery", () => {
       turnId: "turn-work",
     };
     const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
+    let recoveredSubmissionOwned = true;
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -1680,7 +1681,12 @@ describe("executeNativeSession recovery", () => {
       async *events() { yield structuredClone(terminalEvent); },
       startTurn,
       async result() { return null; },
-      async snapshot() { return structuredClone(checkpoint); },
+      async snapshot() {
+        return {
+          ...structuredClone(checkpoint),
+          dispositionOnlyRecoveryConsumed: recoveredSubmissionOwned,
+        };
+      },
       async close() {},
     };
     const backend: NativeSessionBackend = {
@@ -1746,6 +1752,10 @@ describe("executeNativeSession recovery", () => {
       structuredClone(resultProposalEvent),
       structuredClone(terminalEvent),
     ]);
+    // Provider recovery may clear a legacy pre-acceptance marker when thread
+    // history has no matching turn. Durable replay remains authoritative and
+    // must still prevent a duplicate disposition submission.
+    recoveredSubmissionOwned = false;
 
     await expect(execute()).resolves.toMatchObject({
       result,

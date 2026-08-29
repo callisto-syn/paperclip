@@ -3452,10 +3452,60 @@ describe("Codex app-server Codex driver", () => {
     await expect(recovery!.session!.snapshot()).resolves.toMatchObject({
       activeTurnId: "turn-2",
       dispositionOnlyRecoveryConsumed: true,
+      dispositionOnlyRecoveryTurnId: "turn-2",
     });
     expect(
       second.calls.filter((call) => call.method === "turn/start"),
     ).toHaveLength(0);
+    await recovery!.session!.close({ reason: "test complete" });
+  });
+
+  it("releases a legacy disposition marker when provider history has no accepted turn", async () => {
+    const first = new FakeCodexTransport();
+    const second = new FakeCodexTransport();
+    second.readResponse = {
+      thread: {
+        id: "thread-1",
+        sessionId: "provider-session-1",
+        cwd: WORKSPACE,
+        turns: [{ id: "turn-1", status: "completed", items: [] }],
+      },
+    };
+    second.turnStartResponse = Promise.resolve({
+      turn: { id: "turn-2", status: "inProgress", items: [] },
+    });
+    const driver = makeDriver([first, second]);
+    const original = await driver.openSession({
+      runId: "run-missing-disposition",
+      normalizedSessionId: "normalized-missing-disposition",
+      workingDirectory: WORKSPACE,
+    });
+    await original.startTurn({ message: { role: "user", text: "Complete." } });
+    first.push("turn/completed", {
+      threadId: "thread-1",
+      turn: { id: "turn-1", status: "completed", items: [] },
+    });
+    await collectUntilTerminal(original.events());
+    const checkpoint = await original.snapshot();
+    await original.close({ reason: "simulate pre-acceptance checkpoint" });
+
+    const recovery = await driver.recoverSession?.({
+      ...checkpoint,
+      dispositionOnlyRecoveryConsumed: true,
+      dispositionOnlyRecoveryTurnId: null,
+    });
+    expect(recovery).toMatchObject({ recovered: true });
+    await expect(recovery!.session!.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      dispositionOnlyRecoveryConsumed: false,
+      dispositionOnlyRecoveryTurnId: null,
+    });
+    await expect(recovery!.session!.startTurn({
+      message: { role: "user", text: "Recover disposition only." },
+    })).resolves.toMatchObject({ turnId: "turn-2" });
+    expect(
+      second.calls.filter((call) => call.method === "turn/start"),
+    ).toHaveLength(1);
     await recovery!.session!.close({ reason: "test complete" });
   });
 

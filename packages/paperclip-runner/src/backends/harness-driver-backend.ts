@@ -90,6 +90,8 @@ export class HarnessDriverBackend implements NativeSessionBackend {
       terminalTurns: snapshot.terminalTurns ?? [],
       dispositionOnlyRecoveryConsumed:
         snapshot.dispositionOnlyRecoveryConsumed ?? false,
+      dispositionOnlyRecoveryTurnId:
+        snapshot.dispositionOnlyRecoveryTurnId ?? null,
       pendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
       lineage: snapshot.lineage ?? [],
     };
@@ -404,6 +406,8 @@ class HarnessNativeSession implements NativeSession {
       terminalTurns: snapshot.terminalTurns ?? [],
       dispositionOnlyRecoveryConsumed:
         snapshot.dispositionOnlyRecoveryConsumed ?? false,
+      dispositionOnlyRecoveryTurnId:
+        snapshot.dispositionOnlyRecoveryTurnId ?? null,
       pendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
       lineage: snapshot.lineage ?? [],
     };

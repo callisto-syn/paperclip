@@ -50,6 +50,7 @@ export interface PersistedNativeSession {
   terminalTurns?: PersistedHarnessTurnTerminal[];
   /** Durable at-most-once marker for a resultless terminal recovery turn. */
   dispositionOnlyRecoveryConsumed?: boolean;
+  dispositionOnlyRecoveryTurnId?: string | null;
   pendingRuntimeRequests?: HarnessRuntimeRequest[];
   lineage?: HarnessThreadLineageEntry[];
 }

@@ -632,6 +632,8 @@ export class CodexAppServerDriver implements HarnessDriver {
       let recoveredActiveTurnId = snapshot.activeTurnId ?? null;
       let dispositionOnlyRecoveryConsumed =
         snapshot.dispositionOnlyRecoveryConsumed ?? false;
+      let dispositionOnlyRecoveryTurnId =
+        snapshot.dispositionOnlyRecoveryTurnId ?? null;
       let reconcileUncheckpointedDispositionTurn = false;
       if (
         !this.#direct()
@@ -675,8 +677,21 @@ export class CodexAppServerDriver implements HarnessDriver {
           // reconstructed terminal session or submitting a duplicate.
           recoveredActiveTurnId = uncheckpointedTurnId;
           dispositionOnlyRecoveryConsumed = true;
+          dispositionOnlyRecoveryTurnId = uncheckpointedTurnId;
           reconcileUncheckpointedDispositionTurn = true;
         }
+      }
+      if (
+        dispositionOnlyRecoveryConsumed
+        && recoveredActiveTurnId === null
+        && dispositionOnlyRecoveryTurnId === null
+        && !reconcileUncheckpointedDispositionTurn
+      ) {
+        // Older or crash-raced checkpoints could persist the pre-request
+        // one-shot marker without the accepted provider turn. With no matching
+        // provider history, the marker alone is not acceptance evidence. The
+        // native runtime still checks durable replay before allowing a retry.
+        dispositionOnlyRecoveryConsumed = false;
       }
       const goal = await this.#discoverGoal(transport, opened.threadId);
       if (opened.context.liveConsole)
@@ -692,6 +707,7 @@ export class CodexAppServerDriver implements HarnessDriver {
         semanticResult: snapshot.semanticResult ?? null,
         terminalTurns: snapshot.terminalTurns ?? [],
         dispositionOnlyRecoveryConsumed,
+        dispositionOnlyRecoveryTurnId,
         stalePendingRuntimeRequests: snapshot.pendingRuntimeRequests ?? [],
         lineage: snapshot.lineage,
         sourceSequence: snapshot.lastSourceSequence ?? 0,
@@ -936,6 +952,7 @@ export class CodexAppServerDriver implements HarnessDriver {
     semanticResult?: PersistedHarnessSemanticResult | null;
     terminalTurns?: PersistedHarnessTurnTerminal[];
     dispositionOnlyRecoveryConsumed?: boolean;
+    dispositionOnlyRecoveryTurnId?: string | null;
     stalePendingRuntimeRequests?: HarnessRuntimeRequest[];
     lineage?: HarnessThreadLineageEntry[];
     sourceSequence: number;
@@ -982,6 +999,7 @@ class CodexHarnessSession implements HarnessSession {
   #terminal = false;
   #dispositionOnlyRecoveryAvailable = false;
   #dispositionOnlyRecoveryConsumed = false;
+  #dispositionOnlyRecoveryTurnId: string | null = null;
   #turnStarted = false;
   readonly #terminalTurns = new Map<string, string>();
   readonly #workspaceChangesByTurn = new Map<string, Record<string, unknown>>();
@@ -1010,6 +1028,7 @@ class CodexHarnessSession implements HarnessSession {
     semanticResult?: PersistedHarnessSemanticResult | null;
     terminalTurns?: PersistedHarnessTurnTerminal[];
     dispositionOnlyRecoveryConsumed?: boolean;
+    dispositionOnlyRecoveryTurnId?: string | null;
     stalePendingRuntimeRequests?: HarnessRuntimeRequest[];
     lineage?: HarnessThreadLineageEntry[];
     goal?: HarnessThreadGoal | null;
@@ -1080,6 +1099,8 @@ class CodexHarnessSession implements HarnessSession {
     }
     const dispositionOnlyRecoveryPreviouslyConsumed =
       input.dispositionOnlyRecoveryConsumed ?? false;
+    const dispositionOnlyRecoveryTurnId =
+      input.dispositionOnlyRecoveryTurnId ?? null;
     const settledSemanticResult =
       this.#conversationMode === "task"
       && this.#result !== null
@@ -1090,7 +1111,8 @@ class CodexHarnessSession implements HarnessSession {
       && this.#conversationMode === "task"
       && this.#result === null
       && this.#activeTurnId === null
-      && this.#terminalTurns.size > 0
+      && dispositionOnlyRecoveryTurnId !== null
+      && this.#terminalTurns.has(dispositionOnlyRecoveryTurnId)
       && dispositionOnlyRecoveryPreviouslyConsumed;
     this.#terminal = settledSemanticResult || spentResultlessRecovery;
     this.#dispositionOnlyRecoveryAvailable =
@@ -1106,6 +1128,7 @@ class CodexHarnessSession implements HarnessSession {
     // turn before deciding whether another submission is safe.
     this.#dispositionOnlyRecoveryConsumed =
       dispositionOnlyRecoveryPreviouslyConsumed;
+    this.#dispositionOnlyRecoveryTurnId = dispositionOnlyRecoveryTurnId;
     this.#transport.setServerRequestHandler((request) =>
       this.#handleServerRequest(request),
     );
@@ -1182,6 +1205,7 @@ class CodexHarnessSession implements HarnessSession {
     this.#resultCallId = null;
     this.#resultTurnId = null;
     this.#dispositionOnlyRecoveryConsumed = false;
+    this.#dispositionOnlyRecoveryTurnId = null;
     this.#terminal = false;
     this.#terminalTurns.clear();
     this.#turnStarted = false;
@@ -1244,6 +1268,7 @@ class CodexHarnessSession implements HarnessSession {
       // that checkpoint, recoverSession adopts the provider-side turn.
       this.#dispositionOnlyRecoveryAvailable = false;
       this.#dispositionOnlyRecoveryConsumed = true;
+      this.#dispositionOnlyRecoveryTurnId = null;
     }
     // The submitted text is part of the canonical record so a tracer can show
     // the operator's own message without keeping shadow state next to the
@@ -1282,6 +1307,7 @@ class CodexHarnessSession implements HarnessSession {
           // accepted, so the one-shot recovery allowance remains available.
           this.#dispositionOnlyRecoveryAvailable = true;
           this.#dispositionOnlyRecoveryConsumed = false;
+          this.#dispositionOnlyRecoveryTurnId = null;
         } else {
           // A transport failure is ambiguous. Recovery must inspect the
           // provider thread before deciding whether this submission landed.
@@ -1304,6 +1330,9 @@ class CodexHarnessSession implements HarnessSession {
       throw new Error("Codex turn identity changed during start");
     }
     this.#activeTurnId ??= turnId;
+    if (dispositionOnlyRecovery) {
+      this.#dispositionOnlyRecoveryTurnId = turnId;
+    }
     this.#emit("turn.accepted", { turnId }, { turnId });
     if (this.#interruptQueued) {
       this.#interruptQueued = false;
@@ -1716,6 +1745,8 @@ class CodexHarnessSession implements HarnessSession {
       })),
       dispositionOnlyRecoveryConsumed:
         this.#dispositionOnlyRecoveryConsumed,
+      dispositionOnlyRecoveryTurnId:
+        this.#dispositionOnlyRecoveryTurnId,
       pendingRuntimeRequests: this.pendingRuntimeRequests(),
       goal: this.#goal === null ? null : structuredClone(this.#goal),
       lineage: this.lineage(),

@@ -727,14 +727,17 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       // cleared. Falling back to the older control-plane checkpoint here
       // resurrects that terminal turn and waits forever for an event that was
       // already consumed.
-      const dispositionRecoveryAlreadySubmitted = Boolean(
+      const dispositionRecoveryWasSubmitted = Boolean(
         recovered
-        && recoveredSnapshot.dispositionOnlyRecoveryConsumed
         && persistedSession?.dispositionOnlyRecoveryConsumed
         && !recoveredSnapshot.semanticResult
         && !recoveredActiveTurnId
       );
-      const replayedDisposition = dispositionRecoveryAlreadySubmitted
+      const dispositionRecoveryStillOwned = Boolean(
+        dispositionRecoveryWasSubmitted
+        && recoveredSnapshot.dispositionOnlyRecoveryConsumed
+      );
+      const replayedDisposition = dispositionRecoveryWasSubmitted
         ? await replayCheckpointedTurnTerminal({
             controlPlane: options.controlPlane,
             runId: input.binding.runId,
@@ -780,7 +783,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             !recoveredActiveTurnId
             && !adoptedDispositionTerminal
             && !checkpointedDispositionTerminal
-            && !dispositionRecoveryAlreadySubmitted
+            && !dispositionRecoveryStillOwned
           )
         ) {
           const modelEnvelope = buildNativeModelEnvelope(input);
