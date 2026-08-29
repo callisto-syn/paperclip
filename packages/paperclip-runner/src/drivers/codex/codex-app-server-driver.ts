@@ -78,12 +78,14 @@ import {
   validateCodexWorkingDirectory as validateWorkingDirectory,
 } from "./codex-boundaries.js";
 import {
+  createCodexQuestionResponseContext,
   hasCodexQuestionForm,
   normalizeCodexQuestionSet,
   runtimeRequestKind,
   runtimeRequestPrompt,
   runtimeRequestProtocolPayload,
   runtimeRequestResponse,
+  type CodexQuestionResponseContext,
 } from "./codex-question-adapter.js";
 import {
   CODEX_PLANNING_PERMISSION_PROFILE as PLANNING_PERMISSION_PROFILE,
@@ -224,6 +226,7 @@ interface OpenedCodexThread {
 
 interface PendingRuntimeRequest {
   request: HarnessRuntimeRequest;
+  responseContext: CodexQuestionResponseContext;
   settle: (response: Record<string, unknown>) => void;
   settlingResolution?: HarnessRuntimeRequestResolution;
 }
@@ -1492,7 +1495,11 @@ class CodexHarnessSession implements HarnessSession {
       );
     }
     pending.settlingResolution = structuredClone(resolution);
-    const response = runtimeRequestResponse(pending.request, resolution);
+    const response = runtimeRequestResponse(
+      pending.request,
+      resolution,
+      pending.responseContext,
+    );
     try {
       await this.#transport.resolveRuntimeRequest?.({
         requestId: input.requestId,
@@ -2001,7 +2008,11 @@ class CodexHarnessSession implements HarnessSession {
       pending.settle(
         resolution === undefined
           ? safeRequestResponse(pending.request.method, "cancel")
-          : runtimeRequestResponse(pending.request, resolution),
+          : runtimeRequestResponse(
+              pending.request,
+              resolution,
+              pending.responseContext,
+            ),
       );
       return;
     }
@@ -2633,8 +2644,13 @@ class CodexHarnessSession implements HarnessSession {
       return safeRequestResponse(request.method);
     }
     let input: PaperclipQuestionSet | null = null;
+    const responseContext = createCodexQuestionResponseContext();
     try {
-      input = normalizeCodexQuestionSet(request.method, request.params);
+      input = normalizeCodexQuestionSet(
+        request.method,
+        request.params,
+        responseContext,
+      );
     } catch {
       this.#emit("harness.diagnostic", {
         code: "runtime_input_rejected",
@@ -2686,6 +2702,7 @@ class CodexHarnessSession implements HarnessSession {
     return new Promise<Record<string, unknown>>((settle) => {
       this.#pendingRuntimeRequests.set(requestId, {
         request: runtimeRequest,
+        responseContext,
         settle,
       });
     });

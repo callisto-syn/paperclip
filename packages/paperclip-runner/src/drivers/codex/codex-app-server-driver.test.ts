@@ -1974,6 +1974,53 @@ describe("Codex app-server Codex driver", () => {
     await session.close({ reason: "fixture complete" });
   });
 
+  it("keeps redacted native option values through the cloned pending-request lifecycle", async () => {
+    const transport = new FakeCodexTransport();
+    const session = await makeDriver([transport]).openSession({
+      runId: "run-private-option",
+      normalizedSessionId: "normalized-private-option",
+      workingDirectory: WORKSPACE,
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Choose the configured credential." },
+    });
+    const nativeResponse = transport.invoke({
+      id: "private-option-request",
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-1",
+        turnId,
+        itemId: "private-option-item",
+        questions: [{
+          id: "credential",
+          question: "Choose the configured credential.",
+          options: [{ id: "configured", label: "token=native-option-secret" }],
+        }],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [publicRequest] = structuredClone(session.pendingRuntimeRequests?.() ?? []);
+    expect(JSON.stringify(publicRequest)).not.toContain("native-option-secret");
+    expect(publicRequest?.input?.questions[0]?.options?.[0]?.label).toContain("[REDACTED]");
+
+    await session.resolveRuntimeRequest?.({
+      requestId: "private-option-request",
+      turnId,
+      resolution: {
+        action: "submit",
+        response: {
+          schema: "paperclip.question_response.v1",
+          answers: { credential: { selectedOptionIds: ["configured"] } },
+        },
+      },
+    });
+    expect(await nativeResponse).toEqual({
+      answers: { credential: { answers: ["token=native-option-secret"] } },
+    });
+    await session.close({ reason: "fixture complete" });
+  });
+
   it("rejects an explicit malformed Codex form without falling back to v1", async () => {
     const transport = new FakeCodexTransport();
     const session = await makeDriver([transport]).openSession({
