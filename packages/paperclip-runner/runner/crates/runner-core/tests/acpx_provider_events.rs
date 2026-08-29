@@ -260,6 +260,26 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "scheme-qualified provider path should be rejected: {unsafe_path}",
         );
     }
+
+    let posix_colon_backslash = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-posix-colon-backslash",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":r"foo:\bar"}]
+        }),
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            posix_colon_backslash[0].payload["target"],
+            serde_json::Value::Null
+        );
+    } else {
+        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:\bar");
+    }
 }
 
 #[test]

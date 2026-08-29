@@ -736,7 +736,10 @@ fn has_unsafe_uri_spelling(path: &str) -> bool {
             return false;
         }
         suffix.starts_with("//")
-            || suffix.starts_with('\\')
+            || (suffix.starts_with('\\')
+                && (cfg!(windows)
+                    || scheme.contains(['+', '-', '.'])
+                    || is_known_uri_scheme(scheme)))
             || (suffix.starts_with('/')
                 && (scheme.contains(['+', '-', '.']) || is_known_uri_scheme(scheme)))
     })
@@ -814,6 +817,16 @@ mod tests {
                 safe_acpx_location(Some(&json!({"path": location}))),
                 Value::Null,
             );
+        }
+    }
+
+    #[test]
+    fn preserves_posix_relative_filenames_with_colons_and_backslashes() {
+        let normalized = safe_acpx_location(Some(&json!({"path": r"foo:\bar"})));
+        if cfg!(windows) {
+            assert_eq!(normalized, Value::Null);
+        } else {
+            assert_eq!(normalized, Value::String(r"foo:\bar".to_owned()));
         }
     }
 
