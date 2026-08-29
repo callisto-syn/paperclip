@@ -22,6 +22,10 @@ import { decideAcpxPermission } from "./permission-policy.js";
 
 const VERIFIED_COMMAND_SENTINEL = "paperclip-verified-acpx-command";
 const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 2_000;
+// A close may outlive its caller-facing wait bound. Keeping the exact promise
+// here prevents a timed-out protocol cleanup from being garbage-collected or
+// replaced by a fresh attempt whose success could hide the older outcome.
+const activeRuntimeCleanupOwners = new Set<Promise<unknown | null>>();
 
 class AcpxRuntimeCloseTimeoutError extends Error {
   constructor() {
@@ -272,20 +276,19 @@ function runtimePort(
       if (runtimeClosed) return;
       runtimeCloseAttempt ??= runtimeCloseOutcome(runtime, handle, input.reason);
       const observedAttempt = runtimeCloseAttempt;
-      const closeError = await boundedCloseOutcome(
+      const processCleanup = terminateChildrenAfterCloseBound(
         observedAttempt,
+        children,
         runtimeCloseTimeoutMs,
       );
-      const processErrors = await children.terminate();
-      if (processErrors.length === 0) {
-        // Process-group termination is the terminal resource boundary. A
-        // library close promise that ignores its deadline remains observed by
-        // runtimeCloseOutcome(), but it no longer owns a provider process or
-        // keeps cleanup recovery active.
+      // The caller may stop waiting, but this close remains pending until the
+      // exact ACPX protocol cleanup settles. Provider termination proceeds at
+      // the deadline without allowing a newer success to mask this outcome.
+      const closeError = await observedAttempt;
+      const processErrors = await processCleanup;
+      runtimeCloseAttempt = undefined;
+      if (closeError === null && processErrors.length === 0) {
         runtimeClosed = true;
-        runtimeCloseAttempt = undefined;
-      } else if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
-        runtimeCloseAttempt = undefined;
       }
       if (closeError !== null || processErrors.length > 0) {
         const errors = [closeError, ...processErrors].filter(
@@ -318,7 +321,7 @@ function runtimeCloseOutcome(
   handle: AcpRuntimeHandle,
   reason: string,
 ): Promise<unknown | null> {
-  return Promise.resolve()
+  const cleanup = Promise.resolve()
     .then(() =>
       runtime.close({ handle, reason, discardPersistentState: false }),
     )
@@ -326,6 +329,29 @@ function runtimeCloseOutcome(
       () => null,
       (error: unknown) => error,
     );
+  activeRuntimeCleanupOwners.add(cleanup);
+  void cleanup.finally(() => activeRuntimeCleanupOwners.delete(cleanup));
+  return cleanup;
+}
+
+async function terminateChildrenAfterCloseBound(
+  closeOutcome: Promise<unknown | null>,
+  children: SpawnedChildSet,
+  timeoutMs: number,
+): Promise<unknown[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      closeOutcome.then(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(1, Math.floor(timeoutMs)));
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  return await children.terminate();
 }
 
 async function boundedCloseOutcome(

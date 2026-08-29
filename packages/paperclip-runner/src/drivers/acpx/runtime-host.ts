@@ -317,15 +317,9 @@ export class AcpxRuntimeHost {
     if (cancellationError) throw cancellationError;
   }
 
-  async close(input: { reason: string; retryPending?: boolean }): Promise<void> {
-    if (this.#closed) {
-      // The adapter can still own an older close attempt after a fresh one
-      // proves shutdown. Keep forwarding explicit closes so any late failure
-      // is observed exactly once instead of being hidden by host idempotency.
-      await this.#runtime.close({ reason: boundedReason(input.reason) });
-      return;
-    }
-    if (this.#closePromise && input.retryPending !== true) {
+  async close(input: { reason: string }): Promise<void> {
+    if (this.#closed) return;
+    if (this.#closePromise) {
       return await this.#closePromise;
     }
     this.#closingStarted = true;
@@ -407,20 +401,26 @@ async function cleanupRuntimeResources(
   command: VerifiedAcpxCommandLease | null,
   reason: string,
 ): Promise<AggregateError | null> {
-  const errors: unknown[] = [];
-  for (const close of [
+  const closes = [
     runtime ? () => runtime.close({ reason }) : null,
     toolBridge ? () => toolBridge.close() : null,
     credential ? () => credential.close() : null,
     command ? () => command.close() : null,
-  ]) {
-    if (!close) continue;
-    try {
-      await close();
-    } catch (error) {
-      errors.push(error);
-    }
-  }
+  ].filter((close): close is () => Promise<void> => close !== null);
+  // Start every independent cleanup together. A protocol close that remains
+  // pending must not prevent credential, tool-bridge, or command ownership
+  // from being relinquished while its exact promise stays owned upstream.
+  const outcomes = await Promise.all(
+    closes.map(async (close) => {
+      try {
+        await close();
+        return null;
+      } catch (error) {
+        return error;
+      }
+    }),
+  );
+  const errors = outcomes.filter((error): error is unknown => error !== null);
   return errors.length > 0
     ? new AggregateError(errors, "ACPX runtime cleanup failed")
     : null;

@@ -124,8 +124,8 @@ describe("Codex ACPX harness driver", () => {
       },
     });
     await session.close({ reason: "complete" });
-    await session.close({ reason: "reconcile any late close outcome" });
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    await session.close({ reason: "idempotent close" });
+    expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
   it("rejects terminal disposition drift and bounds interruption", async () => {
@@ -210,7 +210,7 @@ describe("Codex ACPX harness driver", () => {
     expect(emitted.some((event) => event.eventType === "turn.failed")).toBe(false);
   });
 
-  it("reports a host close timeout after one bounded terminal retry", async () => {
+  it("reports a host close timeout while retaining the exact cleanup", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
     const hostClose = deferred<void>();
     fixture.host.close.mockImplementation(() => hostClose.promise);
@@ -227,7 +227,7 @@ describe("Codex ACPX harness driver", () => {
     await expect(
       session.close({ reason: "runtime close stalled" }),
     ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
     await expect(terminalEvents).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ eventType: "turn.interrupted" }),
@@ -241,37 +241,33 @@ describe("Codex ACPX harness driver", () => {
     fixture.finishTurn({ status: "cancelled", stopReason: "session_closed" });
     hostClose.resolve();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("uses its bounded terminal retry after the first close times out", async () => {
+  it("reconciles the retained close when it settles after the wait bound", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
-    const firstClose = deferred<void>();
-    const recoveredClose = deferred<void>();
-    fixture.host.close
-      .mockImplementationOnce(() => firstClose.promise)
-      .mockImplementationOnce(() => recoveredClose.promise);
+    const retainedClose = deferred<void>();
+    fixture.host.close.mockImplementation(() => retainedClose.promise);
     const session = await fixture.driver.openSession({
       runId: "run-close-recovery",
       normalizedSessionId: "session-1",
       workingDirectory: "/workspace",
     });
 
-    recoveredClose.resolve();
     await expect(
       session.close({ reason: "runtime close stalled" }),
+    ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
+    retainedClose.resolve();
+    await expect(
+      session.close({ reason: "observe retained completion" }),
     ).resolves.toBeUndefined();
-    firstClose.reject(new Error("late runtime cleanup failure"));
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("does not retain retries after two host closes never settle", async () => {
+  it("does not spin while the exact host cleanup remains pending", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
     const stalledClose = deferred<void>();
-    const secondStalledClose = deferred<void>();
-    fixture.host.close
-      .mockImplementationOnce(() => stalledClose.promise)
-      .mockImplementationOnce(() => secondStalledClose.promise);
+    fixture.host.close.mockImplementation(() => stalledClose.promise);
     const session = await fixture.driver.openSession({
       runId: "run-close-stalled-recovery",
       normalizedSessionId: "session-1",
@@ -281,12 +277,12 @@ describe("Codex ACPX harness driver", () => {
     await expect(
       session.close({ reason: "runtime close never settles" }),
     ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("bounds persistent host cleanup failures without a background retry loop", async () => {
+  it("reports a terminal host cleanup failure without a retry loop", async () => {
     const fixture = driverFixture({}, {
       closeSettlementTimeoutMs: 1,
     });
@@ -307,9 +303,9 @@ describe("Codex ACPX harness driver", () => {
         payload: expect.objectContaining({ code: "acpx_host_cleanup_deferred" }),
       }),
     ]));
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {

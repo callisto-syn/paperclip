@@ -302,7 +302,7 @@ describe("ACPX runtime host", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("starts a fresh cleanup attempt when the original close never settles", async () => {
+  it("retains the exact pending cleanup while independent resources close", async () => {
     const fixture = await hostFixture();
     const firstClose = new Promise<void>(() => undefined);
     const runtime = runtimePort({
@@ -321,27 +321,25 @@ describe("ACPX runtime host", () => {
       fixture.dependencies({ openRuntime: async () => runtime }),
     );
 
-    void host.close({ reason: "first close stalls" });
+    const first = host.close({ reason: "first close stalls" });
     await vi.waitFor(() => expect(runtime.close).toHaveBeenCalledOnce());
-    await expect(host.close({
-      reason: "bounded owner retries",
-      retryPending: true,
-    })).resolves.toBeUndefined();
-    expect(runtime.close).toHaveBeenCalledTimes(2);
-    await expect(host.close({ reason: "closed host reconciliation" }))
-      .resolves.toBeUndefined();
-    expect(runtime.close).toHaveBeenCalledTimes(3);
+    const second = host.close({ reason: "same pending owner" });
+    let settled = false;
+    void Promise.all([first, second]).finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(runtime.close).toHaveBeenCalledOnce();
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
-  it("keeps invoking the adapter until an older close outcome is reconciled", async () => {
+  it("retries only after the exact close outcome settles with failure", async () => {
     const fixture = await hostFixture();
     const runtime = runtimePort({
       onClose: vi
         .fn()
-        .mockRejectedValueOnce(new Error("runtime close timed out"))
-        .mockResolvedValueOnce(undefined)
-        .mockRejectedValueOnce(new Error("older close attempt failed"))
+        .mockRejectedValueOnce(new Error("runtime close failed"))
         .mockResolvedValueOnce(undefined),
     });
     const host = await AcpxRuntimeHost.open(
@@ -359,13 +357,10 @@ describe("ACPX runtime host", () => {
       /cleanup failed/,
     );
     await expect(
-      host.close({ reason: "fresh attempt", retryPending: true }),
+      host.close({ reason: "fresh attempt" }),
     ).resolves.toBeUndefined();
-    await expect(
-      host.close({ reason: "reconcile older attempt" }),
-    ).rejects.toThrow("older close attempt failed");
     await expect(host.close({ reason: "ownership released" })).resolves.toBeUndefined();
-    expect(runtime.close).toHaveBeenCalledTimes(4);
+    expect(runtime.close).toHaveBeenCalledTimes(2);
   });
 
   it("admits one bounded turn and cancels it before shutdown", async () => {
@@ -458,7 +453,7 @@ describe("ACPX runtime host", () => {
         host.close({ reason: "retry after cancellation timeout" }),
       ).resolves.toBeUndefined();
       expect(turn.cancel).toHaveBeenCalledOnce();
-      expect(runtime.close).toHaveBeenCalledTimes(2);
+      expect(runtime.close).toHaveBeenCalledOnce();
       expect(fixture.commandClose).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();

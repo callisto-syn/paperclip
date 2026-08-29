@@ -79,7 +79,7 @@ interface CodexAcpxHost {
     input: Parameters<AcpxRuntimeHost["startTurn"]>[0],
   ): AcpxRuntimeTurn;
   interruptActiveTurn(reason: string): Promise<void>;
-  close(input: { reason: string; retryPending?: boolean }): Promise<void>;
+  close(input: { reason: string }): Promise<void>;
 }
 
 export interface CodexAcpxDriverDependencies {
@@ -96,6 +96,7 @@ export class CodexAcpxDriver implements HarnessDriver {
   readonly #openHost: NonNullable<CodexAcpxDriverDependencies["openHost"]>;
   readonly #closeSettlementTimeoutMs: number;
   readonly #maxBufferedEvents: number;
+  readonly #cleanupOwners = new Set<Promise<void>>();
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -199,14 +200,26 @@ export class CodexAcpxDriver implements HarnessDriver {
         now: this.#options.now ?? (() => new Date()),
         closeSettlementTimeoutMs: this.#closeSettlementTimeoutMs,
         maxBufferedEvents: this.#maxBufferedEvents,
+        retainCleanup: (cleanup) => this.#retainCleanup(cleanup),
       });
       return session;
     } catch (error) {
-      await host
-        .close({ reason: "Codex ACPX session initialization failed" })
-        .catch(() => undefined);
+      const cleanup = host.close({
+        reason: "Codex ACPX session initialization failed",
+      });
+      this.#retainCleanup(cleanup);
+      await settleWithin(cleanup, this.#closeSettlementTimeoutMs).catch(
+        () => undefined,
+      );
       throw error;
     }
+  }
+
+  #retainCleanup(cleanup: Promise<void>): void {
+    this.#cleanupOwners.add(cleanup);
+    void cleanup
+      .finally(() => this.#cleanupOwners.delete(cleanup))
+      .catch(() => undefined);
   }
 }
 
@@ -218,6 +231,7 @@ class CodexAcpxSession implements HarnessSession {
   readonly #closeSettlementTimeoutMs: number;
   readonly #maxBufferedEvents: number;
   readonly #events: AsyncQueue<PrpEvent>;
+  readonly #retainCleanup: (cleanup: Promise<void>) => void;
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
@@ -235,7 +249,6 @@ class CodexAcpxSession implements HarnessSession {
   #activePump: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #hostClosePromise: Promise<void> | null = null;
-  #hostCloseAttempts = 0;
   #hostClosed = false;
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
@@ -249,6 +262,7 @@ class CodexAcpxSession implements HarnessSession {
     now: () => Date;
     closeSettlementTimeoutMs: number;
     maxBufferedEvents: number;
+    retainCleanup: (cleanup: Promise<void>) => void;
   }) {
     const identity = input.host.identity();
     if (identity.normalizedSessionId !== input.input.normalizedSessionId) {
@@ -260,6 +274,7 @@ class CodexAcpxSession implements HarnessSession {
     this.#now = input.now;
     this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
     this.#maxBufferedEvents = input.maxBufferedEvents;
+    this.#retainCleanup = input.retainCleanup;
     this.#events = new AsyncQueue<PrpEvent>(input.maxBufferedEvents);
     this.#sourceInstanceId = stableId(
       "paperclip-acpx",
@@ -478,10 +493,7 @@ class CodexAcpxSession implements HarnessSession {
 
   async close(input: { reason: string }): Promise<void> {
     if (this.#closePromise) return await this.#closePromise;
-    if (this.#closed) {
-      await this.#host.close({ reason: input.reason });
-      return;
-    }
+    if (this.#closed) return;
     this.#closingStarted = true;
     const closePromise = this.#finishClose(input.reason);
     this.#closePromise = closePromise;
@@ -503,17 +515,6 @@ class CodexAcpxSession implements HarnessSession {
       await settleWithin(hostClose, this.#closeSettlementTimeoutMs);
     } catch (error) {
       hostCloseError = error;
-      if (this.#hostClosePromise === hostClose) this.#hostClosePromise = null;
-      const terminalRetry = this.#startHostClose({ reason });
-      try {
-        await settleWithin(terminalRetry, this.#closeSettlementTimeoutMs);
-        hostCloseError = null;
-      } catch (retryError) {
-        hostCloseError = retryError;
-        if (this.#hostClosePromise === terminalRetry) {
-          this.#hostClosePromise = null;
-        }
-      }
     }
     if (pump) {
       await settleWithin(
@@ -539,7 +540,7 @@ class CodexAcpxSession implements HarnessSession {
         {
           code: "acpx_host_cleanup_deferred",
           message:
-            "ACPX host cleanup exhausted its bounded terminal retry.",
+            "ACPX host cleanup exceeded its caller wait bound; the driver retains the exact cleanup until it settles.",
         },
         closingTurnId ? { turnId: closingTurnId } : {},
         0,
@@ -553,14 +554,11 @@ class CodexAcpxSession implements HarnessSession {
   }
 
   #startHostClose(input: { reason: string }): Promise<void> {
-    const retryPending = this.#hostCloseAttempts > 0;
-    this.#hostCloseAttempts += 1;
-    const closePromise = this.#host.close(
-      retryPending ? { ...input, retryPending: true } : input,
-    ).then(() => {
+    const closePromise = this.#host.close(input).then(() => {
       this.#hostClosed = true;
     });
     this.#hostClosePromise = closePromise;
+    this.#retainCleanup(closePromise);
     void closePromise.catch(() => {
       if (this.#hostClosePromise === closePromise) {
         this.#hostClosePromise = null;

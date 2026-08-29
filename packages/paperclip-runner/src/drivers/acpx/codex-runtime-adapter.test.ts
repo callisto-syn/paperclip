@@ -132,14 +132,15 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("terminalizes a stalled runtime close after provider process cleanup", async () => {
+  it("terminates providers at the deadline while retaining protocol cleanup", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
-      vi.mocked(runtime.close)
-        .mockImplementationOnce(
-          () => new Promise<void>(() => undefined),
-        );
+      let resolveRuntimeClose!: () => void;
+      const runtimeClose = new Promise<void>((resolve) => {
+        resolveRuntimeClose = resolve;
+      });
+      vi.mocked(runtime.close).mockReturnValue(runtimeClose);
       const child = fakeChild();
       const command = fakeCommand();
       vi.mocked(command.spawn).mockReturnValue(child);
@@ -159,23 +160,23 @@ describe("Codex ACPX runtime adapter", () => {
       });
 
       const firstClose = port.close({ reason: "runtime close stalled" });
-      const firstCloseRejection = expect(firstClose).rejects.toMatchObject({
-        errors: [
-          expect.objectContaining({
-            message: "ACPX runtime close exceeded its shutdown timeout",
-          }),
-        ],
+      let closeSettled = false;
+      void firstClose.finally(() => {
+        closeSettled = true;
       });
       await Promise.resolve();
       expect(runtime.close).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(2_000);
-      await firstCloseRejection;
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(closeSettled).toBe(false);
 
-      // Process termination is the terminal resource boundary. The stalled
-      // library promise stays observed but does not schedule cleanup work.
+      // The provider is terminally bounded, but the exact protocol cleanup
+      // remains owned until it produces an authoritative outcome.
       await vi.advanceTimersByTimeAsync(10_000);
       expect(runtime.close).toHaveBeenCalledOnce();
+      expect(closeSettled).toBe(false);
+      resolveRuntimeClose();
+      await expect(firstClose).resolves.toBeUndefined();
       await expect(port.close({ reason: "idempotent terminal close" }))
         .resolves.toBeUndefined();
       expect(runtime.close).toHaveBeenCalledOnce();
