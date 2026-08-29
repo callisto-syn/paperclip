@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeAcpFormElicitation } from "../drivers/acpx/acp-question-adapter.js";
 import {
+  createCodexQuestionResponseContext,
   normalizeCodexQuestionSet,
   runtimeRequestResponse,
 } from "../drivers/codex/codex-question-adapter.js";
@@ -46,6 +47,7 @@ describe("question adapter conformance fixtures", () => {
     const codexQuestionSet = normalizeCodexQuestionSet(
       String(codex.nativeRequest.method),
       codex.nativeRequest.params as Record<string, unknown>,
+      createCodexQuestionResponseContext(),
     );
     const acpxQuestionSet = normalizeAcpFormElicitation(
       acpx.nativeRequest.params as AcpElicitationRequest,
@@ -71,9 +73,15 @@ describe("question adapter conformance fixtures", () => {
       fixture("codex"),
       fixture("acpx"),
     ]);
-    const codexQuestionSet = parsePaperclipQuestionSet(
-      codex.canonicalQuestionSet,
+    const responseContext = createCodexQuestionResponseContext();
+    const codexQuestionSet = normalizeCodexQuestionSet(
+      String(codex.nativeRequest.method),
+      codex.nativeRequest.params as Record<string, unknown>,
+      responseContext,
     );
+    if (codexQuestionSet === null) {
+      throw new Error("Codex conformance fixture did not contain a question set");
+    }
     const codexRequest: HarnessRuntimeRequest = {
       requestId: "fixture-request",
       requestKind: "user_input",
@@ -105,7 +113,7 @@ describe("question adapter conformance fixtures", () => {
       runtimeRequestResponse(codexRequest, {
         action: "submit",
         response: codexResponse,
-      }),
+      }, responseContext),
     ).toEqual(codex.nativeResponse);
     expect(normalizedAcpx?.accept(acpxResponse)).toEqual(acpx.nativeResponse);
   });
