@@ -132,19 +132,14 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("autonomously reconciles a stalled close before releasing cleanup ownership", async () => {
+  it("terminalizes a stalled runtime close after provider process cleanup", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
-      let rejectStalledClose: ((error: Error) => void) | undefined;
       vi.mocked(runtime.close)
         .mockImplementationOnce(
-          () =>
-            new Promise<void>((_resolve, reject) => {
-              rejectStalledClose = reject;
-            }),
-        )
-        .mockResolvedValueOnce(undefined);
+          () => new Promise<void>(() => undefined),
+        );
       const child = fakeChild();
       const command = fakeCommand();
       vi.mocked(command.spawn).mockReturnValue(child);
@@ -177,15 +172,13 @@ describe("Codex ACPX runtime adapter", () => {
       await firstCloseRejection;
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 
-      // Once the old outcome arrives, the retained owner starts a fresh close,
-      // observes the original failure, and terminates without another caller.
-      rejectStalledClose?.(new Error("original close failed"));
-      await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(2_000);
-      await Promise.resolve();
-      expect(runtime.close).toHaveBeenCalledTimes(2);
+      // Process termination is the terminal resource boundary. The stalled
+      // library promise stays observed but does not schedule cleanup work.
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(runtime.close).toHaveBeenCalledTimes(2);
+      expect(runtime.close).toHaveBeenCalledOnce();
+      await expect(port.close({ reason: "idempotent terminal close" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }

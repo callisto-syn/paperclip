@@ -236,56 +236,7 @@ function runtimePort(
   runtimeCloseTimeoutMs: number,
 ): AcpxRuntimePort {
   let runtimeClosed = false;
-  let runtimeCloseSucceeded = false;
-  let runtimeCloseAttempt: RuntimeCloseAttempt | undefined;
-  const ownedRuntimeCloseAttempts = new Set<RuntimeCloseAttempt>();
-  let runtimeCleanupRecoveryPromise: Promise<void> | null = null;
-
-  function startRuntimeCloseAttempt(reason: string): RuntimeCloseAttempt {
-    const attempt = new RuntimeCloseAttempt(
-      runtimeCloseOutcome(runtime, handle, reason),
-      () => {
-        runtimeCloseSucceeded = true;
-      },
-    );
-    ownedRuntimeCloseAttempts.add(attempt);
-    return attempt;
-  }
-
-  function takeSettledRuntimeCloseErrors(): unknown[] {
-    const errors: unknown[] = [];
-    for (const attempt of ownedRuntimeCloseAttempts) {
-      if (!attempt.settled) continue;
-      ownedRuntimeCloseAttempts.delete(attempt);
-      if (attempt.outcome !== null) errors.push(attempt.outcome);
-    }
-    return errors;
-  }
-
-  function retainRuntimeCleanupOwnership(reason: string): void {
-    if (
-      runtimeCleanupRecoveryPromise !== null ||
-      (runtimeCloseSucceeded && ownedRuntimeCloseAttempts.size === 0)
-    ) return;
-    const recovery = (async () => {
-      while (!(runtimeCloseSucceeded && ownedRuntimeCloseAttempts.size === 0)) {
-        await retryRuntimeCleanupAfter(runtimeCloseTimeoutMs);
-        try {
-          await port.close({ reason: `Autonomous cleanup after: ${reason}` });
-        } catch {
-          // close() retains every unsettled attempt and reports every settled
-          // error. Keep retrying until shutdown and those outcomes are both
-          // reconciled; individual iterations remain time-bounded.
-        }
-      }
-    })();
-    runtimeCleanupRecoveryPromise = recovery;
-    void recovery.finally(() => {
-      if (runtimeCleanupRecoveryPromise === recovery) {
-        runtimeCleanupRecoveryPromise = null;
-      }
-    });
-  }
+  let runtimeCloseAttempt: Promise<unknown | null> | undefined;
 
   const port: AcpxRuntimePort = {
     async identity() {
@@ -318,91 +269,36 @@ function runtimePort(
       });
     },
     async close(input) {
-      if (runtimeCloseSucceeded) runtimeClosed = true;
-      if (!runtimeClosed && !runtimeCloseAttempt) {
-        runtimeCloseAttempt = startRuntimeCloseAttempt(input.reason);
-      }
+      if (runtimeClosed) return;
+      runtimeCloseAttempt ??= runtimeCloseOutcome(runtime, handle, input.reason);
       const observedAttempt = runtimeCloseAttempt;
-      const closeError = !observedAttempt
-        ? null
-        : await boundedCloseOutcome(
-            observedAttempt.promise,
-            runtimeCloseTimeoutMs,
-          );
-      if (runtimeCloseSucceeded) runtimeClosed = true;
-      if (
-        observedAttempt?.settled ||
-        closeError instanceof AcpxRuntimeCloseTimeoutError
-      ) {
-        // A timed-out attempt stays owned and observed, but it does not block
-        // a fresh bounded attempt. Its eventual failure is reported once by a
-        // later close; its eventual success marks the runtime closed.
+      const closeError = await boundedCloseOutcome(
+        observedAttempt,
+        runtimeCloseTimeoutMs,
+      );
+      const processErrors = await children.terminate();
+      if (processErrors.length === 0) {
+        // Process-group termination is the terminal resource boundary. A
+        // library close promise that ignores its deadline remains observed by
+        // runtimeCloseOutcome(), but it no longer owns a provider process or
+        // keeps cleanup recovery active.
+        runtimeClosed = true;
+        runtimeCloseAttempt = undefined;
+      } else if (!(closeError instanceof AcpxRuntimeCloseTimeoutError)) {
         runtimeCloseAttempt = undefined;
       }
-      const processErrors = await children.terminate();
-      const runtimeErrors = takeSettledRuntimeCloseErrors();
-      if (closeError instanceof AcpxRuntimeCloseTimeoutError) {
-        runtimeErrors.unshift(closeError);
-      }
-      if (
-        closeError === null &&
-        runtimeCloseSucceeded &&
-        [...ownedRuntimeCloseAttempts].some((attempt) => !attempt.settled)
-      ) {
-        // A newer close may prove that the runtime accepted shutdown, but it
-        // cannot release ownership of an older attempt whose outcome is still
-        // unknown. Keep this close retryable until that outcome is either
-        // reported or the bounded observer times out; the driver can then
-        // continue its autonomous cleanup loop.
-        const outstandingSettlement = Promise.all(
-          [...ownedRuntimeCloseAttempts]
-            .filter((attempt) => !attempt.settled)
-            .map((attempt) => attempt.promise),
-        ).then(() => null);
-        const outstandingError = await boundedCloseOutcome(
-          outstandingSettlement,
-          runtimeCloseTimeoutMs,
+      if (closeError !== null || processErrors.length > 0) {
+        const errors = [closeError, ...processErrors].filter(
+          (error): error is unknown => error !== null,
         );
-        if (outstandingError instanceof AcpxRuntimeCloseTimeoutError) {
-          runtimeErrors.unshift(outstandingError);
-        }
-        runtimeErrors.push(...takeSettledRuntimeCloseErrors());
-      }
-      if (runtimeErrors.length > 0 || processErrors.length > 0) {
-        const errors = [...runtimeErrors, ...processErrors];
-        retainRuntimeCleanupOwnership(input.reason);
         throw new AggregateError(
           errors,
           "ACPX runtime and provider cleanup failed",
         );
       }
-      // Success is reported only after every older attempt has an observed
-      // outcome. A never-settling attempt remains bounded and retryable.
     },
   };
   return port;
-}
-
-class RuntimeCloseAttempt {
-  readonly promise: Promise<unknown | null>;
-  settled = false;
-  outcome: unknown | null | undefined;
-
-  constructor(outcome: Promise<unknown | null>, onSuccess: () => void) {
-    this.promise = outcome.then((error) => {
-      this.settled = true;
-      this.outcome = error;
-      if (error === null) onSuccess();
-      return error;
-    });
-  }
-}
-
-async function retryRuntimeCleanupAfter(delayMs: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, delayMs);
-    timer.unref?.();
-  });
 }
 
 async function boundedRuntimeClose(

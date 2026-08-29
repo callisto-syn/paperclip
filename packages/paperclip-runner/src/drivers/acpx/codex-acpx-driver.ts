@@ -236,7 +236,6 @@ class CodexAcpxSession implements HarnessSession {
   #closePromise: Promise<void> | null = null;
   #hostClosePromise: Promise<void> | null = null;
   #hostCloseAttempts = 0;
-  #hostCleanupRecoveryPromise: Promise<void> | null = null;
   #hostClosed = false;
   #transcriptBytes = 0;
   #transcriptEventCount = 0;
@@ -504,6 +503,17 @@ class CodexAcpxSession implements HarnessSession {
       await settleWithin(hostClose, this.#closeSettlementTimeoutMs);
     } catch (error) {
       hostCloseError = error;
+      if (this.#hostClosePromise === hostClose) this.#hostClosePromise = null;
+      const terminalRetry = this.#startHostClose({ reason });
+      try {
+        await settleWithin(terminalRetry, this.#closeSettlementTimeoutMs);
+        hostCloseError = null;
+      } catch (retryError) {
+        hostCloseError = retryError;
+        if (this.#hostClosePromise === terminalRetry) {
+          this.#hostClosePromise = null;
+        }
+      }
     }
     if (pump) {
       await settleWithin(
@@ -529,7 +539,7 @@ class CodexAcpxSession implements HarnessSession {
         {
           code: "acpx_host_cleanup_deferred",
           message:
-            "ACPX host cleanup exceeded its close bound; autonomous recovery retains ownership until the host confirms cleanup.",
+            "ACPX host cleanup exhausted its bounded terminal retry.",
         },
         closingTurnId ? { turnId: closingTurnId } : {},
         0,
@@ -538,7 +548,6 @@ class CodexAcpxSession implements HarnessSession {
     this.#eventStreamClosed = true;
     this.#events.close();
     if (hostCloseError) {
-      this.#retainHostCleanupOwnership(reason);
       throw hostCloseError;
     }
   }
@@ -558,30 +567,6 @@ class CodexAcpxSession implements HarnessSession {
       }
     });
     return closePromise;
-  }
-
-  #retainHostCleanupOwnership(reason: string): void {
-    if (this.#hostClosed || this.#hostCleanupRecoveryPromise) return;
-    const recovery = (async () => {
-      while (!this.#hostClosed) {
-        const pending =
-          this.#hostClosePromise ?? this.#startHostClose({ reason });
-        try {
-          await settleWithin(pending, this.#closeSettlementTimeoutMs);
-        } catch {
-          if (this.#hostClosePromise === pending) {
-            this.#hostClosePromise = null;
-          }
-          await retryCleanupAfter(this.#closeSettlementTimeoutMs);
-        }
-      }
-    })();
-    this.#hostCleanupRecoveryPromise = recovery;
-    void recovery.finally(() => {
-      if (this.#hostCleanupRecoveryPromise === recovery) {
-        this.#hostCleanupRecoveryPromise = null;
-      }
-    });
   }
 
   async #pumpTurn(turnId: string, turn: AcpxRuntimeTurn): Promise<void> {
@@ -943,11 +928,4 @@ async function settleWithin(
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-async function retryCleanupAfter(delayMs: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, delayMs);
-    timer.unref();
-  });
 }
