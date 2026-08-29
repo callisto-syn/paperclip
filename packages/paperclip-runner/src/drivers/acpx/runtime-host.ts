@@ -117,6 +117,12 @@ export interface AcpxRuntimeHostDependencies {
   admissionVerificationTimeoutMs?: number;
   /** Internal test seam for failed-admission cleanup. */
   admissionCleanupTimeoutMs?: number;
+  /**
+   * Transfers failed-admission cleanup ownership to the embedding lifecycle.
+   * The callback receives the exact aggregate cleanup attempt before the
+   * bounded admission wait can return.
+   */
+  retainAdmissionCleanup?: (cleanup: Promise<void>) => void;
 }
 
 export interface OpenAcpxRuntimeHostOptions {
@@ -280,6 +286,11 @@ export class AcpxRuntimeHost {
         "ACPX runtime initialization failed",
       );
       retainRuntimeHostCleanup(cleanup);
+      dependencies.retainAdmissionCleanup?.(
+        cleanup.then((cleanupError) => {
+          if (cleanupError) throw cleanupError;
+        }),
+      );
       const cleanupOutcome = await awaitRuntimeHostCleanupWithin(
         cleanup,
         admissionCleanupTimeoutMs,

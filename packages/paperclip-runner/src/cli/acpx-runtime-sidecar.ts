@@ -213,6 +213,7 @@ async function dispatch(
         },
       },
       {
+        retainAdmissionCleanup: retainFailedAdmissionCleanup,
         openRuntime: (options) =>
           openCodexAcpxRuntime(options, {
             retainCleanup: retainFailedAdmissionCleanup,

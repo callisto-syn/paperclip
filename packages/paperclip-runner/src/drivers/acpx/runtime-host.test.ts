@@ -308,6 +308,10 @@ describe("ACPX runtime host", () => {
     const dependencies = fixture.dependencies({
       openRuntime: async () => runtime,
     });
+    let retainedAdmissionCleanup: Promise<void> | null = null;
+    dependencies.retainAdmissionCleanup = (cleanup) => {
+      retainedAdmissionCleanup = cleanup;
+    };
     dependencies.admissionVerificationTimeoutMs = 1;
     dependencies.admissionCleanupTimeoutMs = 1;
 
@@ -325,9 +329,17 @@ describe("ACPX runtime host", () => {
     ).rejects.toThrow("initialization and cleanup failed");
     expect(runtime.close).toHaveBeenCalledOnce();
     expect(fixture.commandClose).toHaveBeenCalledOnce();
+    expect(retainedAdmissionCleanup).not.toBeNull();
+    let cleanupSettled = false;
+    void retainedAdmissionCleanup!.finally(() => {
+      cleanupSettled = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    expect(cleanupSettled).toBe(false);
 
     finishRuntimeClose();
-    await runtimeClose;
+    await retainedAdmissionCleanup;
+    expect(cleanupSettled).toBe(true);
   });
 
   it("attempts every cleanup when runtime shutdown fails", async () => {
