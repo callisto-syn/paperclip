@@ -135,10 +135,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 serde_json::Value::Null
             );
         } else {
-            assert_eq!(
-                backslash_escape[0].payload["target"],
-                platform_path.replace('\\', "%5C")
-            );
+            assert_eq!(backslash_escape[0].payload["target"], platform_path);
         }
     }
 
@@ -188,10 +185,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null,
         );
     } else {
-        assert_eq!(
-            windows_drive_relative[0].payload["target"],
-            "a%3Ab/file.txt"
-        );
+        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt");
     }
 
     for posix_path in ["src:/main.rs", "foo:/bar"] {
@@ -212,10 +206,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 serde_json::Value::Null
             );
         } else {
-            assert_eq!(
-                colon_component[0].payload["target"],
-                posix_path.replace(':', "%3A"),
-            );
+            assert_eq!(colon_component[0].payload["target"], posix_path,);
         }
     }
 
@@ -236,10 +227,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null
         );
     } else {
-        assert_eq!(
-            extensible_scheme[0].payload["target"],
-            "custom%3A/host/path"
-        );
+        assert_eq!(extensible_scheme[0].payload["target"], "custom:/host/path");
     }
 
     for unsafe_path in [
@@ -287,8 +275,24 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null
         );
     } else {
-        assert_eq!(posix_colon_backslash[0].payload["target"], "foo%3A%5Cbar");
+        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:\bar");
     }
+
+    let percent_path = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-posix-percent",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":"reports/100%/summary.txt"}]
+        }),
+    );
+    assert_eq!(
+        percent_path[0].payload["target"],
+        "reports/100%/summary.txt"
+    );
 
     let custom_backslash_scheme = normalize(
         AcpxRuntimeEventKind::ToolCall,
@@ -309,7 +313,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     } else {
         assert_eq!(
             custom_backslash_scheme[0].payload["target"],
-            "custom%3A%5Chost%5Cpath"
+            r"custom:\host\path"
         );
     }
 }
