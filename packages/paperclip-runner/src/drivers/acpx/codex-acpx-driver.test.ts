@@ -814,7 +814,7 @@ describe("Codex ACPX harness driver", () => {
     });
   });
 
-  it("transfers a failed turn's semantic result to a resultless successful retry", async () => {
+  it("does not transfer a failed turn's semantic result to an unrelated resultless turn", async () => {
     const fixture = driverFixture();
     const session = await fixture.driver.openSession({
       runId: "run-resultless-semantic-retry",
@@ -852,20 +852,21 @@ describe("Codex ACPX harness driver", () => {
     const snapshot = await session.snapshot();
     expect(snapshot.semanticResult).toMatchObject({
       callId: "finish-before-provider-retry",
-      turnId: second.turnId,
+      turnId: first.turnId,
     });
-    expect(snapshot.semanticResult?.turnId).not.toBe(first.turnId);
     const successfulTerminal = snapshot.terminalTurns?.find(
       (terminal) => terminal.turnId === second.turnId,
     );
     expect(JSON.parse(successfulTerminal!.fingerprint)).toEqual({
       status: "completed",
-      semanticResult: snapshot.semanticResult!.fingerprint,
+      semanticResult: null,
     });
     await session.close({ reason: "simulate resultless retry recovery" });
 
-    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toMatchObject({
-      recovered: true,
+    await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+      recovered: false,
+      reason:
+        "persisted Codex ACPX semantic result has no completed terminal turn",
     });
   });
 
