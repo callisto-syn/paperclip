@@ -653,7 +653,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ]);
   });
 
-  it("resolves linked shared approvals and wakes each executable assignee", async () => {
+  it("resolves linked approvals only with an executable requester continuation", async () => {
     const adapter = seeded({
       actors: [
         {
@@ -708,6 +708,22 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           startedAt: null,
           completedAt: null,
         },
+        {
+          id: "task-3",
+          companyId: "company-1",
+          identifier: "MCK-3",
+          title: "Terminal requester task",
+          description: null,
+          status: "done",
+          priority: "medium",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "actor-2",
+          checkoutRunId: null,
+          executionRunId: null,
+          startedAt: "2026-08-09T00:00:00.000Z",
+          completedAt: "2026-08-09T00:01:00.000Z",
+        },
       ],
       approvals: [
         {
@@ -740,6 +756,19 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           id: "approval-unlinked",
           companyId: "company-1",
           taskIds: ["task-2"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+        {
+          id: "approval-terminal-requester",
+          companyId: "company-1",
+          taskIds: ["task-1", "task-3"],
           type: "request_board_approval",
           status: "pending",
           requestedByActorId: "actor-2",
@@ -788,7 +817,17 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "Active-task approval is in scope.",
       },
-    })).resolves.toMatchObject({ disposition: "applied" });
+    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "terminal-requester-approval-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-terminal-requester",
+        decision: "approved",
+        note: "A terminal task cannot receive the requester continuation.",
+      },
+    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
     await expect(adapter.applyCommand({
       runId: "run-1",
       idempotencyKey: "unlinked-approval-decision",
@@ -803,7 +842,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       approvals: [
         {
           id: "approval-active-task",
-          status: "approved",
+          status: "pending",
         },
         {
           id: "approval-other-task",
@@ -811,26 +850,15 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           comments: [{ body: "Scoped from the active task." }],
         },
         { id: "approval-unlinked", status: "pending" },
+        { id: "approval-terminal-requester", status: "pending" },
       ],
     });
     expect(adapter.snapshot().wakes).toEqual([
-      expect.objectContaining({
-        actorId: "actor-1",
-        taskId: "task-1",
-        reason: "approval_resolved",
-        payload: { approvalId: "approval-other-task", decision: "approved" },
-      }),
       expect.objectContaining({
         actorId: "actor-2",
         taskId: "task-2",
         reason: "approval_resolved",
         payload: { approvalId: "approval-other-task", decision: "approved" },
-      }),
-      expect.objectContaining({
-        actorId: "actor-1",
-        taskId: "task-1",
-        reason: "approval_resolved",
-        payload: { approvalId: "approval-active-task", decision: "approved" },
       }),
     ]);
     const requesterWake = adapter.snapshot().wakes.find((wake) => wake.actorId === "actor-2");

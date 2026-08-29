@@ -822,42 +822,37 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             "fixture approval has already been decided",
           );
         }
-        approval.status = command.decision;
-        approval.decisionNote = requireText(command.note, "approval decision note");
-        approval.decidedAt = this.#now();
-        const wakeTargets: Array<{ actorId: string; taskId: string }> = [];
-        let requesterTaskId: string | undefined;
+        let requesterTarget: { actorId: string; taskId: string } | null = null;
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
-          if (linkedTask.assigneeActorId === approval.requestedByActorId) {
-            requesterTaskId ??= linkedTask.id;
-          }
-          if (linkedTask.assigneeActorId !== null) {
-            wakeTargets.push({
-              actorId: linkedTask.assigneeActorId,
+          if (
+            approval.requestedByActorId !== null &&
+            linkedTask.assigneeActorId === approval.requestedByActorId &&
+            ["backlog", "todo", "blocked", "in_review"].includes(linkedTask.status)
+          ) {
+            requesterTarget ??= {
+              actorId: approval.requestedByActorId,
               taskId: linkedTask.id,
-            });
+            };
           }
         }
-        // Resolution is both a task handoff and a reply to the requesting
-        // actor. The requester may only be woken on a linked task they can
-        // actually check out; binding them to another actor's canonical task
-        // would create a scheduled wake that always fails openRun.
-        if (approval.requestedByActorId !== null && requesterTaskId !== undefined) {
-          wakeTargets.push({
-            actorId: approval.requestedByActorId,
-            taskId: requesterTaskId,
-          });
+        // An approval reply belongs to its requester, not to every assignee on
+        // every linked task. Refuse to publish a decision unless a nonterminal
+        // linked task gives that requester a continuation openRun can use.
+        if (approval.requestedByActorId !== null && requesterTarget === null) {
+          throw new CapabilityMockControlPlaneError(
+            "approval_requester_continuation_missing",
+            "fixture approval requester has no executable linked task",
+          );
         }
-        const scheduledTargets = new Set<string>();
-        for (const target of wakeTargets) {
-          const targetKey = `${target.actorId}\u0000${target.taskId}`;
-          if (scheduledTargets.has(targetKey)) continue;
-          scheduledTargets.add(targetKey);
+        approval.status = command.decision;
+        approval.decisionNote = requireText(command.note, "approval decision note");
+        approval.decidedAt = this.#now();
+        if (requesterTarget !== null) {
           const wakeId = this.#scheduleWake(
-            target.actorId,
-            target.taskId,
+            requesterTarget.actorId,
+            requesterTarget.taskId,
             "approval_resolved",
             { approvalId: approval.id, decision: command.decision },
             0,
