@@ -100,9 +100,9 @@ describe("managed Codex credentials", () => {
       const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
         async function (this: FileHandle): Promise<void> {
           syncAttempts += 1;
-          // The initial stale-file directory sync and temporary credential
-          // file sync succeed. Installation and first removal directory sync fail.
-          if (syncAttempts === 3 || syncAttempts === 4) {
+          // The temporary credential file sync succeeds. Installation and the
+          // first removal directory sync fail.
+          if (syncAttempts === 2 || syncAttempts === 3) {
             throw new Error("injected directory sync failure");
           }
           await originalSync.call(this);
@@ -117,7 +117,7 @@ describe("managed Codex credentials", () => {
         await expect(lease.close()).rejects.toThrow("injected directory sync failure");
         await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
-        expect(syncAttempts).toBe(5);
+        expect(syncAttempts).toBe(4);
       } finally {
         syncSpy.mockRestore();
       }
@@ -165,6 +165,40 @@ describe("managed Codex credentials", () => {
       code: "ENOENT",
     });
   });
+
+  it.runIf(process.platform !== "win32")(
+    "returns cleanup ownership when stale removal directory sync fails",
+    async () => {
+      const fixture = await credentialFixture();
+      const destination = join(fixture.home, "auth.json");
+      await writeFile(destination, '{"stale":true}', { mode: 0o600 });
+      const probe = await open(fixture.home, "r");
+      const prototype = Object.getPrototypeOf(probe) as {
+        sync(this: FileHandle): Promise<void>;
+      };
+      await probe.close();
+      const originalSync = prototype.sync;
+      let syncAttempts = 0;
+      const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
+        async function (this: FileHandle): Promise<void> {
+          syncAttempts += 1;
+          if (syncAttempts === 1) throw new Error("injected directory sync failure");
+          await originalSync.call(this);
+        },
+      );
+      try {
+        const lease = await stageManagedCodexCredential({
+          agentHomeDirectory: fixture.home,
+          environment: { OPENAI_API_KEY: "launch-only-key" },
+        });
+        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lease.close()).resolves.toBeUndefined();
+        expect(syncAttempts).toBe(2);
+      } finally {
+        syncSpy.mockRestore();
+      }
+    },
+  );
 
   it("rejects missing, ambiguous, malformed, and unsafe sources", async () => {
     const fixture = await credentialFixture();

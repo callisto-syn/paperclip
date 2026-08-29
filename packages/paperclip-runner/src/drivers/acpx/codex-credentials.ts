@@ -72,8 +72,11 @@ export async function stageManagedCodexCredential(input: {
     );
   }
 
-  await removeCredential(destination, home);
-  if (hasApiKey) return credentialLease(destination, home, "api_key");
+  if (hasApiKey) {
+    const lease = credentialLease(destination, home, "api_key");
+    await removeCredentialForLease(destination, home);
+    return lease;
+  }
 
   const credential = hasInlineJson
     ? boundedInlineCredential(inlineJson!)
@@ -254,6 +257,25 @@ async function removeCredential(path: string, home: string): Promise<void> {
     // before the lease reports success.
     await syncDirectory(home);
   }
+}
+
+async function removeCredentialForLease(
+  path: string,
+  home: string,
+): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      throw new Error("Managed Codex credential destination is a directory");
+    }
+    await unlink(path);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+  // A lease already owns this path. If unlink succeeded but its directory sync
+  // did not, return that lease so close() can retry the durability boundary.
+  // Throwing here would strand cleanup ownership after the pathname vanished.
+  await syncDirectory(home).catch(() => undefined);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
