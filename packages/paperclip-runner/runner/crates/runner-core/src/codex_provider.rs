@@ -153,7 +153,6 @@ pub struct CodexProvider {
     pending_runtime_requests: BTreeMap<String, PendingRuntimeRequest>,
     expected_shutdown: bool,
     completion_exit_reconciliation_pending: bool,
-    completion_probe_request_id: Option<u64>,
 }
 
 impl CodexProvider {
@@ -189,7 +188,6 @@ impl CodexProvider {
             pending_runtime_requests: BTreeMap::new(),
             expected_shutdown: false,
             completion_exit_reconciliation_pending: false,
-            completion_probe_request_id: None,
         };
         let initialized = provider.request(
             "initialize",
@@ -282,7 +280,6 @@ impl CodexProvider {
         }
         self.expected_shutdown = false;
         self.completion_exit_reconciliation_pending = false;
-        self.completion_probe_request_id = None;
         let result = self.request(
             "turn/start",
             json!({
@@ -369,31 +366,6 @@ impl CodexProvider {
             let Some(line) = self.process.receive_stdout_line(Duration::from_millis(1))? else {
                 let exit = self.process.try_wait()?;
                 let completed_turn_exit = self.completion_exit_reconciliation_pending;
-                if exit.is_none()
-                    && completed_turn_exit
-                    && self.completion_probe_request_id.is_none()
-                {
-                    // Do not expire completion authority on a wall-clock guess.
-                    // A response to this post-completion probe proves the
-                    // provider processed new idle work; only then may a later
-                    // exit be classified as a new session failure.
-                    let request_id = self.next_request_id;
-                    self.next_request_id = self
-                        .next_request_id
-                        .checked_add(1)
-                        .ok_or_else(|| LocalRunnerError::invalid("Codex request id exhausted"))?;
-                    if self
-                        .process
-                        .send(&json!({
-                            "id": request_id,
-                            "method": "thread/read",
-                            "params": {"threadId": self.thread_id, "includeTurns": true},
-                        }))
-                        .is_ok()
-                    {
-                        self.completion_probe_request_id = Some(request_id);
-                    }
-                }
                 return if let Some(exit) = exit {
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
@@ -405,15 +377,6 @@ impl CodexProvider {
             };
             parse_provider_message(&line)?
         };
-
-        if self.completion_probe_request_id.is_some_and(|request_id| {
-            message.get("id").and_then(Value::as_u64) == Some(request_id)
-                && message.get("method").is_none()
-        }) {
-            self.completion_probe_request_id = None;
-            self.completion_exit_reconciliation_pending = false;
-            return Ok(None);
-        }
 
         if let (Some(rpc_id), Some(method)) = (
             message.get("id").cloned(),
@@ -576,7 +539,6 @@ impl CodexProvider {
                 self.active_provider_turn_id = None;
                 self.expected_shutdown = true;
                 self.completion_exit_reconciliation_pending = true;
-                self.completion_probe_request_id = None;
                 // The provider terminal is authoritative once received. Clear
                 // local request ownership and attempt courtesy responses, but
                 // a provider that already closed stdin must not turn the

@@ -435,65 +435,33 @@ fn delayed_nonzero_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn provider_failure_after_a_completed_turn_becomes_idle_is_reported() {
-    let directory = temporary_directory("completion-then-idle-failure");
-    let failure_signal = directory.join("fail-provider-after-completion");
-    let failure_signal_argument = failure_signal.to_string_lossy().into_owned();
-    let config = provider_config(
-        &directory,
-        &[
-            "--fail-after-completed-turn-signal",
-            &failure_signal_argument,
-        ],
+fn new_turn_revokes_prior_completion_authority() {
+    let directory = temporary_directory("completion-then-new-turn-failure");
+    let config = provider_config(&directory, &["--fail-after-second-turn-start"]);
+    let mut provider = CodexProvider::start(&config, None).expect("start Codex provider");
+    provider
+        .start_turn("Complete the first turn.", &config.cwd)
+        .expect("start first provider turn");
+    let first_completed = (0..32).any(|_| {
+        matches!(
+            provider.poll().expect("poll first turn"),
+            Some(CodexProviderEvent::Notification { method, .. })
+                if method == "turn/completed"
+        )
+    });
+    assert!(
+        first_completed,
+        "observe the authoritative first completion"
     );
-    let mut executor = CodexCommandExecutor::new(&directory);
-    executor
-        .execute(&command(
-            "prepare",
-            1,
-            "run.prepare",
-            json!({"provider": config}),
-        ))
-        .expect("prepare Codex provider");
-    executor
-        .execute(&command("open", 2, "session.open", json!({})))
-        .expect("open Codex session");
-    executor
-        .execute(&command(
-            "turn",
-            3,
-            "turn.start",
-            json!({"text": "Complete before a later idle failure."}),
-        ))
-        .expect("start provider turn");
 
-    let mut event_types = Vec::new();
-    let mut failure_signalled = false;
-    for _ in 0..2_000 {
-        event_types.extend(
-            poll_and_ack(&mut executor)
-                .expect("poll completion and idle failure")
-                .into_iter()
-                .map(|event| event.event_type),
-        );
-        if !failure_signalled && event_types.iter().any(|event| event == "turn.completed") {
-            fs::write(&failure_signal, b"fail").expect("signal the idle provider failure");
-            failure_signalled = true;
-        }
-        if event_types.iter().any(|event| event == "session.failed") {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-
-    assert!(event_types.iter().any(|event| event == "turn.completed"));
-    assert!(event_types.iter().any(|event| event == "session.failed"));
-    let persisted: Value = serde_json::from_slice(
-        &fs::read(directory.join("codex-provider-state.json"))
-            .expect("read provider state after idle failure"),
-    )
-    .expect("parse provider state after idle failure");
-    assert_eq!(persisted["lifecycle"], "provider_exited");
+    provider
+        .start_turn("Start genuinely new provider work.", &config.cwd)
+        .expect("start second provider turn");
+    let second_exit = (0..64).find_map(|_| match provider.poll().expect("poll second turn") {
+        Some(CodexProviderEvent::Exited { success, .. }) => Some(success),
+        _ => None,
+    });
+    assert_eq!(second_exit, Some(false));
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

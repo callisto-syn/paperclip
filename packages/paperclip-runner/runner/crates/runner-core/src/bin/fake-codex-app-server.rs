@@ -116,16 +116,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let fail_after_turn_completion = args
         .iter()
         .any(|value| value == "--fail-after-turn-completion");
+    let fail_after_second_turn_start = args
+        .iter()
+        .any(|value| value == "--fail-after-second-turn-start");
     let fail_after_turn_completion_delay_ms =
         argument(&args, "--fail-after-turn-completion-delay-ms")
             .map(|value| value.parse::<u64>())
             .transpose()?;
-    let fail_after_completed_turn_signal =
-        argument(&args, "--fail-after-completed-turn-signal").map(PathBuf::from);
     let pre_response_notification = args
         .iter()
         .any(|value| value == "--notification-before-response");
     let mut state = load_state(&state_path);
+    let mut turn_start_count = 0_u64;
 
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
@@ -204,16 +206,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "id": id,
                     "result": {"thread": {"id": state.thread_id, "turns": turns}}
                 }))?;
-                if state.active_turn_id.is_none() {
-                    if let Some(signal_path) = &fail_after_completed_turn_signal {
-                        while !signal_path.exists() {
-                            thread::sleep(Duration::from_millis(1));
-                        }
-                        return Err("configured failure after completed turn became idle".into());
-                    }
-                }
             }
             "turn/start" => {
+                turn_start_count += 1;
                 state.active_turn_id = Some("provider-turn-1".to_owned());
                 save_state(&state_path, &state)?;
                 send(json!({
@@ -224,7 +219,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "method": "turn/started",
                     "params": {"turn": {"id": "provider-turn-1"}}
                 }))?;
-                if exit_after_turn_start {
+                if fail_after_second_turn_start && turn_start_count == 2 {
+                    return Err("configured failure after second turn start".into());
+                } else if exit_after_turn_start {
                     return Ok(());
                 } else if emit_tool_call {
                     send(json!({
