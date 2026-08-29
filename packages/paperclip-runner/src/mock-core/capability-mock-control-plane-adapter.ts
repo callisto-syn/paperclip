@@ -430,14 +430,27 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     }
     this.#authorizeCommand(run, envelope.command);
 
+    // Exercise the complete command against an isolated state snapshot before
+    // consuming a scripted fault. This keeps validation failures from spending
+    // a retryable fault that belongs to the first semantically valid attempt.
+    // Re-resolve the run afterwards because restoring the snapshot invalidates
+    // object references into the previous state.
+    const stateBeforeValidation = clone(this.#state);
+    try {
+      this.#executeCommand(run, envelope.command);
+    } finally {
+      this.#state = stateBeforeValidation;
+    }
+
+    const validatedRun = this.#run(envelope.runId);
     const stateBeforeCommand = clone(this.#state);
     const fault = this.#consumeFault("apply_command", envelope.command.kind);
-    this.#throwBeforeFault(fault, run.id, envelope.command.kind);
+    this.#throwBeforeFault(fault, validatedRun.id, envelope.command.kind);
     let result: CapabilityCommandResult;
     try {
       const commandId = this.#id("command");
-      const { entityRefs, scheduledWakeIds } = this.#executeCommand(run, envelope.command);
-      this.#recordMutation(run.id, run.actorId, "semantic_command.applied", "command", commandId, {
+      const { entityRefs, scheduledWakeIds } = this.#executeCommand(validatedRun, envelope.command);
+      this.#recordMutation(validatedRun.id, validatedRun.actorId, "semantic_command.applied", "command", commandId, {
         kind: envelope.command.kind,
         idempotencyKey: envelope.idempotencyKey,
         entityRefs,
@@ -462,7 +475,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
     }
     // A post-commit lost-ack fault deliberately retains the transaction and its
     // idempotency record. Only validation and execution failures roll back.
-    this.#throwAfterFault(fault, run.id, envelope.command.kind);
+    this.#throwAfterFault(fault, validatedRun.id, envelope.command.kind);
     return deepFreeze(clone(result));
   }
 

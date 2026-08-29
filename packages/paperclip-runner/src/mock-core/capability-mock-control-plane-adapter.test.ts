@@ -270,6 +270,45 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     expect(adapter.snapshot().tasks.map((task) => task.title)).toContain("Valid child");
   });
 
+  it("preserves retryable command faults until semantic validation succeeds", async () => {
+    const adapter = seeded({
+      faults: [{
+        id: "retry-create",
+        operation: "apply_command",
+        commandKind: "create_task",
+        effect: "retryable_error",
+        remaining: 1,
+        code: "fixture_create_temporarily_unavailable",
+      }],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun({
+      ...OPEN,
+      capabilities: ["delegation:tasks:create"],
+    });
+
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "create-after-validation",
+      command: { kind: "create_task", title: "" },
+    })).rejects.toMatchObject({ code: "semantic_command_invalid", retryable: false });
+    expect(adapter.snapshot().faults[0]?.remaining).toBe(1);
+
+    const corrected = {
+      runId: "run-1",
+      idempotencyKey: "create-after-validation",
+      command: { kind: "create_task", title: "Valid child" },
+    } as const;
+    await expect(adapter.applyCommand(corrected)).rejects.toMatchObject({
+      code: "fixture_create_temporarily_unavailable",
+      retryable: true,
+    });
+    expect(adapter.snapshot().faults[0]?.remaining).toBe(0);
+    await expect(adapter.applyCommand(corrected)).resolves.toMatchObject({
+      disposition: "applied",
+    });
+  });
+
   it("serializes, restores, and replays gapped events without a live service", async () => {
     const adapter = seeded();
     await adapter.start();
