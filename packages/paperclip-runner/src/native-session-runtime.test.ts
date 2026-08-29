@@ -470,7 +470,7 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("closes a failed session while retaining optional cancellation", async () => {
+  it("bounds a failed session when optional cancellation never settles", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     let releaseCancellation = () => {};
@@ -533,17 +533,70 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 1,
       keepSessionOpen: true,
     });
-    let executionSettled = false;
-    void execution.then(
-      () => { executionSettled = true; },
-      () => { executionSettled = true; },
-    );
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(interrupt).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(executionSettled).toBe(false);
-    releaseCancellation();
     await expect(execution).rejects.toThrow("native session timed out");
+    releaseCancellation();
+  });
+
+  it("bounds failure when iterator teardown and provider close never settle", async () => {
+    const never = new Promise<void>(() => undefined);
+    const close = vi.fn(() => never);
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: false, structuredResult: true };
+      },
+      async *events() {
+        await never;
+        yield runnerEvent(1, "turn.completed");
+      },
+      async startTurn() { return { turnId: "turn-recovery" }; },
+      async result() { return null; },
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-recovery",
+          identity,
+          providerSessionId: "provider-recovery",
+          cursor: null,
+          activeTurnId: null,
+          pendingRuntimeRequests: [],
+          lineage: [],
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: false, structuredResult: true },
+        };
+      },
+      async openSession() { return session; },
+    };
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      timeoutMs: 1,
+      keepSessionOpen: true,
+    })).rejects.toThrow("native session timed out");
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("closes after a synchronous governed-wait probe returns no result", async () => {
@@ -1773,17 +1826,11 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 25,
       keepSessionOpen: true,
     });
-    let executionSettled = false;
-    void execution.then(
-      () => { executionSettled = true; },
-      () => { executionSettled = true; },
-    );
     await handoffStarted;
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(handoffSignal?.aborted).toBe(true);
-    expect(executionSettled).toBe(false);
-    releaseHandoff();
     await expect(execution).rejects.toThrow("native session timed out");
+    releaseHandoff();
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -1906,20 +1953,13 @@ describe("executeNativeSession recovery", () => {
       controlPlaneInstanceId: "control-recovery",
       runtimeInputLiveWindowMs: 1,
     });
-    let executionSettled = false;
-    void execution.then(
-      () => { executionSettled = true; },
-      () => { executionSettled = true; },
-    );
-
     await handoffStarted;
     await vi.waitFor(() => expect(handoffSignal?.aborted).toBe(true));
     expect(readResult).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-    expect(executionSettled).toBe(false);
     expect(readResult).not.toHaveBeenCalled();
-    releaseHandoff();
     await expect(execution).rejects.toThrow("native_terminal_handoff_settlement_timeout");
+    releaseHandoff();
     expect(close).toHaveBeenCalledOnce();
     expect(readResult).not.toHaveBeenCalled();
   });

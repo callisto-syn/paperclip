@@ -334,28 +334,28 @@ async function consumeTurn(
         : []),
     ]);
     if (consumptionFailed) {
-      // Start the required provider close immediately so it can release a
-      // blocked iterator or provider operation. Do not, however, let the
-      // execution reject until every exact operation has settled. JavaScript
-      // promises cannot be forcibly terminated; returning while a callback
-      // that ignored abort was still live would let work escape the failed-run
-      // boundary. NativeSession.close() is therefore a hard join contract, not
-      // merely a best-effort resource release.
-      const [, closeResult] = await Promise.allSettled([
+      // Start provider close immediately so a cooperative implementation can
+      // release a blocked iterator or provider operation. Abort has already
+      // revoked every control-plane mutation capability and closeSession has
+      // removed this session from the caller, so an implementation that
+      // violates its cancellation contract is quarantined rather than allowed
+      // to defeat the execution deadline. Promise.allSettled keeps every late
+      // rejection observed after the bounded wait expires.
+      const cleanupSettlement = Promise.allSettled([
         teardownSettlement,
         Promise.resolve().then(closeFailedSession),
       ]);
-      if (closeResult.status === "rejected") throw closeResult.reason;
+      await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
     } else {
       if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
         // A terminal provider fact does not make an uncooperative handoff safe
         // to forget. Revoke its mutation authority, start provider close, and
         // join the exact operation before publishing a failed execution.
-        const [, closeResult] = await Promise.allSettled([
+        const cleanupSettlement = Promise.allSettled([
           teardownSettlement,
           Promise.resolve().then(closeFailedSession),
         ]);
-        if (closeResult.status === "rejected") throw closeResult.reason;
+        await settlesWithin(cleanupSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS);
         throw new Error("native_terminal_handoff_settlement_timeout");
       }
     }
@@ -746,7 +746,22 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return executionResult;
   } finally {
     if (!options.keepSessionOpen || !executionSucceeded) {
-      await closeSession();
+      // A provider that ignores close must not keep execution pending forever.
+      // closeSession removes it from the caller before invoking the backend;
+      // retain observation of the promise, but bound the final join. A clean
+      // execution fails explicitly if its provider cannot confirm closure.
+      const closeSettlement = Promise.allSettled([closeSession()]);
+      const closed = await settlesWithin(
+        closeSettlement,
+        FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+      );
+      if (executionSucceeded && !closed) {
+        throw new Error("native_session_close_timeout");
+      }
+      if (executionSucceeded) {
+        const [closeResult] = await closeSettlement;
+        if (closeResult?.status === "rejected") throw closeResult.reason;
+      }
     }
   }
 }

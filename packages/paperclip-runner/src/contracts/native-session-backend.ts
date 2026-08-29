@@ -94,12 +94,12 @@ export interface NativeSession {
   snapshot(): Promise<PersistedNativeSession>;
   /**
    * Idempotently stop provider work and release every pending `events().next()`
-   * before this promise resolves. The runtime uses this required boundary when
-   * optional interrupt or cancel support cannot release a blocked event read.
-   * It must also settle every promise previously returned by the session
-   * (including interrupt, cancel, handoff, and iterator teardown) before
-   * resolving. Revoking mutation authority alone is not sufficient: no
-   * provider-owned operation may outlive the closed-session boundary.
+   * before this promise resolves. Implementations must settle every promise
+   * previously returned by the session (including interrupt, cancel, handoff,
+   * and iterator teardown). The runtime bounds its wait for a broken provider,
+   * revokes that session's mutation authority, removes it from reuse, and keeps
+   * observing late cleanup so a contract violation cannot defeat a run timeout
+   * or become an unhandled rejection.
    */
   close(input: { reason: string }): Promise<void>;
 }
