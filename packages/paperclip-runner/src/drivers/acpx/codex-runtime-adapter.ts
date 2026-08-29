@@ -528,7 +528,6 @@ class SpawnedChildSet {
   readonly #children = new Set<ChildProcess>();
   readonly #errors = new Set<unknown>();
   readonly #terminations = new Map<ChildProcess, Promise<unknown[]>>();
-  #terminating = false;
   #sealed = false;
 
   constructor(
@@ -554,7 +553,6 @@ class SpawnedChildSet {
       void cleanup.catch(() => undefined);
       throw new Error("ACPX provider spawned after cleanup was sealed");
     }
-    if (this.#terminating) this.#startTermination(child);
     return child;
   }
 
@@ -575,21 +573,14 @@ class SpawnedChildSet {
   }
 
   async terminate(): Promise<unknown[]> {
-    this.#terminating = true;
-    for (const child of this.#children) this.#startTermination(child);
-    const errors: unknown[] = [];
-    // A provider can be spawned while another child is between TERM and KILL.
-    // Keep joining tracked attempts until the owned set reaches a stable empty
-    // point so failed admission and sidecar shutdown cannot lose that child.
-    while (this.#terminations.size > 0) {
-      for (const error of (await Promise.all([...this.#terminations.values()])).flat()) {
-        pushUnique(errors, error);
-      }
-    }
-    // JavaScript cannot interleave another spawn between this synchronous
-    // empty check and the seal. Children added before it are tracked by the
-    // loop; children added afterward are synchronously killed by add().
+    // Revoke spawn authority synchronously before the first await. Children
+    // already owned here receive the normal TERM/KILL sequence; every later
+    // spawn is rejected and its independently retained post-seal cleanup
+    // cannot extend this caller-facing shutdown without bound.
     this.#sealed = true;
+    for (const child of this.#children) this.#startTermination(child);
+    const ownedTerminations = [...this.#terminations.values()];
+    const errors = (await Promise.all(ownedTerminations)).flat();
     // A failed spawn or signal can emit `error` and then `close` before this
     // method snapshots the live children. Keep those errors independently of
     // child membership and report each object once after all owned attempts.

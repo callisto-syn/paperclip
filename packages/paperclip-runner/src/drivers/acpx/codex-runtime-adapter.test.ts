@@ -333,7 +333,7 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
-  it("joins a provider spawned while termination is already in progress", async () => {
+  it("rejects and independently cleans providers spawned during termination", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
@@ -343,10 +343,12 @@ describe("Codex ACPX runtime adapter", () => {
       vi.mocked(command.spawn)
         .mockReturnValueOnce(firstChild)
         .mockReturnValueOnce(lateChild);
+      const retainedCleanups: Promise<void>[] = [];
       let runtimeOptions: AcpRuntimeOptions | undefined;
       const port = await openCodexAcpxRuntime(openOptions(command), {
         createRegistry: () => registry(),
         createStore: () => store(),
+        retainCleanup: (cleanup) => retainedCleanups.push(cleanup),
         createRuntime: (options) => {
           runtimeOptions = options;
           return runtime;
@@ -365,19 +367,19 @@ describe("Codex ACPX runtime adapter", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(firstChild.kill).toHaveBeenCalledWith("SIGTERM");
       await vi.advanceTimersByTimeAsync(1_500);
-      runtimeOptions?.spawnAgent?.({
-        command: "ignored",
-        args: ["--stdio"],
-        options: {},
-      });
-      expect(lateChild.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(() => runtimeOptions?.spawnAgent?.({
+          command: "ignored",
+          args: ["--stdio"],
+          options: {},
+        })).toThrow("provider spawned after cleanup was sealed");
+      expect(lateChild.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(retainedCleanups).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(500);
       expect(firstChild.kill).toHaveBeenCalledWith("SIGKILL");
-      expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(1_500);
       await closing;
-      expect(lateChild.kill).toHaveBeenCalledWith("SIGKILL");
+      await retainedCleanups[0];
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
