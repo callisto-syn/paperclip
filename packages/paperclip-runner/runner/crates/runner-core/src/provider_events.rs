@@ -681,14 +681,14 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     };
     if path.is_empty()
         || path.starts_with('/')
-        || (cfg!(windows) && is_absolute_windows_drive_path(&windows_normalized_path))
-        // ACPX providers execute on the runner host. On POSIX, a leading
-        // single-letter colon component is a valid relative filename, not a
-        // Windows drive selector. Interpret that ambiguous spelling as a
-        // drive-relative path only when the runner itself is on Windows.
-        || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
+        // Provider display paths cross OS boundaries. Reject foreign absolute,
+        // rooted, drive-relative, and parent-traversing spellings on every
+        // host instead of reinterpreting them as literal POSIX filenames.
+        || windows_normalized_path.starts_with('/')
+        || is_absolute_windows_drive_path(&windows_normalized_path)
+        || has_drive_relative_prefix(&windows_normalized_path)
         || (cfg!(windows) && raw_path.contains(':'))
-        || path.split('/').any(|segment| segment == "..")
+        || windows_normalized_path.split('/').any(|segment| segment == "..")
         || has_unsafe_uri_spelling(raw_path)
     {
         Value::Null
@@ -784,25 +784,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_windows_paths_for_the_runner_platform() {
+    fn rejects_foreign_absolute_paths_on_every_runner_platform() {
         for location in [r"C:\Users\alice\file.txt", r"\\server\share\file.txt"] {
-            let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            if cfg!(windows) {
-                assert_eq!(normalized, Value::Null);
-            } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
-            }
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": location}))),
+                Value::Null,
+            );
         }
     }
 
     #[test]
-    fn classifies_ambiguous_drive_relative_syntax_for_the_runner_platform() {
-        let location = safe_acpx_location(Some(&json!({"path": "a:b/file.txt"})));
-        if cfg!(windows) {
-            assert_eq!(location, Value::Null);
-        } else {
-            assert_eq!(location, Value::String("a:b/file.txt".to_owned()));
-        }
+    fn rejects_drive_relative_syntax_on_every_runner_platform() {
+        assert_eq!(
+            safe_acpx_location(Some(&json!({"path": "a:b/file.txt"}))),
+            Value::Null,
+        );
     }
 
     #[test]
@@ -831,14 +827,22 @@ mod tests {
     }
 
     #[test]
-    fn preserves_posix_literal_backslash_components_without_uri_ambiguity() {
+    fn rejects_backslash_root_and_traversal_on_every_runner_platform() {
         for location in [r"foo\..\bar", r"\rooted\name"] {
-            let normalized = safe_acpx_location(Some(&json!({"path": location})));
-            if cfg!(windows) {
-                assert_eq!(normalized, Value::Null);
-            } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
-            }
+            assert_eq!(
+                safe_acpx_location(Some(&json!({"path": location}))),
+                Value::Null,
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_safe_posix_literal_backslash_components() {
+        let literal = safe_acpx_location(Some(&json!({"path": r"folder\name"})));
+        if cfg!(windows) {
+            assert_eq!(literal, Value::String("folder/name".to_owned()));
+        } else {
+            assert_eq!(literal, Value::String(r"folder\name".to_owned()));
         }
         let custom = safe_acpx_location(Some(&json!({"path": r"custom:\host\path"})));
         if cfg!(windows) {

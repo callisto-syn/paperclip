@@ -129,14 +129,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 "locations":[{"path":unsafe_path}]
             }),
         );
-        if cfg!(windows) {
-            assert_eq!(
-                backslash_escape[0].payload["target"],
-                serde_json::Value::Null
-            );
-        } else {
-            assert_eq!(backslash_escape[0].payload["target"], unsafe_path);
-        }
+        assert_eq!(
+            backslash_escape[0].payload["target"],
+            serde_json::Value::Null
+        );
     }
 
     let windows_absolute = normalize(
@@ -150,17 +146,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"C:\\Users\\alice\\repo\\src\\main.rs"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            windows_absolute[0].payload["target"],
-            serde_json::Value::Null
-        );
-    } else {
-        assert_eq!(
-            windows_absolute[0].payload["target"],
-            r"C:\Users\alice\repo\src\main.rs"
-        );
-    }
+    assert_eq!(
+        windows_absolute[0].payload["target"],
+        serde_json::Value::Null
+    );
 
     let windows_unc = normalize(
         AcpxRuntimeEventKind::ToolCall,
@@ -173,14 +162,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"\\\\server\\share\\repo\\src\\main.rs"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
-    } else {
-        assert_eq!(
-            windows_unc[0].payload["target"],
-            r"\\server\share\repo\src\main.rs"
-        );
-    }
+    assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
 
     let windows_drive_relative = normalize(
         AcpxRuntimeEventKind::ToolCall,
@@ -193,14 +175,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"a:b/file.txt"}]
         }),
     );
-    if cfg!(windows) {
-        assert_eq!(
-            windows_drive_relative[0].payload["target"],
-            serde_json::Value::Null,
-        );
-    } else {
-        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt",);
-    }
+    assert_eq!(
+        windows_drive_relative[0].payload["target"],
+        serde_json::Value::Null,
+    );
 
     for posix_path in ["src:/main.rs", "foo:/bar"] {
         let colon_component = normalize(
