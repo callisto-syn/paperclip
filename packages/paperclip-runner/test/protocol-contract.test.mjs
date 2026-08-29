@@ -132,6 +132,14 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
     /native response option for environment/,
   );
 
+  const emptyOption = structuredClone(canonical);
+  emptyOption.nativeRequest.params.requestedSchema.properties.environment
+    .oneOf[0].const = "";
+  assert.throws(
+    () => assertAcpxQuestionFixture(emptyOption),
+    /native options must be non-empty bounded strings/,
+  );
+
   const missingResponse = structuredClone(canonical);
   missingResponse.nativeResponse.content = {};
   assert.throws(

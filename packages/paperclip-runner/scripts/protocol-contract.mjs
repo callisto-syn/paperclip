@@ -614,8 +614,12 @@ function acpxEnumValues(property, preferredTitledKey) {
   const values = titled === null ? property.enum ?? [] : titled.map((entry) =>
     isPlainRecord(entry) ? entry.const : undefined
   );
-  if (!Array.isArray(values) || values.length > 128 || values.some((value) => typeof value !== "string")) {
-    throw contractError("invalid_acpx_question_fixture", "native options must be bounded strings");
+  if (
+    !Array.isArray(values)
+    || values.length > 128
+    || values.some((value) => typeof value !== "string" || value.length === 0)
+  ) {
+    throw contractError("invalid_acpx_question_fixture", "native options must be non-empty bounded strings");
   }
   return values;
 }
