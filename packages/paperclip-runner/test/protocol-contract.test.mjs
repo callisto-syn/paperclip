@@ -238,37 +238,78 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
   assert.doesNotThrow(() => assertAcpxQuestionFixture(specialPropertyFixture));
 });
 
-test("the ACPX question fixture accepts typed boolean enums", async () => {
-  const booleanEnum = structuredClone(await fixture("questions/acpx.json"));
-  booleanEnum.nativeRequest.params.requestedSchema.properties.environment = {
-    type: "boolean",
-    title: "Confirm deployment",
-    description: "Should deployment proceed?",
-    enum: [true, false],
-  };
-  booleanEnum.canonicalQuestionSet.questions[0] = {
-    id: "field-1-environment-ba5285161ba6",
-    header: "Confirm deployment",
-    prompt: "Should deployment proceed?",
-    required: true,
-    answerMode: "single_select",
-    options: [
-      { id: "option-1", label: "Yes" },
-      { id: "option-2", label: "No" },
-    ],
-  };
-  booleanEnum.nativeResponse.content.environment = true;
-
-  assert.doesNotThrow(() => assertAcpxQuestionFixture(booleanEnum));
-
-  const malformed = structuredClone(booleanEnum);
-  malformed.nativeRequest.params.requestedSchema.properties.environment.enum = [
-    true,
-    "false",
+test("the ACPX question fixture ignores scalar enums the adapter does not project", async () => {
+  const base = await fixture("questions/acpx.json");
+  const id = "field-1-environment-ba5285161ba6";
+  const cases = [
+    {
+      type: "boolean",
+      property: { type: "boolean", title: "Confirm", enum: [true] },
+      question: {
+        id,
+        header: "Confirm",
+        prompt: "Confirm",
+        required: true,
+        answerMode: "single_select",
+        options: [
+          { id: "option-1", label: "Yes" },
+          { id: "option-2", label: "No" },
+        ],
+      },
+      canonicalAnswer: { selectedOptionIds: ["option-2"] },
+      nativeAnswer: false,
+    },
+    {
+      type: "number",
+      property: { type: "number", title: "Threshold", enum: [1.5] },
+      question: {
+        id,
+        header: "Threshold",
+        prompt: "Threshold",
+        required: true,
+        answerMode: "text",
+        textValidation: { inputType: "number" },
+      },
+      canonicalAnswer: { text: "2.5" },
+      nativeAnswer: 2.5,
+    },
+    {
+      type: "integer",
+      property: { type: "integer", title: "Replicas", enum: [1] },
+      question: {
+        id,
+        header: "Replicas",
+        prompt: "Replicas",
+        required: true,
+        answerMode: "text",
+        textValidation: { inputType: "integer" },
+      },
+      canonicalAnswer: { text: "2" },
+      nativeAnswer: 2,
+    },
   ];
+
+  for (const testCase of cases) {
+    const value = structuredClone(base);
+    value.nativeRequest.params.requestedSchema.properties.environment = testCase.property;
+    value.canonicalQuestionSet.questions[0] = testCase.question;
+    value.canonicalResponse.answers[id] = testCase.canonicalAnswer;
+    value.nativeResponse.content.environment = testCase.nativeAnswer;
+    assert.doesNotThrow(
+      () => assertAcpxQuestionFixture(value),
+      `${testCase.type} enum must not constrain the adapter's projected scalar answer`,
+    );
+  }
+
+  const invalidNativeType = structuredClone(base);
+  invalidNativeType.nativeRequest.params.requestedSchema.properties.environment =
+    cases[0].property;
+  invalidNativeType.canonicalQuestionSet.questions[0] = cases[0].question;
+  invalidNativeType.canonicalResponse.answers[id] = cases[0].canonicalAnswer;
+  invalidNativeType.nativeResponse.content.environment = "false";
   assert.throws(
-    () => assertAcpxQuestionFixture(malformed),
-    /native options must be bounded boolean values/,
+    () => assertAcpxQuestionFixture(invalidNativeType),
+    /native response type for environment/,
   );
 });
 

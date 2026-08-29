@@ -598,11 +598,11 @@ function assertAcpxProperty(name, value) {
     throw contractError("invalid_acpx_question_fixture", `unsupported native property ${name}`);
   }
   if (value.type === "array") {
-    if (!isPlainRecord(value.items) || acpxEnumValues(value.items, "anyOf", "string").length === 0) {
+    if (!isPlainRecord(value.items) || acpxEnumValues(value.items, "anyOf").length === 0) {
       throw contractError("invalid_acpx_question_fixture", `native array property ${name} requires options`);
     }
   } else if (value.type === "string") {
-    acpxEnumValues(value, "oneOf", "string");
+    acpxEnumValues(value, "oneOf");
   }
 }
 
@@ -620,15 +620,17 @@ function assertAcpxPropertyValue(name, property, value) {
     throw contractError("invalid_acpx_question_fixture", `native response type for ${name}`);
   }
   const enumValues = property.type === "array"
-    ? acpxEnumValues(property.items, "anyOf", "string")
-    : acpxEnumValues(property, "oneOf", property.type);
+    ? acpxEnumValues(property.items, "anyOf")
+    : property.type === "string"
+      ? acpxEnumValues(property, "oneOf")
+      : [];
   const responseValues = Array.isArray(value) ? value : [value];
   if (enumValues.length > 0 && responseValues.some((item) => !enumValues.includes(item))) {
     throw contractError("invalid_acpx_question_fixture", `native response option for ${name}`);
   }
 }
 
-function acpxEnumValues(property, preferredTitledKey, expectedType) {
+function acpxEnumValues(property, preferredTitledKey) {
   if (!isPlainRecord(property)) return [];
   const alternateTitledKey = preferredTitledKey === "anyOf" ? "oneOf" : "anyOf";
   const titled = Array.isArray(property[preferredTitledKey])
@@ -642,22 +644,11 @@ function acpxEnumValues(property, preferredTitledKey, expectedType) {
   if (
     !Array.isArray(values)
     || values.length > 128
-    || values.some((value) => !isAcpxEnumValue(value, expectedType))
+    || values.some((value) => typeof value !== "string" || value.length === 0)
   ) {
-    const expectation = expectedType === "string"
-      ? "non-empty bounded strings"
-      : `bounded ${expectedType} values`;
-    throw contractError("invalid_acpx_question_fixture", `native options must be ${expectation}`);
+    throw contractError("invalid_acpx_question_fixture", "native options must be non-empty bounded strings");
   }
   return values;
-}
-
-function isAcpxEnumValue(value, expectedType) {
-  if (expectedType === "string") return typeof value === "string" && value.length > 0;
-  if (expectedType === "number") return typeof value === "number" && Number.isFinite(value);
-  if (expectedType === "integer") return Number.isInteger(value);
-  if (expectedType === "boolean") return typeof value === "boolean";
-  return false;
 }
 
 function isPlainRecord(value) {
