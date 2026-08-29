@@ -11,6 +11,7 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
+const failedSessionCleanupOwners = new Set<Promise<void>>();
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -73,19 +74,17 @@ function terminalFromEvent(event: PrpEvent, disposition: PrpTerminalState["repor
   return { schema: "paperclip.prp.terminal.v1", ...states, reportedWorkDisposition: disposition };
 }
 
-async function attemptOptionalSessionCancellation(session: NativeSession, reason: string): Promise<void> {
-  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+async function attemptOptionalSessionCancellation(
+  session: NativeSession,
+  reason: string,
+): Promise<{ settlement: Promise<PromiseSettledResult<void>[]> } | null> {
   const attempts = Promise.allSettled([
     Promise.resolve().then(() => session.interrupt?.({ reason })),
     Promise.resolve().then(() => session.cancel?.({ reason })),
   ]);
-  await Promise.race([
-    attempts,
-    new Promise<void>((resolve) => {
-      graceTimer = setTimeout(resolve, OPTIONAL_SESSION_CANCELLATION_GRACE_MS);
-    }),
-  ]);
-  if (graceTimer !== undefined) clearTimeout(graceTimer);
+  return await settlesWithin(attempts, OPTIONAL_SESSION_CANCELLATION_GRACE_MS)
+    ? null
+    : { settlement: attempts };
 }
 
 async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -135,6 +134,7 @@ async function consumeTurn(
   let governedCancellationStarted = false;
   let deferredGovernedSettlement: Promise<unknown> | null = null;
   let deferredHandoffSettlement: Promise<unknown> | null = null;
+  let deferredSessionCancellationSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const handoffOperations = new Set<Promise<unknown>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
@@ -289,7 +289,11 @@ async function consumeTurn(
       }
     }
     if (!governedCancellationStarted) {
-      await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
+      const deferredCancellation = await attemptOptionalSessionCancellation(
+        session,
+        "Native session event consumption failed.",
+      );
+      deferredSessionCancellationSettlement = deferredCancellation?.settlement ?? null;
     }
     throw error;
   } finally {
@@ -307,22 +311,24 @@ async function consumeTurn(
     const teardownSettlement = Promise.allSettled([
       iteratorTeardown,
       consumer,
+      ...(deferredHandoffSettlement ? [deferredHandoffSettlement] : []),
+      ...(deferredGovernedSettlement ? [deferredGovernedSettlement] : []),
+      ...(deferredSessionCancellationSettlement
+        ? [deferredSessionCancellationSettlement]
+        : []),
     ]);
     if (appendAbort.signal.aborted) {
-      await closeFailedSession();
-      const deferredSettlements = [
-        deferredHandoffSettlement,
-        deferredGovernedSettlement,
-      ].filter((settlement): settlement is Promise<unknown> => settlement !== null);
-      if (deferredSettlements.length > 0) {
-        retainFailedCleanup(Promise.allSettled([
-          ...deferredSettlements,
-          teardownSettlement,
-        ]).then(() => undefined));
+      if (await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS)) {
+        await closeFailedSession();
       } else {
-        if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
-          retainFailedCleanup(teardownSettlement.then(() => undefined));
-        }
+        // Iterator, durable-handoff, and governed-cancellation work can still
+        // reference the live provider session. Keep one explicit owner that
+        // waits for all mutation authority to settle before closing; never
+        // overlap session.close with those operations merely to meet the
+        // caller-facing timeout.
+        retainFailedCleanup(
+          teardownSettlement.then(() => closeFailedSession()),
+        );
       }
     } else {
       await teardownSettlement;
@@ -493,11 +499,17 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return sessionClosePromise;
   };
   let executionSucceeded = false;
+  let failedCleanupDeferred = false;
   const retainFailedCleanup = (cleanup: Promise<void>) => {
-    // Retain and observe cleanup after the caller-facing execution settles.
-    // The chain itself owns ordering; observing it prevents a late rejection
-    // from becoming process-fatal without granting it mutation authority.
-    void cleanup.catch(() => undefined);
+    failedCleanupDeferred = true;
+    // Revoke reuse immediately while retaining a strong process-level owner
+    // for the exact teardown-and-close chain after execution returns.
+    options.onSession?.(null);
+    failedSessionCleanupOwners.add(cleanup);
+    void cleanup.then(
+      () => failedSessionCleanupOwners.delete(cleanup),
+      () => failedSessionCleanupOwners.delete(cleanup),
+    );
   };
   try {
     const checkpoint = async () => {
@@ -722,7 +734,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if (!options.keepSessionOpen || !executionSucceeded) {
+    if ((!options.keepSessionOpen || !executionSucceeded) && !failedCleanupDeferred) {
       await closeSession();
     }
   }

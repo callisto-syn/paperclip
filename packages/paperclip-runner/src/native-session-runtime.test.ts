@@ -337,7 +337,7 @@ describe("executeNativeSession recovery", () => {
         disposition: "committed" as const,
       };
     });
-    const cancel = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => { releaseTeardown(); });
     const close = vi.fn(async () => { releaseTeardown(); });
     const session: NativeSession = {
       identity: () => identity,
@@ -410,7 +410,7 @@ describe("executeNativeSession recovery", () => {
     expect(appendCommitted).toBe(false);
   });
 
-  it("uses required session closure to release a blocked event read", async () => {
+  it("retains a failed session while an uncancellable event read is blocked", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     const close = vi.fn(async () => { releaseStream(); });
@@ -467,10 +467,10 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 1,
       keepSessionOpen: true,
     })).rejects.toThrow("native session timed out");
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 
-  it("closes a failed session when optional cancellation never settles", async () => {
+  it("retains a failed session while optional cancellation remains active", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     const interrupt = vi.fn(() => new Promise<never>(() => undefined));
@@ -533,7 +533,7 @@ describe("executeNativeSession recovery", () => {
     })).rejects.toThrow("native session timed out");
     expect(interrupt).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it("closes after a synchronous governed-wait probe returns no result", async () => {
@@ -600,13 +600,14 @@ describe("executeNativeSession recovery", () => {
     expect(lifecycle).toEqual(["closed"]);
   });
 
-  it("closes after revoking a governed-wait cancellation that never settles", async () => {
+  it("defers close until a revoked governed-wait cancellation settles", async () => {
     let markCancelStarted = () => {};
     const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
+    let releaseCancel = () => {};
     const lifecycle: string[] = [];
     const cancel = vi.fn(() => {
       markCancelStarted();
-      return new Promise<never>(() => undefined);
+      return new Promise<void>((resolve) => { releaseCancel = resolve; });
     });
     const close = vi.fn(async () => { lifecycle.push("closed"); });
     const session: NativeSession = {
@@ -668,7 +669,9 @@ describe("executeNativeSession recovery", () => {
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    releaseCancel();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(lifecycle).toEqual(["closed"]);
   });
 
@@ -1671,6 +1674,7 @@ describe("executeNativeSession recovery", () => {
       markHandoffStarted = resolve;
     });
     let handoffSignal: AbortSignal | undefined;
+    let releaseHandoff = () => {};
     const close = vi.fn(async () => releaseEvents());
     const session: NativeSession = {
       identity: () => identity,
@@ -1694,7 +1698,10 @@ describe("executeNativeSession recovery", () => {
       handoffRuntimeRequest(input) {
         handoffSignal = input.signal;
         markHandoffStarted();
-        return new Promise<never>(() => undefined);
+        return new Promise<void>((resolve) => { releaseHandoff = resolve; });
+      },
+      async cancel() {
+        releaseEvents();
       },
       async result() {
         return null;
@@ -1752,7 +1759,9 @@ describe("executeNativeSession recovery", () => {
     await handoffStarted;
     await expect(execution).rejects.toThrow("native session timed out");
     expect(handoffSignal?.aborted).toBe(true);
-    expect(close).toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    releaseHandoff();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
   });
 
   it("keeps a structured input in the original turn when it resolves before expiry", async () => {
