@@ -316,39 +316,43 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledTimes(3);
   });
 
-  it("bounds autonomous quarantine retries and recovers on later admission", async () => {
-    const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
-    fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
-    const session = await fixture.driver.openSession({
-      runId: "run-close-retry-bound",
-      normalizedSessionId: "session-1",
-      workingDirectory: "/workspace",
-    });
-
-    await expect(
-      session.close({ reason: "runtime close persistently failed" }),
-    ).rejects.toThrow("persistent cleanup failure");
-    await vi.waitFor(() => expect(fixture.host.close.mock.calls.length).toBeGreaterThanOrEqual(4));
-    await expect(
-      fixture.driver.openSession({
-        runId: "run-after-quarantine",
-        normalizedSessionId: "session-2",
+  it("keeps quarantined cleanup scheduled at a bounded rate without later admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+      fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
+      const session = await fixture.driver.openSession({
+        runId: "run-close-retry-bound",
+        normalizedSessionId: "session-1",
         workingDirectory: "/workspace",
-      }),
-    ).rejects.toThrow("quarantined host cleanup remains incomplete");
-    const callsBeforeRecovery = fixture.host.close.mock.calls.length;
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    expect(fixture.host.close).toHaveBeenCalledTimes(callsBeforeRecovery);
-    fixture.host.close.mockResolvedValue(undefined);
-    await expect(fixture.driver.openSession({
-      runId: "run-after-recovery",
-      normalizedSessionId: "session-1",
-      workingDirectory: "/workspace",
-    })).resolves.toBeDefined();
-    expect(fixture.host.close).toHaveBeenCalledTimes(callsBeforeRecovery + 1);
-    expect(fixture.host.close).toHaveBeenLastCalledWith({
-      reason: "runtime close persistently failed (quarantined cleanup admission recovery)",
-    });
+      });
+
+      const closing = expect(
+        session.close({ reason: "runtime close persistently failed" }),
+      ).rejects.toThrow("persistent cleanup failure");
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fixture.host.close).toHaveBeenCalledTimes(7);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(fixture.host.close).toHaveBeenCalledTimes(7);
+
+      fixture.host.close.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(fixture.host.close).toHaveBeenCalledTimes(8);
+      expect(fixture.host.close).toHaveBeenLastCalledWith({
+        reason:
+          "runtime close persistently failed (scheduled quarantined cleanup recovery)",
+      });
+      await expect(fixture.driver.openSession({
+        runId: "run-after-recovery",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      })).resolves.toBeDefined();
+      expect(fixture.host.close).toHaveBeenCalledTimes(8);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {

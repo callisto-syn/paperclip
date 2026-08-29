@@ -51,6 +51,7 @@ const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
+const QUARANTINED_HOST_CLOSE_RETRY_MS = 60_000;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;
@@ -89,6 +90,7 @@ interface QuarantinedHostCleanup {
   reason: string;
   attempt: Promise<void> | null;
   recovery: Promise<void> | null;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export interface CodexAcpxDriverDependencies {
@@ -244,6 +246,7 @@ export class CodexAcpxDriver implements HarnessDriver {
       reason,
       attempt: null,
       recovery: null,
+      timer: null,
     };
     this.#quarantinedHostCleanups.add(cleanup);
     this.#startQuarantinedHostCleanupRecovery(
@@ -286,13 +289,42 @@ export class CodexAcpxDriver implements HarnessDriver {
     this.#retainCleanup(recovery);
     void recovery.finally(() => {
       if (cleanup.recovery === recovery) cleanup.recovery = null;
+      this.#scheduleQuarantinedHostCleanup(cleanup);
     }).catch(() => undefined);
     return recovery;
+  }
+
+  #scheduleQuarantinedHostCleanup(cleanup: QuarantinedHostCleanup): void {
+    if (
+      !this.#quarantinedHostCleanups.has(cleanup)
+      || cleanup.recovery
+      || cleanup.attempt
+      || cleanup.timer
+    ) {
+      return;
+    }
+    // A quarantined host remains actively owned, but recovery is rate-limited:
+    // each entry holds at most one unref'd timer and one sequential close.
+    // Admission may pull that timer forward; it never creates a parallel try.
+    cleanup.timer = setTimeout(() => {
+      cleanup.timer = null;
+      if (!this.#quarantinedHostCleanups.has(cleanup)) return;
+      this.#startQuarantinedHostCleanupRecovery(
+        cleanup,
+        1,
+        "scheduled quarantined cleanup recovery",
+      );
+    }, QUARANTINED_HOST_CLOSE_RETRY_MS);
+    cleanup.timer.unref?.();
   }
 
   async #retryQuarantinedHostCleanups(): Promise<void> {
     const observations: Promise<unknown>[] = [];
     for (const cleanup of this.#quarantinedHostCleanups) {
+      if (cleanup.timer) {
+        clearTimeout(cleanup.timer);
+        cleanup.timer = null;
+      }
       const recovery = cleanup.recovery ??
         this.#startQuarantinedHostCleanupRecovery(
           cleanup,

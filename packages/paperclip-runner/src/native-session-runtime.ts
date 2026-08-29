@@ -15,11 +15,13 @@ const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
+const QUARANTINED_SESSION_CLOSE_RETRY_MS = 60_000;
 
 interface QuarantinedSessionCleanup {
   session: NativeSession;
   attempt: Promise<void> | null;
   recovery: Promise<void> | null;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 const quarantinedSessionCleanups = new Set<QuarantinedSessionCleanup>();
@@ -156,6 +158,7 @@ function quarantineSessionCleanup(session: NativeSession): void {
     session,
     attempt: null,
     recovery: null,
+    timer: null,
   };
   quarantinedSessionCleanups.add(cleanup);
   startQuarantinedSessionCleanupRecovery(
@@ -197,13 +200,44 @@ function startQuarantinedSessionCleanupRecovery(
   void recovery.finally(() => {
     failedSessionCleanupOwners.delete(recovery);
     if (cleanup.recovery === recovery) cleanup.recovery = null;
+    scheduleQuarantinedSessionCleanup(cleanup);
   }).catch(() => undefined);
   return recovery;
+}
+
+function scheduleQuarantinedSessionCleanup(
+  cleanup: QuarantinedSessionCleanup,
+): void {
+  if (
+    !quarantinedSessionCleanups.has(cleanup)
+    || cleanup.recovery
+    || cleanup.attempt
+    || cleanup.timer
+  ) {
+    return;
+  }
+  // Keep cleanup live without a hot retry loop: one unref'd timer and one
+  // sequential close are the maximum background work owned by each entry.
+  // A later admission may accelerate, but never overlap, the scheduled try.
+  cleanup.timer = setTimeout(() => {
+    cleanup.timer = null;
+    if (!quarantinedSessionCleanups.has(cleanup)) return;
+    startQuarantinedSessionCleanupRecovery(
+      cleanup,
+      1,
+      "native session scheduled quarantined cleanup recovery",
+    );
+  }, QUARANTINED_SESSION_CLOSE_RETRY_MS);
+  cleanup.timer.unref?.();
 }
 
 async function retryQuarantinedSessionCleanups(): Promise<void> {
   const observations: Promise<unknown>[] = [];
   for (const cleanup of quarantinedSessionCleanups) {
+    if (cleanup.timer) {
+      clearTimeout(cleanup.timer);
+      cleanup.timer = null;
+    }
     if (!cleanup.recovery) {
       startQuarantinedSessionCleanupRecovery(
         cleanup,

@@ -174,7 +174,7 @@ describe("executeNativeSession recovery", () => {
     void asynchronousResolver;
   });
 
-  it("bounds quarantined cleanup retries and recovers on later admission", async () => {
+  it("keeps quarantined cleanup scheduled at a bounded rate without later admission", async () => {
     vi.useFakeTimers();
     try {
       const close = vi.fn().mockRejectedValue(new Error("persistent close failure"));
@@ -238,13 +238,12 @@ describe("executeNativeSession recovery", () => {
       await vi.advanceTimersByTimeAsync(10_000);
       expect(close).toHaveBeenCalledTimes(7);
 
-      await expect(execute()).rejects.toThrow("native_session_cleanup_quarantined");
-      expect(close).toHaveBeenCalledTimes(7);
-      expect(openSession).toHaveBeenCalledOnce();
-
       close.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(51_000);
       expect(close).toHaveBeenCalledTimes(8);
+      expect(close).toHaveBeenLastCalledWith({
+        reason: "native session scheduled quarantined cleanup recovery",
+      });
       await expect(execute()).resolves.toMatchObject({ result });
       expect(openSession).toHaveBeenCalledTimes(2);
     } finally {
