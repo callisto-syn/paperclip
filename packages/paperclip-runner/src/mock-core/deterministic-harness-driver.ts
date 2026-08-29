@@ -137,6 +137,7 @@ class DeterministicHarnessSession implements HarnessSession {
   #closed = false;
   #active = false;
   #recoveredActiveTurn = false;
+  #recoveredTurnSettled = false;
   #nextSourceSeq = 1;
   readonly #transcriptOmissionReason: string | null;
   readonly #eventWaiters = new Set<() => void>();
@@ -186,6 +187,7 @@ class DeterministicHarnessSession implements HarnessSession {
           }),
           this.#event("run.terminal", cancelledTerminal(), { turn: false }),
         );
+        this.#recoveredTurnSettled = true;
       }
       this.#active = false;
     }
@@ -258,9 +260,17 @@ class DeterministicHarnessSession implements HarnessSession {
 
   async interrupt(input: { turnId?: string; reason?: string }): Promise<void> {
     this.#assertOpen();
-    if (!this.#active || this.#turnId === null) throw new Error("no active turn to interrupt");
+    if (this.#turnId === null) throw new Error("no active turn to interrupt");
     if (input.turnId !== undefined && input.turnId !== this.#turnId) {
       throw new Error(`turn ${input.turnId} is not active`);
+    }
+    // Event consumption can conservatively settle a reconstructed turn before
+    // its first event is yielded. Treat a concurrent interrupt as an
+    // idempotent acknowledgement once that recovered terminal is committed,
+    // rather than making cancellation depend on iterator scheduling.
+    if (!this.#active) {
+      if (this.#recoveredTurnSettled) return;
+      throw new Error("no active turn to interrupt");
     }
     if (this.#settleRecoveredSemanticResult()) return;
     this.#semanticResult = interruptedResult(
@@ -305,6 +315,7 @@ class DeterministicHarnessSession implements HarnessSession {
         ),
       );
     }
+    this.#recoveredTurnSettled = true;
     this.#active = false;
     return true;
   }

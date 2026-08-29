@@ -137,6 +137,42 @@ describe("harness-driver conformance V1", () => {
     await session.close({ reason: "original_complete", force: true });
   });
 
+  it("acknowledges interruption after recovered event settlement starts", async () => {
+    const driver = new DeterministicHarnessDriver();
+    const session = await driver.openSession({
+      runId: "run_recovery_interrupt_race",
+      normalizedSessionId: "session_recovery_interrupt_race",
+      workingDirectory: "/deterministic/conformance",
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "[conformance:interrupt]" },
+    });
+    const recovery = await driver.recoverSession(await session.snapshot());
+    const recovered = recovery.session!;
+    const recoveredEvents = recovered.events()[Symbol.asyncIterator]();
+
+    const first = await recoveredEvents.next();
+    expect(first.value?.eventType).toBe("run.result.proposed");
+    await expect(recovered.interrupt?.({
+      turnId,
+      reason: "cancel_after_event_settlement_started",
+    })).resolves.toBeUndefined();
+
+    const events = first.done || first.value === undefined ? [] : [first.value];
+    for await (const event of { [Symbol.asyncIterator]: () => recoveredEvents }) {
+      events.push(event);
+    }
+    expect(events.map((event) => event.eventType)).toEqual([
+      "run.result.proposed",
+      "turn.interrupted",
+      "run.terminal",
+    ]);
+    expect(events.filter((event) => event.eventType === "run.terminal")).toHaveLength(1);
+
+    await recovered.close({ reason: "recovered_complete" });
+    await session.close({ reason: "original_complete", force: true });
+  });
+
   it("preserves a completed result when its terminal checkpoint lagged", async () => {
     const driver = new DeterministicHarnessDriver();
     const session = await driver.openSession({
