@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
@@ -189,6 +190,44 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
   arrayWithBothOptionForms.canonicalQuestionSet.questions[0].answerMode = "multi_select";
   arrayWithBothOptionForms.nativeResponse.content.environment = ["staging"];
   assert.doesNotThrow(() => assertAcpxQuestionFixture(arrayWithBothOptionForms));
+
+  const specialPropertyName = "__proto__";
+  const specialProperty = structuredClone(
+    canonical.nativeRequest.params.requestedSchema.properties.environment,
+  );
+  const specialPropertyFixture = structuredClone(canonical);
+  const specialProperties = specialPropertyFixture.nativeRequest.params
+    .requestedSchema.properties;
+  delete specialProperties.environment;
+  Object.defineProperty(specialProperties, specialPropertyName, {
+    value: specialProperty,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+  specialPropertyFixture.nativeRequest.params.requestedSchema.required = [
+    specialPropertyName,
+  ];
+  const specialQuestionId = `field-1-__proto__-${createHash("sha256")
+    .update(specialPropertyName)
+    .digest("hex")
+    .slice(0, 12)}`;
+  specialPropertyFixture.canonicalQuestionSet.questions[0].id = specialQuestionId;
+  specialPropertyFixture.canonicalResponse.answers = {
+    [specialQuestionId]: { selectedOptionIds: ["option-1"] },
+  };
+  specialPropertyFixture.nativeResponse.content = {};
+  Object.defineProperty(
+    specialPropertyFixture.nativeResponse.content,
+    specialPropertyName,
+    {
+      value: "staging",
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    },
+  );
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(specialPropertyFixture));
 });
 
 test("every question adapter fixture satisfies its declared schema", async () => {

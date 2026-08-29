@@ -417,19 +417,39 @@ function projectAcpxFixture(params, canonicalResponse) {
     const answer = canonicalResponse.answers?.[binding.question.id];
     if (!answer) continue;
     if (binding.type === "string" && binding.question.answerMode === "text") {
-      if (answer.text !== undefined) content[binding.name] = answer.text;
+      if (answer.text !== undefined) defineAcpxResponseProperty(content, binding.name, answer.text);
     } else if (binding.type === "number" || binding.type === "integer") {
-      if (answer.text !== undefined) content[binding.name] = Number(answer.text);
+      if (answer.text !== undefined) {
+        defineAcpxResponseProperty(content, binding.name, Number(answer.text));
+      }
     } else if (binding.type === "boolean") {
       const selected = answer.selectedOptionIds?.[0];
-      if (selected !== undefined) content[binding.name] = binding.optionValues.get(selected) === "true";
+      if (selected !== undefined) {
+        defineAcpxResponseProperty(
+          content,
+          binding.name,
+          binding.optionValues.get(selected) === "true",
+        );
+      }
     } else {
       const selected = (answer.selectedOptionIds ?? []).map((id) => binding.optionValues.get(id));
-      if (binding.type === "array") content[binding.name] = selected;
-      else if (selected[0] !== undefined) content[binding.name] = selected[0];
+      if (binding.type === "array") {
+        defineAcpxResponseProperty(content, binding.name, selected);
+      } else if (selected[0] !== undefined) {
+        defineAcpxResponseProperty(content, binding.name, selected[0]);
+      }
     }
   }
   return { questionSet, nativeResponse: { action: "accept", content } };
+}
+
+function defineAcpxResponseProperty(content, name, value) {
+  Object.defineProperty(content, name, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
 }
 
 function normalizedAcpxRequired(schema) {
