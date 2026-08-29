@@ -69,7 +69,8 @@ export interface NativeSession {
   }): Promise<{ turnId: string; effectiveCollaborationMode?: "default" | "plan" }>;
   steer?(input: { turnId: string; message: NativeUserMessage; correlationId?: string }): Promise<void>;
   interrupt?(input: { turnId?: string; reason?: string }): Promise<void>;
-  cancel?(input: { reason: string }): Promise<void>;
+  /** Revokes provider cancellation work when the execution that requested it ends. */
+  cancel?(input: { reason: string; signal: AbortSignal }): Promise<void>;
   resolveRuntimeRequest?(input: {
     requestId: string;
     turnId: string;

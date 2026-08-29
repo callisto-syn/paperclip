@@ -77,13 +77,19 @@ async function attemptOptionalSessionCancellation(
   session: NativeSession,
   reason: string,
 ): Promise<{ settlement: Promise<PromiseSettledResult<void>[]> } | null> {
+  const cancellationAbort = new AbortController();
   const attempts = Promise.allSettled([
     Promise.resolve().then(() => session.interrupt?.({ reason })),
-    Promise.resolve().then(() => session.cancel?.({ reason })),
+    Promise.resolve().then(() => session.cancel?.({
+      reason,
+      signal: cancellationAbort.signal,
+    })),
   ]);
-  return await settlesWithin(attempts, OPTIONAL_SESSION_CANCELLATION_GRACE_MS)
-    ? null
-    : { settlement: attempts };
+  if (await settlesWithin(attempts, OPTIONAL_SESSION_CANCELLATION_GRACE_MS)) {
+    return null;
+  }
+  cancellationAbort.abort(new Error("native session cancellation grace expired"));
+  return { settlement: attempts };
 }
 
 async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -236,6 +242,7 @@ async function consumeTurn(
               await settleBeforeAbort(
                 () => Promise.resolve().then(() => session.cancel?.({
                   reason: "Paperclip parked this turn on a durable governed interaction.",
+                  signal: appendAbort.signal,
                 })).catch(() => undefined),
                 appendAbort.signal,
                 governedOperations,

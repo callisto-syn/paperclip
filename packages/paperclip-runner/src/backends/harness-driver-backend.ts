@@ -321,10 +321,13 @@ class HarnessNativeSession implements NativeSession {
     return this.#session.interrupt(input);
   }
 
-  async cancel(input: { reason: string }) {
+  async cancel(input: { reason: string; signal: AbortSignal }) {
     this.#explicitlyCancelled = true;
+    if (input.signal.aborted) {
+      throw input.signal.reason ?? new Error("native session cancellation aborted");
+    }
     if (this.#session.interrupt !== undefined) {
-      await this.#session.interrupt({ reason: input.reason });
+      await this.#session.interrupt({ reason: input.reason, signal: input.signal });
     }
   }
 

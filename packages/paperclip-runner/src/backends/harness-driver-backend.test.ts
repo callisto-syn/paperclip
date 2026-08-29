@@ -392,7 +392,10 @@ describe("HarnessDriverBackend", () => {
     });
     const iterator = session.events()[Symbol.asyncIterator]();
     await expect(iterator.next()).resolves.toMatchObject({ value: { eventType: "runtime_request.created" } });
-    await session.cancel({ reason: "operator cancelled the run" });
+    await session.cancel({
+      reason: "operator cancelled the run",
+      signal: new AbortController().signal,
+    });
     await expect(iterator.next()).rejects.toThrow("provider stopped after cancellation");
   });
 });

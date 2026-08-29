@@ -460,7 +460,7 @@ export interface HarnessSession {
     requestedCollaborationMode?: "default" | "plan";
   }): Promise<{ turnId: string; effectiveCollaborationMode?: "default" | "plan" }>;
   steer?(input: { turnId: string; message: NativeUserMessage; correlationId?: string }): Promise<void>;
-  interrupt?(input: { turnId?: string; reason?: string }): Promise<void>;
+  interrupt?(input: { turnId?: string; reason?: string; signal?: AbortSignal }): Promise<void>;
   pendingRuntimeRequests?(): HarnessRuntimeRequest[];
   resolveRuntimeRequest?(input: {
     requestId: string;
