@@ -730,12 +730,6 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       if (checkpointedDispositionTerminal && replayedDisposition === null) {
         throw new Error("native_recovery_checkpointed_terminal_missing");
       }
-      if (
-        checkpointedDispositionTerminal
-        && !replayedDisposition?.hasPriorResultProposal
-      ) {
-        throw new Error("native_recovery_checkpointed_disposition_proposal_missing");
-      }
       const replayedTerminal = replayedDisposition?.terminal ?? null;
       const consumptionAbort = new AbortController();
       const consuming = replayedTerminal === null

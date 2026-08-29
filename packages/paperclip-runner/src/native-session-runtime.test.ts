@@ -1613,7 +1613,7 @@ describe("executeNativeSession recovery", () => {
     ]);
   });
 
-  it("replays a durable disposition terminal that was appended before its checkpoint", async () => {
+  it("resolves a proposal-less durable disposition terminal through control-plane policy", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",
       sessionId: "driver-recovery",
@@ -1726,9 +1726,10 @@ describe("executeNativeSession recovery", () => {
         return result;
       },
     });
-    await expect(execute()).rejects.toThrow(
-      "native_recovery_checkpointed_disposition_proposal_missing",
-    );
+    await expect(execute()).resolves.toMatchObject({
+      result,
+      turnId: "turn-disposition",
+    });
     bySource.set("runner-recovery", [
       structuredClone(originalTaskProposal),
       structuredClone(originalTaskTerminal),
