@@ -500,8 +500,6 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       return;
     }
     this.#assertRunWritable(run);
-    const fault = this.#consumeFault("complete_run");
-    this.#throwBeforeFault(fault, run.id, "complete_run");
     const task = this.#task(run.taskId);
     const entityRefs = [`run:${run.id}`, `task:${task.id}`];
     if ("terminal" in result) {
@@ -518,15 +516,22 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
           "run.terminal must be committed before terminal reconciliation",
         );
       }
+      this.#assertDispositionReconcilable(task, result);
+    } else if (!run.events.some((event) => "type" in event && event.type === "run.completed")) {
+      throw new CapabilityMockControlPlaneError(
+        "terminal_event_missing",
+        "run.completed must be committed before terminal reconciliation",
+      );
+    }
+
+    // A rejected completion is not an attempt against the scripted transport:
+    // validate the complete semantic input before consuming its fault budget.
+    const fault = this.#consumeFault("complete_run");
+    this.#throwBeforeFault(fault, run.id, "complete_run");
+    if ("terminal" in result) {
       this.#reconcileDisposition(run, task, result);
       run.status = result.terminal.runTerminalState;
     } else {
-      if (!run.events.some((event) => "type" in event && event.type === "run.completed")) {
-        throw new CapabilityMockControlPlaneError(
-          "terminal_event_missing",
-          "run.completed must be committed before terminal reconciliation",
-        );
-      }
       run.status = result.status;
     }
     run.result = clone(result);
@@ -949,12 +954,6 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
   ): void {
     switch (completion.result.reportedWorkDisposition) {
       case "done":
-        if (this.#state.blockers.some((blocker) => blocker.taskId === task.id)) {
-          throw new CapabilityMockControlPlaneError(
-            "terminal_reconciliation_failed",
-            "a done result cannot reconcile a task with unresolved blockers",
-          );
-        }
         task.status = "done";
         task.completedAt ??= this.#now();
         break;
@@ -980,6 +979,21 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         }
         break;
       }
+    }
+  }
+
+  #assertDispositionReconcilable(
+    task: CapabilityFixtureTask,
+    completion: CompleteControlPlaneRunInput,
+  ): void {
+    if (
+      completion.result.reportedWorkDisposition === "done" &&
+      this.#state.blockers.some((blocker) => blocker.taskId === task.id)
+    ) {
+      throw new CapabilityMockControlPlaneError(
+        "terminal_reconciliation_failed",
+        "a done result cannot reconcile a task with unresolved blockers",
+      );
     }
   }
 

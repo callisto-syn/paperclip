@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CONTROL_PLANE_CONFORMANCE_OPEN,
+  CONTROL_PLANE_CONFORMANCE_RESULT,
+  CONTROL_PLANE_CONFORMANCE_TERMINAL,
   runControlPlanePortConformance,
 } from "../conformance/control-plane-port.js";
+import type { CompleteControlPlaneRunInput } from "../contracts/control-plane-port.js";
 import type { CapabilityFixtureSeed } from "./capability-control-plane-types.js";
 import {
   CapabilityMockControlPlaneAdapter,
@@ -404,6 +407,66 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       { taskId: "task-2", reason: "blockers_resolved", status: "scheduled" },
     ]);
     expect(snapshot.runs[0]?.status).toBe("succeeded");
+  });
+
+  it("preserves completion faults until a completion passes semantic validation", async () => {
+    const adapter = seeded({
+      faults: [{
+        id: "retry-completion",
+        operation: "complete_run",
+        effect: "retryable_error",
+        remaining: 1,
+        code: "completion_temporarily_unavailable",
+      }],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun(OPEN);
+
+    await expect(
+      adapter.completeRun({
+        result: {
+          ...CONTROL_PLANE_CONFORMANCE_RESULT,
+          completionClaim: null,
+        } as unknown as CompleteControlPlaneRunInput["result"],
+        terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL,
+      }),
+    ).rejects.toMatchObject({ code: "native_result_invalid" });
+    await expect(
+      adapter.completeRun({
+        result: CONTROL_PLANE_CONFORMANCE_RESULT,
+        terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL,
+      }),
+    ).rejects.toMatchObject({ code: "terminal_event_missing" });
+    expect(adapter.snapshot().faults[0]?.remaining).toBe(1);
+
+    await adapter.appendEvent({
+      schema: "paperclip.prp.event.v1",
+      sourceEventId: "fixture-source:terminal:completion-retry",
+      sourceSeq: 1,
+      sourceInstanceId: "fixture-source",
+      sourceKind: "runner",
+      runId: "run-1",
+      normalizedSessionId: "session-1",
+      turnId: "turn-1",
+      eventType: "run.terminal",
+      schemaVersion: 1,
+      priority: 0,
+      emittedAt: "2026-08-09T00:00:10.000Z",
+      payload: { ...CONTROL_PLANE_CONFORMANCE_TERMINAL },
+    });
+    await expect(
+      adapter.completeRun({
+        result: CONTROL_PLANE_CONFORMANCE_RESULT,
+        terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL,
+      }),
+    ).rejects.toMatchObject({ code: "completion_temporarily_unavailable", retryable: true });
+    expect(adapter.snapshot().faults[0]?.remaining).toBe(0);
+
+    await adapter.completeRun({
+      result: CONTROL_PLANE_CONFORMANCE_RESULT,
+      terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL,
+    });
+    expect(adapter.snapshot().runs[0]).toMatchObject({ status: "succeeded" });
   });
 
   it("enforces budget hard stops and releases run authority", async () => {
