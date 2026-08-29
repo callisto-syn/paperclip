@@ -69,15 +69,19 @@ describe("harness-driver conformance V1", () => {
 
     const events = await recoveredEventsPromise;
     expect(events.map((event) => [event.sourceSeq, event.eventType])).toEqual([
-      [3, "turn.interrupted"],
-      [4, "run.terminal"],
+      [3, "run.result.proposed"],
+      [4, "turn.interrupted"],
+      [5, "run.terminal"],
     ]);
     await expect(recovered.snapshot()).resolves.toMatchObject({
       activeTurnId: null,
-      semanticResult: null,
-      lastSourceSequence: 4,
+      semanticResult: {
+        result: { reportedWorkDisposition: "yielded" },
+        turnId,
+      },
+      lastSourceSequence: 5,
     });
-    expect(events[0]?.payload).toEqual({
+    expect(events[1]?.payload).toEqual({
       reason: "deterministic_active_turn_recovered_without_live_producer",
     });
     await recovered.close({ reason: "recovered_complete" });
@@ -106,9 +110,18 @@ describe("harness-driver conformance V1", () => {
     const events = [];
     for await (const event of recovered.events()) events.push(event);
     expect(events.map((event) => [event.sourceSeq, event.eventType])).toEqual([
-      [3, "turn.interrupted"],
-      [4, "run.terminal"],
+      [3, "run.result.proposed"],
+      [4, "turn.interrupted"],
+      [5, "run.terminal"],
     ]);
+    await expect(recovered.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      semanticResult: {
+        result: { reportedWorkDisposition: "yielded" },
+        turnId,
+      },
+      lastSourceSequence: 5,
+    });
 
     await recovered.close({ reason: "recovered_complete" });
     await session.close({ reason: "original_complete", force: true });

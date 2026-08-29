@@ -170,7 +170,12 @@ class DeterministicHarnessSession implements HarnessSession {
       // its global timeout. An explicit interrupt issued before consumption
       // still wins and supplies its own reason.
       this.#recoveredActiveTurn = false;
+      this.#semanticResult = interruptedResult(
+        this.#input.runId,
+        "The deterministic provider was unavailable after active-turn recovery.",
+      );
       this.#appendEvents(
+        this.#event("run.result.proposed", this.#semanticResult),
         this.#event("turn.interrupted", {
           reason: "deterministic_active_turn_recovered_without_live_producer",
         }),
@@ -251,7 +256,12 @@ class DeterministicHarnessSession implements HarnessSession {
     if (input.turnId !== undefined && input.turnId !== this.#turnId) {
       throw new Error(`turn ${input.turnId} is not active`);
     }
+    this.#semanticResult = interruptedResult(
+      this.#input.runId,
+      input.reason ?? "The deterministic turn was interrupted.",
+    );
     this.#appendEvents(
+      this.#event("run.result.proposed", this.#semanticResult),
       this.#event("turn.interrupted", { reason: input.reason ?? "interrupted" }),
       this.#event("run.terminal", cancelledTerminal(), { turn: false }),
     );
@@ -380,6 +390,32 @@ function completedTerminal(): PrpTerminalState {
     turnTerminalState: "completed",
     runTerminalState: "succeeded",
     reportedWorkDisposition: "done",
+  };
+}
+
+function interruptedResult(runId: string, summary: string): PrpStructuredRunResult {
+  return {
+    schema: "paperclip.run_result.v1",
+    reportedWorkDisposition: "yielded",
+    summary,
+    completionClaim: {
+      contractRevision: "harness-driver-conformance-v1",
+      objectiveSatisfied: false,
+      criteria: [],
+      remainingWork: [{
+        description: "Resume the interrupted work in a live provider session.",
+        blocksCompletion: true,
+      }],
+    },
+    evidence: [],
+    verification: [],
+    attentionRequests: [],
+    artifacts: [],
+    continuation: {
+      kind: "same_agent",
+      summary: "Resume the interrupted deterministic turn.",
+      idempotencyKey: `resume_deterministic_${runId}`,
+    },
   };
 }
 
