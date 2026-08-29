@@ -1107,8 +1107,8 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
-  it("does not replay a mutable export after its executing lease expires", async () => {
-    const durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+  it("reconciles an expired mutable export without replaying its effect", async () => {
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
       resultSequence: 0,
       operationResults: {},
@@ -1123,11 +1123,15 @@ describe("Capability exposure and authorization", () => {
     };
     const durableStore: CapabilitySemanticToolRuntimeStore = {
       load: () => structuredClone(durableSnapshot),
-      save: () => {
-        throw new Error("an unsafe export replay must not mutate durable state");
+      save: (_runId, snapshot) => {
+        durableSnapshot = structuredClone(snapshot);
       },
-      compareAndSwap: () => {
-        throw new Error("an unsafe export replay must not acquire a new lease");
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) {
+          return false;
+        }
+        durableSnapshot = structuredClone(snapshot);
+        return true;
       },
     };
     const base = await runtimeFor({ scenarioGrants: ["portability:export"] });
@@ -1154,6 +1158,33 @@ describe("Capability exposure and authorization", () => {
       status: "pending",
       ownerId: "terminated-exporter",
       phase: "executing",
+    });
+
+    const observedExport = {
+      schema: "paperclip.capability.mock-export.v1",
+      company: { id: "company-1", name: "Fixture Company" },
+      taskCount: 1,
+      actorCount: 1,
+    };
+    expect(restored.reconcileExpiredExtensionReceipt({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "expired-export",
+      value: observedExport,
+    })).toEqual({ resultId: "tool-result-1" });
+    expect(durableSnapshot.extensions[0]).toMatchObject({
+      status: "completed",
+      resultId: "tool-result-1",
+      execution: { value: observedExport },
+    });
+    await expect(restored.invoke({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "expired-export",
+    })).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: observedExport,
     });
   });
 

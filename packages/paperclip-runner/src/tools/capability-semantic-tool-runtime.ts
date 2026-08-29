@@ -34,6 +34,14 @@ export interface CapabilitySemanticToolRuntimeOptions {
   now?: () => number;
 }
 
+export interface CapabilityExpiredExtensionReceipt {
+  operationId: string;
+  input: Record<string, CapabilityJsonValue>;
+  idempotencyKey: string;
+  value: CapabilityJsonValue;
+  entityRefs?: string[];
+}
+
 interface ExtensionExecution {
   value: CapabilityJsonValue;
   commandResult: CapabilityToolSuccess["commandResult"];
@@ -105,6 +113,104 @@ export class CapabilitySemanticToolRuntime {
 
   authorizationRecords(): readonly CapabilityAuthorizationRecord[] {
     return this.#authorization.records();
+  }
+
+  /**
+   * Publishes the exact observed result of an expired, non-replay-safe mock
+   * extension. This is a trusted recovery boundary: normal tool invocations
+   * cannot guess or replace an ambiguous effect after its executor exits.
+   */
+  reconcileExpiredExtensionReceipt(
+    receipt: CapabilityExpiredExtensionReceipt,
+  ): { resultId: string } {
+    const descriptor = capabilitySemanticTool(receipt.operationId);
+    if (
+      descriptor?.mockCommandMapping.kind !== "mock_extension" ||
+      descriptor.idempotency !== "required" ||
+      isReplaySafeMockExtension(descriptor)
+    ) {
+      throw new Error("extension receipt reconciliation is not available");
+    }
+    const idempotencyKey = receipt.idempotencyKey.trim();
+    if (idempotencyKey.length === 0) {
+      throw new Error("extension receipt idempotency key is required");
+    }
+    if (receipt.entityRefs?.some((ref) => typeof ref !== "string")) {
+      throw new Error("extension receipt entity references are invalid");
+    }
+    const key = `${this.#runId}:${receipt.operationId}:${idempotencyKey}`;
+    const input = canonicalJson(receipt.input);
+    const value = structuredClone(receipt.value);
+    const entityRefs = [...new Set(receipt.entityRefs ?? [])].sort();
+
+    for (let attempt = 0; attempt < RUNTIME_COMPLETION_CAS_ATTEMPTS; attempt += 1) {
+      const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
+      const extension = durable?.extensions.find(
+        (candidate) => candidate.key === key,
+      );
+      if (durable === null || extension === undefined || extension.input !== input) {
+        throw new Error("expired extension receipt does not match durable execution");
+      }
+      if (extension.status !== "pending") {
+        if (
+          canonicalJson(extension.execution.value) !== canonicalJson(value) ||
+          canonicalJson(extension.execution.entityRefs) !== canonicalJson(entityRefs)
+        ) {
+          throw new Error("completed extension receipt cannot be replaced");
+        }
+        this.#adoptReconciledExtension(key, input, extension.resultId, {
+          value,
+          commandResult: null,
+          entityRefs,
+        });
+        return { resultId: extension.resultId };
+      }
+      if (
+        extension.phase !== "executing" ||
+        (extension.leaseExpiresAtMs ?? 0) > this.#now()
+      ) {
+        throw new Error("extension execution lease is still live or unproved");
+      }
+      const replacement = structuredClone(durable);
+      let resultSequence = Math.max(
+        replacement.resultSequence,
+        this.#state.resultSequence,
+      );
+      let resultId: string;
+      do {
+        resultId = `tool-result-${++resultSequence}`;
+      } while (Object.prototype.hasOwnProperty.call(
+        replacement.operationResults,
+        resultId,
+      ));
+      const execution: ExtensionExecution = {
+        value,
+        commandResult: null,
+        entityRefs,
+      };
+      replacement.resultSequence = resultSequence;
+      replacement.operationResults[resultId] = structuredClone(value);
+      replacement.extensions = replacement.extensions.map((candidate) =>
+        candidate.key === key
+          ? {
+              key,
+              input,
+              status: "completed" as const,
+              resultId,
+              execution: structuredClone(execution),
+            }
+          : candidate,
+      );
+      if (!this.#adapter.compareAndSwapSemanticToolRuntime(
+        this.#runId,
+        durable,
+        replacement,
+      )) continue;
+      this.#state.resultSequence = resultSequence;
+      this.#adoptReconciledExtension(key, input, resultId, execution);
+      return { resultId };
+    }
+    throw new Error("durable extension changed during receipt reconciliation");
   }
 
   /** Returns only the result shape allowed to cross observable boundaries. */
@@ -451,6 +557,27 @@ export class CapabilitySemanticToolRuntime {
       durable?.resultSequence ?? 0,
     );
     return `tool-result-${++this.#state.resultSequence}`;
+  }
+
+  #adoptReconciledExtension(
+    key: string,
+    input: string,
+    resultId: string,
+    value: ExtensionExecution,
+  ): void {
+    const completed = { resultId, value: structuredClone(value) };
+    const existing = this.#state.extensionIdempotency.get(key);
+    if (existing) this.#stopExtensionExecutionLease(existing);
+    this.#state.extensionIdempotency.set(key, {
+      input,
+      execution: Promise.resolve(structuredClone(completed)),
+      ownerId: null,
+      leaseExpiresAtMs: 0,
+      leaseHeartbeat: null,
+      cleanupRetry: null,
+      completed,
+    });
+    this.#state.operationResults.set(resultId, structuredClone(value.value));
   }
 
   #startExtensionExecution(
