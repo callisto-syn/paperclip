@@ -52,7 +52,10 @@ const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
 const QUARANTINED_HOST_CLOSE_RETRY_MS = 60_000;
-const QUARANTINED_HOST_ADMISSION_GRACE_MS = 3_000;
+// The adapter may legitimately spend two seconds on protocol close, then two
+// seconds each verifying TERM and KILL. Preserve one additional second for
+// scheduling so admission does not reject cleanup that remains within bounds.
+const QUARANTINED_HOST_ADMISSION_GRACE_MS = 7_000;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;
