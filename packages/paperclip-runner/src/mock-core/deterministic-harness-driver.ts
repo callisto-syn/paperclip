@@ -170,17 +170,29 @@ class DeterministicHarnessSession implements HarnessSession {
       // its global timeout. An explicit interrupt issued before consumption
       // still wins and supplies its own reason.
       this.#recoveredActiveTurn = false;
-      this.#semanticResult = interruptedResult(
-        this.#input.runId,
-        "The deterministic provider was unavailable after active-turn recovery.",
-      );
-      this.#appendEvents(
-        this.#event("run.result.proposed", this.#semanticResult),
-        this.#event("turn.interrupted", {
-          reason: "deterministic_active_turn_recovered_without_live_producer",
-        }),
-        this.#event("run.terminal", cancelledTerminal(), { turn: false }),
-      );
+      if (this.#semanticResult !== null) {
+        // A result-first checkpoint can still carry activeTurnId when the
+        // terminal checkpoint lagged behind the completed provider work.
+        // Preserve that authoritative result and synthesize only its missing
+        // terminal facts.
+        this.#appendEvents(
+          this.#event("run.result.proposed", this.#semanticResult),
+          this.#event("turn.completed", {}),
+          this.#event("run.terminal", completedTerminal(), { turn: false }),
+        );
+      } else {
+        this.#semanticResult = interruptedResult(
+          this.#input.runId,
+          "The deterministic provider was unavailable after active-turn recovery.",
+        );
+        this.#appendEvents(
+          this.#event("run.result.proposed", this.#semanticResult),
+          this.#event("turn.interrupted", {
+            reason: "deterministic_active_turn_recovered_without_live_producer",
+          }),
+          this.#event("run.terminal", cancelledTerminal(), { turn: false }),
+        );
+      }
       this.#active = false;
     }
     let index = 0;

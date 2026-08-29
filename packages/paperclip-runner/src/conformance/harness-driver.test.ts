@@ -126,4 +126,39 @@ describe("harness-driver conformance V1", () => {
     await recovered.close({ reason: "recovered_complete" });
     await session.close({ reason: "original_complete", force: true });
   });
+
+  it("preserves a completed result when its terminal checkpoint lagged", async () => {
+    const driver = new DeterministicHarnessDriver();
+    const session = await driver.openSession({
+      runId: "run_result_first_recovery",
+      normalizedSessionId: "session_result_first_recovery",
+      workingDirectory: "/deterministic/conformance",
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "Complete deterministically." },
+    });
+    const completedSnapshot = await session.snapshot();
+    const recovery = await driver.recoverSession({
+      ...completedSnapshot,
+      activeTurnId: turnId,
+      terminalTurns: [],
+    });
+    const recovered = recovery.session!;
+    const events = [];
+    for await (const event of recovered.events()) events.push(event);
+
+    expect(events.map((event) => event.eventType)).toEqual([
+      "run.result.proposed",
+      "turn.completed",
+      "run.terminal",
+    ]);
+    expect(events[0]?.payload).toMatchObject({ reportedWorkDisposition: "done" });
+    expect(events[2]?.payload).toMatchObject({ runTerminalState: "succeeded" });
+    await expect(recovered.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      semanticResult: completedSnapshot.semanticResult,
+    });
+    await recovered.close({ reason: "recovered_complete" });
+    await session.close({ reason: "original_complete" });
+  });
 });
