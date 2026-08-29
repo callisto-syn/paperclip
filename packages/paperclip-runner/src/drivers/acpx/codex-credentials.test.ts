@@ -76,9 +76,8 @@ describe("managed Codex credentials", () => {
         },
       );
       try {
-        await expect(lease.close()).rejects.toThrow("injected directory sync failure");
-        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
+        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
         expect(syncAttempts).toBe(2);
       } finally {
         syncSpy.mockRestore();
@@ -87,7 +86,7 @@ describe("managed Codex credentials", () => {
   );
 
   it.runIf(process.platform !== "win32")(
-    "preserves cleanup ownership when installation and removal directory syncs fail",
+    "retries preflight, installation, and removal until each is durable",
     async () => {
       const fixture = await credentialFixture();
       const probe = await open(fixture.home, "r");
@@ -96,13 +95,15 @@ describe("managed Codex credentials", () => {
       };
       await probe.close();
       const originalSync = prototype.sync;
-      let syncAttempts = 0;
+      let directorySyncAttempts = 0;
       const syncSpy = vi.spyOn(prototype, "sync").mockImplementation(
         async function (this: FileHandle): Promise<void> {
-          syncAttempts += 1;
-          // The temporary credential file sync succeeds. Installation and the
-          // first removal directory sync fail.
-          if (syncAttempts === 2 || syncAttempts === 3) {
+          if ((await this.stat()).isDirectory()) {
+            directorySyncAttempts += 1;
+          }
+          // The first attempt at each namespace boundary fails; the durable
+          // helper must retry before staging or cleanup reports success.
+          if ([1, 3, 5].includes(directorySyncAttempts)) {
             throw new Error("injected directory sync failure");
           }
           await originalSync.call(this);
@@ -114,10 +115,9 @@ describe("managed Codex credentials", () => {
           environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
         });
         await expect(readFile(lease.path, "utf8")).resolves.toBe("{}");
-        await expect(lease.close()).rejects.toThrow("injected directory sync failure");
-        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
-        expect(syncAttempts).toBe(4);
+        await expect(readFile(lease.path)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(directorySyncAttempts).toBe(6);
       } finally {
         syncSpy.mockRestore();
       }
@@ -184,7 +184,7 @@ describe("managed Codex credentials", () => {
   });
 
   it.runIf(process.platform !== "win32")(
-    "fails API-key staging until stale removal is durable",
+    "keeps API-key staging pending until stale removal is durable",
     async () => {
       const fixture = await credentialFixture();
       const destination = join(fixture.home, "auth.json");
@@ -204,16 +204,11 @@ describe("managed Codex credentials", () => {
         },
       );
       try {
-        await expect(stageManagedCodexCredential({
-          agentHomeDirectory: fixture.home,
-          environment: { OPENAI_API_KEY: "launch-only-key" },
-        })).rejects.toThrow("injected directory sync failure");
-        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
-
         const lease = await stageManagedCodexCredential({
           agentHomeDirectory: fixture.home,
           environment: { OPENAI_API_KEY: "launch-only-key" },
         });
+        await expect(readFile(destination)).rejects.toMatchObject({ code: "ENOENT" });
         await expect(lease.close()).resolves.toBeUndefined();
         expect(syncAttempts).toBe(3);
       } finally {

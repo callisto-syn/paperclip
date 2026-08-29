@@ -87,6 +87,10 @@ export async function stageManagedCodexCredential(input: {
     : await readManagedCredential(input.sourcePath!);
   try {
     validateCredentialDocument(credential);
+    // Establish durable absence before installing a replacement. This keeps a
+    // previously staged authentication document from reappearing after a
+    // crash even when the following rename is interrupted.
+    await removeCredential(destination, home);
     await writeCredential(destination, home, credential);
   } finally {
     credential.fill(0);
@@ -253,13 +257,11 @@ async function writeCredential(
     await handle.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
   }
-  // The atomic rename is the ownership-transfer boundary: after it succeeds,
-  // always return the lease that owns auth.json. A directory fsync failure can
-  // make the installation disappear after a crash (which fails closed), but
-  // rolling it back and then throwing can make the secret reappear after a
-  // crash with no caller holding cleanup ownership. Lease.close() performs and
-  // retries the durable removal boundary.
-  await syncDirectory(home).catch(() => undefined);
+  // Do not acknowledge the lease until the namespace update is durable. A
+  // directory-sync failure is a fail-closed admission condition: retry here so
+  // neither a returned lease nor a thrown pre-lease error can lose ownership
+  // of auth.json across a crash.
+  await syncDirectoryDurably(home);
 }
 
 async function removeReplaceableCredential(path: string): Promise<void> {
@@ -281,13 +283,30 @@ async function removeCredential(path: string, home: string): Promise<void> {
       throw new Error("Managed Codex credential destination is a directory");
     }
     await unlink(path);
-    await syncDirectory(home);
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
-    // The file may be absent because a previous unlink succeeded before its
-    // directory fsync failed. Retry the directory sync so cleanup is durable
-    // before the lease reports success.
-    await syncDirectory(home);
+  }
+  // Sync even after ENOENT: a previous unlink may have succeeded before its
+  // directory sync failed. Never report cleanup or finish preflight while the
+  // removal can still be rolled back by a crash.
+  await syncDirectoryDurably(home);
+}
+
+async function syncDirectoryDurably(directory: string): Promise<void> {
+  let retryDelayMs = 10;
+  while (true) {
+    try {
+      await syncDirectory(directory);
+      return;
+    } catch {
+      // There is no safe success or failure result while a credential
+      // namespace mutation remains non-durable. Keep admission closed and
+      // retry with bounded backoff until the filesystem confirms durability.
+      await new Promise<void>((resolveRetry) => {
+        setTimeout(resolveRetry, retryDelayMs);
+      });
+      retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
+    }
   }
 }
 
