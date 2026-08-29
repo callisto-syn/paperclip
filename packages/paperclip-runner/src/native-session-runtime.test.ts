@@ -851,6 +851,51 @@ describe("executeNativeSession recovery", () => {
     expect(openSession).not.toHaveBeenCalled();
   });
 
+  it("rejects a mismatched existing session before opening control-plane state", async () => {
+    const openRun = vi.fn(async () => undefined);
+    const attachRun = vi.fn(async () => undefined);
+    const existingSession: NativeSession = {
+      identity: () => ({ ...identity, companyId: "other-company" }),
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      attachRun,
+      async *events() {},
+      async startTurn() { return { turnId: "unexpected" }; },
+      async result() { return null; },
+      async snapshot() { throw new Error("unexpected snapshot"); },
+      async close() {},
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "existing-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { throw new Error("unexpected open"); },
+    };
+    const port: ControlPlanePort = {
+      openRun,
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      existingSession,
+    })).rejects.toThrow("native_session_attach_binding_mismatch");
+    expect(openRun).not.toHaveBeenCalled();
+    expect(attachRun).not.toHaveBeenCalled();
+  });
+
   it("rejects checkpoint adoption when the requested session id is absent", async () => {
     const openRun = vi.fn(async () => undefined);
     const openSession = vi.fn();

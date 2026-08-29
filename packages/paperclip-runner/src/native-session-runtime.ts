@@ -449,7 +449,19 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       || persistedSession.identity.sessionId !== input.session.normalizedSessionId
     )
   ) throw new Error("native_session_checkpoint_binding_mismatch");
+  const existingIdentity = options.existingSession?.identity() ?? null;
+  if (
+    existingIdentity
+    && (
+      existingIdentity.companyId !== input.binding.companyId
+      || existingIdentity.issueId !== input.binding.issueId
+      || existingIdentity.agentId !== input.binding.agentId
+      || input.session.normalizedSessionId === null
+      || existingIdentity.sessionId !== input.session.normalizedSessionId
+    )
+  ) throw new Error("native_session_attach_binding_mismatch");
   const normalizedSessionId = persistedSession?.identity.sessionId
+    ?? existingIdentity?.sessionId
     ?? input.session.normalizedSessionId
     ?? randomUUID();
   await options.controlPlane.openRun({
