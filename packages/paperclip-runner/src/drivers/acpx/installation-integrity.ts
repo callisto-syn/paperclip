@@ -501,7 +501,7 @@ function sanitizedNodeEnvironment(
 function snapshotBootstrap(format: AcpxCommandFormat): string {
   return [
     'const fs = require("node:fs");',
-    'const { registerHooks } = require("node:module");',
+    'const { isBuiltin, registerHooks } = require("node:module");',
     'const { pathToFileURL } = require("node:url");',
     "const commandDirectory = process.argv[1];",
     "const commandName = process.argv[2];",
@@ -513,7 +513,7 @@ function snapshotBootstrap(format: AcpxCommandFormat): string {
     `const source = fs.readFileSync(${COMMAND_SOURCE_FD});`,
     "registerHooks({ resolve(specifier, context, nextResolve) {",
     "if (specifier === target) return { url: target, shortCircuit: true };",
-    'const filesystemLookup = context.parentURL?.startsWith(directoryUrl) === true && !specifier.startsWith("node:");',
+    "const filesystemLookup = context.parentURL?.startsWith(directoryUrl) === true && !isBuiltin(specifier);",
     "return guardSnapshotModuleLookup(process.platform, filesystemLookup, () => nextResolve(specifier, context));",
     "}, load(url, context, nextLoad) {",
     `if (url === target) return { format: ${JSON.stringify(format)}, source, shortCircuit: true };`,

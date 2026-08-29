@@ -55,6 +55,12 @@ describe("ACPX installation integrity", () => {
       "verified",
     );
     expect(pinnedLookup).toHaveBeenCalledOnce();
+
+    const builtinLookup = vi.fn(() => "builtin");
+    expect(guardSnapshotModuleLookup("darwin", false, builtinLookup)).toBe(
+      "builtin",
+    );
+    expect(builtinLookup).toHaveBeenCalledOnce();
   });
 
   it("fails closed when the platform cannot atomically open without following symlinks", () => {
