@@ -369,6 +369,43 @@ describe("Codex ACPX harness driver", () => {
     }
   });
 
+  it("fails admission within a finite grace when quarantined cleanup never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+      fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
+      const session = await fixture.driver.openSession({
+        runId: "run-close-never-settles",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+
+      const closing = expect(
+        session.close({ reason: "runtime close persistently failed" }),
+      ).rejects.toThrow("persistent cleanup failure");
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fixture.host.close).toHaveBeenCalledTimes(7);
+
+      fixture.host.close.mockImplementation(() => new Promise<void>(() => {}));
+      let admissionSettled = false;
+      const admission = fixture.driver.openSession({
+        runId: "run-after-stalled-quarantine",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      void admission.finally(() => { admissionSettled = true; }).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(admissionSettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(admission).rejects.toThrow("exceeded the admission grace");
+      expect(fixture.host.close).toHaveBeenCalledTimes(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds lagging streams without introducing source sequence gaps", async () => {
     const fixture = driverFixture(
       {},

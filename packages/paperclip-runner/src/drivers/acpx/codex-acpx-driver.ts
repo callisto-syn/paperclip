@@ -52,6 +52,7 @@ const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
 const QUARANTINED_HOST_CLOSE_RETRY_MS = 60_000;
+const QUARANTINED_HOST_ADMISSION_GRACE_MS = 3_000;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;
@@ -338,7 +339,17 @@ export class CodexAcpxDriver implements HarnessDriver {
       // itself from the set.
       observations.push(recovery.catch(() => undefined));
     }
-    await Promise.all(observations);
+    if (
+      observations.length > 0 &&
+      !(await settlesWithin(
+        Promise.all(observations),
+        QUARANTINED_HOST_ADMISSION_GRACE_MS,
+      ))
+    ) {
+      throw new Error(
+        "Codex ACPX cannot open a new session because quarantined host cleanup exceeded the admission grace",
+      );
+    }
     if (this.#quarantinedHostCleanups.size > 0) {
       throw new Error(
         "Codex ACPX cannot open a new session while quarantined host cleanup remains incomplete",
@@ -1104,6 +1115,24 @@ async function settleWithin(
           reject(new Error("ACPX host cleanup exceeded its shutdown timeout"));
         }, timeoutMs);
         timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function settlesWithin(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
       }),
     ]);
   } finally {
