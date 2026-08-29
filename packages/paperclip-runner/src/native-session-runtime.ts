@@ -748,20 +748,15 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     if (!options.keepSessionOpen || !executionSucceeded) {
       // A provider that ignores close must not keep execution pending forever.
       // closeSession removes it from the caller before invoking the backend;
-      // retain observation of the promise, but bound the final join. A clean
-      // execution fails explicitly if its provider cannot confirm closure.
+      // retain observation of the promise, but bound the final join. Provider
+      // cleanup cannot reverse a result the control plane already committed;
+      // after that durable boundary the session remains unavailable for reuse
+      // and late close rejection stays observed without contradicting success.
       const closeSettlement = Promise.allSettled([closeSession()]);
-      const closed = await settlesWithin(
+      await settlesWithin(
         closeSettlement,
         FAILED_OPERATION_SETTLEMENT_GRACE_MS,
       );
-      if (executionSucceeded && !closed) {
-        throw new Error("native_session_close_timeout");
-      }
-      if (executionSucceeded) {
-        const [closeResult] = await closeSettlement;
-        if (closeResult?.status === "rejected") throw closeResult.reason;
-      }
     }
   }
 }
