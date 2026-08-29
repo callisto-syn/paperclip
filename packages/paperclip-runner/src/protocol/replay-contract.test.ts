@@ -81,7 +81,10 @@ describe("PRP v1 JSON Schema contract", () => {
   it("fails closed on an unsupported required semantic-tool version", async () => {
     const result = parsePrpFixtureText(
       await readFile(
-        new URL("semantic-tool-unsupported-required-version.json", fixtureDirectory),
+        new URL(
+          "semantic-tool-unsupported-required-version.json",
+          fixtureDirectory,
+        ),
         "utf8",
       ),
     );
@@ -107,7 +110,9 @@ describe("PRP v1 JSON Schema contract", () => {
     (payload.semantic_tool as Record<string, unknown>).phase = "reconciled";
     events[1] = reconciled;
 
-    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({ ok: true });
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
+      ok: true,
+    });
   });
 
   it("binds a pending-call reconciliation to its original semantic input", async () => {
@@ -120,10 +125,11 @@ describe("PRP v1 JSON Schema contract", () => {
     const payload = reconciled.payload as Record<string, unknown>;
     const semanticTool = payload.semantic_tool as Record<string, unknown>;
     semanticTool.phase = "reconciled";
-    for (const event of events.slice(1)) event.sourceSeq = Number(event.sourceSeq) + 1;
-    events.splice(1, 0, reconciled);
+    events[1] = reconciled;
 
-    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({ ok: true });
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
+      ok: true,
+    });
 
     semanticTool.operationId = "different_operation";
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
@@ -136,16 +142,44 @@ describe("PRP v1 JSON Schema contract", () => {
     });
 
     semanticTool.operationId = (
-      ((events[0]!.payload as Record<string, unknown>).semantic_tool as Record<string, unknown>)
-        .operationId
-    );
+      (events[0]!.payload as Record<string, unknown>).semantic_tool as Record<
+        string,
+        unknown
+      >
+    ).operationId;
     reconciled.turnId = "different-turn";
-    (semanticTool.correlation as Record<string, unknown>).turnId = "different-turn";
+    (semanticTool.correlation as Record<string, unknown>).turnId =
+      "different-turn";
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
       ok: false,
       issues: [
         expect.objectContaining({
           path: "/events/1/payload/semantic_tool/correlation",
+        }),
+      ],
+    });
+  });
+
+  it("rejects result and reconciliation as two terminal phases for one call", async () => {
+    const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
+    const events = fixture.events as Array<Record<string, unknown>>;
+    const reconciled = structuredClone(events[0]!);
+    reconciled.sourceEventId = "semantic_happy_reconciled";
+    reconciled.sourceSeq = 2;
+    reconciled.eventType = "semantic_tool.reconciled";
+    const payload = reconciled.payload as Record<string, unknown>;
+    (payload.semantic_tool as Record<string, unknown>).phase = "reconciled";
+    for (const event of events.slice(1)) {
+      event.sourceSeq = Number(event.sourceSeq) + 1;
+    }
+    events.splice(1, 0, reconciled);
+
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "/events/0/payload/semantic_tool/callId",
+          message: expect.stringContaining("exactly one result or reconciled"),
         }),
       ],
     });

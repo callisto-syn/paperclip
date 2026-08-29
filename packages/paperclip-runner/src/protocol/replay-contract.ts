@@ -291,20 +291,23 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
   });
 
   for (const [callId, call] of semanticCalls) {
-    if (
-      call.input === undefined
-      || (call.result === undefined && call.reconciled === undefined)
-    ) {
+    const terminalPhaseCount =
+      Number(call.result !== undefined) + Number(call.reconciled !== undefined);
+    if (call.input === undefined || terminalPhaseCount !== 1) {
       const present = call.input ?? call.result ?? call.reconciled;
       issues.push({
         code: "binding_mismatch",
         path: `/events/${present?.index ?? 0}/payload/semantic_tool/callId`,
-        message: `semantic_tool call ${callId} must contain one input and a result or reconciled envelope`,
+        message: `semantic_tool call ${callId} must contain one input and exactly one result or reconciled envelope`,
       });
       continue;
     }
     if (call.result !== undefined) {
-      for (const field of ["operationId", "idempotencyKey", "correlation"] as const) {
+      for (const field of [
+        "operationId",
+        "idempotencyKey",
+        "correlation",
+      ] as const) {
         if (
           canonicalJson(call.input.envelope[field]) !==
           canonicalJson(call.result.envelope[field])
@@ -318,7 +321,11 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
       }
     }
     if (call.reconciled !== undefined) {
-      for (const field of ["operationId", "idempotencyKey", "correlation"] as const) {
+      for (const field of [
+        "operationId",
+        "idempotencyKey",
+        "correlation",
+      ] as const) {
         if (
           canonicalJson(call.input.envelope[field]) !==
           canonicalJson(call.reconciled.envelope[field])
@@ -330,11 +337,15 @@ function bindingIssues(fixture: PrpFixture): ProtocolValidationIssue[] {
           });
         }
       }
-      if (call.input.envelope.content.digest !== call.reconciled.envelope.content.digest) {
+      if (
+        call.input.envelope.content.digest !==
+        call.reconciled.envelope.content.digest
+      ) {
         issues.push({
           code: "binding_mismatch",
           path: `/events/${call.reconciled.index}/payload/semantic_tool/content/digest`,
-          message: "semantic_tool reconciled digest must match its input envelope",
+          message:
+            "semantic_tool reconciled digest must match its input envelope",
         });
       }
     }
