@@ -1188,6 +1188,72 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
+  it("resolves an expired mutable export receipt during a restored retry", async () => {
+    const observedExport = {
+      schema: "paperclip.capability.mock-export.v1",
+      company: { id: "company-1", name: "Previously Exported Company" },
+      taskCount: 1,
+      actorCount: 1,
+    };
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: `${OPEN.identity.runId}:export_company:recovered-export`,
+        input: "{}",
+        status: "pending",
+        ownerId: "terminated-exporter",
+        leaseExpiresAtMs: 1_000,
+        phase: "executing",
+      }],
+    };
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => { durableSnapshot = structuredClone(snapshot); },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["portability:export"] });
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const resolveExpiredExtensionReceipt = vi.fn(async () => ({ value: observedExport }));
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["portability:export"],
+      now: () => 1_001,
+      resolveExpiredExtensionReceipt,
+    });
+
+    await expect(restored.invoke({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "recovered-export",
+    })).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: observedExport,
+    });
+    expect(resolveExpiredExtensionReceipt).toHaveBeenCalledOnce();
+    expect(durableSnapshot.extensions[0]).toMatchObject({
+      status: "completed",
+      resultId: "tool-result-1",
+    });
+
+    await restored.invoke({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "recovered-export",
+    });
+    expect(resolveExpiredExtensionReceipt).toHaveBeenCalledOnce();
+  });
+
   it("allows only one restored runtime to reclaim an expired extension lease", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",

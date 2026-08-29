@@ -31,6 +31,17 @@ export interface CapabilitySemanticToolRuntimeOptions {
   scenarioGrants?: string[];
   policy?: CapabilityScenarioToolPolicy;
   resolveSecretValue?: (name: string) => Promise<string | null> | string | null;
+  /**
+   * Trusted backend boundary for an expired, non-replay-safe extension. The
+   * resolver must return the exact receipt observed from the original
+   * executor; returning null keeps the idempotency key fail-closed.
+   */
+  resolveExpiredExtensionReceipt?: (input: {
+    operationId: string;
+    input: Record<string, CapabilityJsonValue>;
+    idempotencyKey: string;
+  }) => Promise<Pick<CapabilityExpiredExtensionReceipt, "value" | "entityRefs"> | null> |
+    Pick<CapabilityExpiredExtensionReceipt, "value" | "entityRefs"> | null;
   now?: () => number;
 }
 
@@ -81,6 +92,7 @@ export class CapabilitySemanticToolRuntime {
   readonly #scenarioGrants: string[];
   readonly #policy: CapabilityScenarioToolPolicy | undefined;
   readonly #resolveSecretValue: CapabilitySemanticToolRuntimeOptions["resolveSecretValue"];
+  readonly #resolveExpiredExtensionReceipt: CapabilitySemanticToolRuntimeOptions["resolveExpiredExtensionReceipt"];
   readonly #now: () => number;
   readonly #authorization = new CapabilityToolAuthorizationEngine();
   readonly #state: CapabilitySemanticRuntimeState;
@@ -91,6 +103,7 @@ export class CapabilitySemanticToolRuntime {
     this.#scenarioGrants = [...new Set(options.scenarioGrants ?? [])].sort();
     this.#policy = options.policy === undefined ? undefined : structuredClone(options.policy);
     this.#resolveSecretValue = options.resolveSecretValue;
+    this.#resolveExpiredExtensionReceipt = options.resolveExpiredExtensionReceipt;
     this.#now = options.now ?? Date.now;
     let adapterState = RUNTIME_STATE_BY_ADAPTER.get(options.adapter);
     if (adapterState === undefined) {
@@ -357,8 +370,8 @@ export class CapabilitySemanticToolRuntime {
           }
         }
         if (idempotencyRecord.execution === null) {
-          const durableState = this.#adapter.loadSemanticToolRuntime(this.#runId);
-          const durableExtension = durableState?.extensions.find(
+          let durableState = this.#adapter.loadSemanticToolRuntime(this.#runId);
+          let durableExtension = durableState?.extensions.find(
             (extension) => extension.key === extensionIdempotencyKey,
           );
           if (durableState === null || durableExtension === undefined) {
@@ -376,11 +389,7 @@ export class CapabilitySemanticToolRuntime {
             };
           }
           if (durableExtension.status === "pending") {
-            if (
-              (durableExtension.leaseExpiresAtMs ?? 0) > this.#now() ||
-              (durableExtension.phase === "executing" &&
-                !isReplaySafeMockExtension(descriptor))
-            ) {
+            if ((durableExtension.leaseExpiresAtMs ?? 0) > this.#now()) {
               const denied = this.#authorization.denyInvocation(
                 invocation.operationId,
                 context,
@@ -394,6 +403,37 @@ export class CapabilitySemanticToolRuntime {
                 ),
               };
             }
+            if (
+              durableExtension.phase === "executing" &&
+              !isReplaySafeMockExtension(descriptor)
+            ) {
+              const recovered = await this.#resolveExpiredExtension(
+                invocation,
+              );
+              if (!recovered) {
+                const denied = this.#authorization.denyInvocation(
+                  invocation.operationId,
+                  context,
+                  "idempotency_recovery_in_flight",
+                );
+                return {
+                  observableResult: this.#denial(
+                    invocation.operationId,
+                    denied,
+                    "operation_unsupported",
+                  ),
+                };
+              }
+              durableState = this.#adapter.loadSemanticToolRuntime(this.#runId);
+              durableExtension = durableState?.extensions.find(
+                (extension) => extension.key === extensionIdempotencyKey,
+              );
+              if (durableState === null || durableExtension?.status !== "completed") {
+                throw new Error("expired extension recovery did not publish a durable receipt");
+              }
+            }
+          }
+          if (durableExtension.status === "pending") {
             if (!this.#startExtensionExecution(
               extensionIdempotencyKey,
               idempotencyRecord,
@@ -578,6 +618,30 @@ export class CapabilitySemanticToolRuntime {
       completed,
     });
     this.#state.operationResults.set(resultId, structuredClone(value.value));
+  }
+
+  async #resolveExpiredExtension(
+    invocation: CapabilityToolInvocation,
+  ): Promise<boolean> {
+    if (this.#resolveExpiredExtensionReceipt === undefined) return false;
+    const idempotencyKey = invocation.idempotencyKey?.trim();
+    if (!idempotencyKey) return false;
+    const observed = await this.#resolveExpiredExtensionReceipt({
+      operationId: invocation.operationId,
+      input: structuredClone(invocation.input) as Record<string, CapabilityJsonValue>,
+      idempotencyKey,
+    });
+    if (observed === null) return false;
+    this.reconcileExpiredExtensionReceipt({
+      operationId: invocation.operationId,
+      input: structuredClone(invocation.input) as Record<string, CapabilityJsonValue>,
+      idempotencyKey,
+      value: structuredClone(observed.value),
+      ...(observed.entityRefs === undefined
+        ? {}
+        : { entityRefs: [...observed.entityRefs] }),
+    });
+    return true;
   }
 
   #startExtensionExecution(
