@@ -339,23 +339,21 @@ async function consumeTurn(
       if (await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS)) {
         await closeFailedSession();
       } else {
-        // Iterator, durable-handoff, and governed-cancellation work can still
-        // reference the live provider session. Keep one explicit owner that
-        // waits for all mutation authority to settle before closing; never
-        // overlap session.close with those operations merely to meet the
-        // caller-facing timeout.
-        retainFailedCleanup(
-          teardownSettlement.then(() => closeFailedSession()),
-        );
+        // The aborted signal is the hard mutation-authority boundary. Retain
+        // observation of uncooperative callbacks, but close the provider
+        // independently so one callback that ignores cancellation cannot keep
+        // the session allocated forever.
+        retainFailedCleanup(teardownSettlement.then(() => undefined));
+        retainFailedCleanup(Promise.resolve().then(closeFailedSession));
       }
     } else {
       if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
         // A terminal provider fact does not make an uncooperative handoff safe
-        // to forget. Revoke its signal, transfer the exact settlement-and-close
-        // chain to the process owner, and fail this execution within a bound so
-        // callers do not wait forever or publish a result ahead of a late
-        // control-plane mutation.
-        retainFailedCleanup(teardownSettlement.then(() => closeFailedSession()));
+        // to forget. Revoke its mutation authority, retain observation of the
+        // exact settlement, and close the provider independently so a broken
+        // callback cannot keep the session allocated forever.
+        retainFailedCleanup(teardownSettlement.then(() => undefined));
+        retainFailedCleanup(Promise.resolve().then(closeFailedSession));
         throw new Error("native_terminal_handoff_settlement_timeout");
       }
     }

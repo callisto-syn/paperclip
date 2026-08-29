@@ -410,7 +410,7 @@ describe("executeNativeSession recovery", () => {
     expect(appendCommitted).toBe(false);
   });
 
-  it("retains a failed session while an uncancellable event read is blocked", async () => {
+  it("closes a failed session while retaining an uncancellable event read", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     const close = vi.fn(async () => { releaseStream(); });
@@ -467,10 +467,10 @@ describe("executeNativeSession recovery", () => {
       timeoutMs: 1,
       keepSessionOpen: true,
     })).rejects.toThrow("native session timed out");
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
   });
 
-  it("retains a failed session while optional cancellation remains active", async () => {
+  it("closes a failed session while retaining optional cancellation", async () => {
     let releaseStream = () => {};
     const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
     const interrupt = vi.fn(() => new Promise<never>(() => undefined));
@@ -533,7 +533,7 @@ describe("executeNativeSession recovery", () => {
     })).rejects.toThrow("native session timed out");
     expect(interrupt).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("closes after a synchronous governed-wait probe returns no result", async () => {
@@ -600,7 +600,7 @@ describe("executeNativeSession recovery", () => {
     expect(lifecycle).toEqual(["closed"]);
   });
 
-  it("defers close until a revoked governed-wait cancellation settles", async () => {
+  it("closes independently of a revoked governed-wait cancellation", async () => {
     let markCancelStarted = () => {};
     const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
     let releaseCancel = () => {};
@@ -669,7 +669,8 @@ describe("executeNativeSession recovery", () => {
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(lifecycle).toEqual(["closed"]);
     releaseCancel();
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(lifecycle).toEqual(["closed"]);
@@ -1759,7 +1760,7 @@ describe("executeNativeSession recovery", () => {
     await handoffStarted;
     await expect(execution).rejects.toThrow("native session timed out");
     expect(handoffSignal?.aborted).toBe(true);
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
     releaseHandoff();
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
   });
@@ -1887,10 +1888,9 @@ describe("executeNativeSession recovery", () => {
     await handoffStarted;
     await vi.waitFor(() => expect(handoffSignal?.aborted).toBe(true));
     expect(readResult).not.toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
     await expect(execution).rejects.toThrow("native_terminal_handoff_settlement_timeout");
     expect(readResult).not.toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
     releaseHandoff();
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(readResult).not.toHaveBeenCalled();
