@@ -1451,16 +1451,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_only_requests_bound_to_an_exact_settled_turn_nonfatally() {
-        assert!(request_targets_settled_turn(
+    fn rejects_requests_bound_to_any_non_active_turn_nonfatally() {
+        assert!(request_targets_non_active_turn(
+            Some("turn-2"),
             Some("turn-1"),
             &json!({"turnId": "turn-1"}),
         ));
-        assert!(!request_targets_settled_turn(None, &json!({}),));
-        assert!(!request_targets_settled_turn(
+        assert!(request_targets_non_active_turn(
+            Some("turn-2"),
+            Some("turn-1"),
+            &json!({"turnId": "turn-0"}),
+        ));
+        assert!(request_targets_non_active_turn(
+            None,
+            Some("turn-2"),
+            &json!({"turnId": "turn-1"}),
+        ));
+        assert!(!request_targets_non_active_turn(
+            Some("turn-2"),
             Some("turn-1"),
             &json!({"turnId": "turn-2"}),
         ));
+        assert!(!request_targets_non_active_turn(None, None, &json!({}),));
     }
 
     #[test]
