@@ -1044,6 +1044,78 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     expect(adapter.snapshot().wakes).toEqual([]);
   });
 
+  it("records approval decisions when the requester has no applicable budget", async () => {
+    const adapter = seeded({
+      actors: [
+        {
+          id: "actor-1",
+          companyId: "company-1",
+          name: "Mock Approver",
+          role: "approver",
+          status: "active",
+          budgetId: "budget-actor-1",
+          capabilityGrants: [],
+        },
+        {
+          id: "actor-2",
+          companyId: "company-1",
+          name: "Budgetless Requester",
+          role: "engineer",
+          status: "active",
+          budgetId: "missing-budget-actor-2",
+          capabilityGrants: [],
+        },
+      ],
+      budgets: [{
+        id: "budget-actor-1",
+        scope: "actor",
+        scopeId: "actor-1",
+        limitCents: 1_000,
+        spentCents: 0,
+        hardStop: true,
+      }],
+      approvals: [{
+        id: "approval-budgetless-requester",
+        companyId: "company-1",
+        taskIds: ["task-1"],
+        type: "request_board_approval",
+        status: "pending",
+        requestedByActorId: "actor-2",
+        payload: {},
+        decisionNote: null,
+        comments: [],
+        createdAt: "2026-08-09T00:00:00.000Z",
+        decidedAt: null,
+      }],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun({
+      ...OPEN,
+      capabilities: ["governance:approvals:decide"],
+    });
+
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "budgetless-requester-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-budgetless-requester",
+        decision: "approved",
+        note: "Record governance independently from continuation capacity.",
+      },
+    })).resolves.toMatchObject({ disposition: "applied", scheduledWakeIds: [] });
+
+    expect(adapter.snapshot()).toMatchObject({
+      approvals: [{
+        id: "approval-budgetless-requester",
+        status: "approved",
+        decisionNote: "Record governance independently from continuation capacity.",
+      }],
+      wakes: [],
+    });
+    expect(adapter.snapshot().tasks).toHaveLength(1);
+  });
+
   it("rejects fixture wake references outside the company actor scope", () => {
     expect(() => seeded({
       tasks: [

@@ -829,10 +829,13 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         const requester = approval.requestedByActorId === null
           ? null
           : this.#actor(approval.requestedByActorId);
+        const requesterBudgets = requester === null
+          ? []
+          : this.#applicableBudgets(requester);
         const requesterBudgetAvailable = requester === null
-          || !this.#effectiveBudgets(requester).some(
+          || (requesterBudgets.length > 0 && !requesterBudgets.some(
             (budget) => budget.hardStop && budget.spentCents >= budget.limitCents,
-          );
+          ));
         let requesterTarget: { actorId: string; taskId: string } | null = null;
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
@@ -1253,11 +1256,7 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
   }
 
   #effectiveBudgets(actor: CapabilityFixtureActor) {
-    const budgets = this.#state.budgets.filter(
-      (budget) =>
-        (budget.scope === "company" && budget.scopeId === actor.companyId) ||
-        (budget.scope === "actor" && budget.scopeId === actor.id),
-    );
+    const budgets = this.#applicableBudgets(actor);
     if (budgets.length === 0) {
       throw new CapabilityMockControlPlaneError(
         "fixture_state_invalid",
@@ -1265,6 +1264,14 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       );
     }
     return budgets;
+  }
+
+  #applicableBudgets(actor: CapabilityFixtureActor) {
+    return this.#state.budgets.filter(
+      (budget) =>
+        (budget.scope === "company" && budget.scopeId === actor.companyId) ||
+        (budget.scope === "actor" && budget.scopeId === actor.id),
+    );
   }
 
   #consumeFault(
