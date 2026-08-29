@@ -180,17 +180,11 @@ describe("Codex ACPX runtime adapter", () => {
       const retry = port.close({ reason: "cleanup ownership retried" });
       await Promise.resolve();
       expect(runtime.close).toHaveBeenCalledTimes(2);
-      await expect(retry).rejects.toMatchObject({
-        errors: [
-          expect.objectContaining({
-            message: "ACPX runtime retains an unsettled earlier close attempt",
-          }),
-        ],
-      });
+      await expect(retry).resolves.toBeUndefined();
 
       // The fresh attempt established that the runtime closed without waiting
-      // forever for the earlier attempt, but cleanup ownership remains open
-      // until that attempt settles and its outcome is reported exactly once.
+      // forever for the earlier attempt. The adapter still owns that attempt
+      // so a subsequent close reports its eventual failure exactly once.
       rejectStalledClose?.(new Error("original close failed"));
       await Promise.resolve();
       await expect(

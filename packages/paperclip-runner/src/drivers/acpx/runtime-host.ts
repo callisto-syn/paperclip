@@ -318,7 +318,13 @@ export class AcpxRuntimeHost {
   }
 
   async close(input: { reason: string; retryPending?: boolean }): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closed) {
+      // The adapter can still own an older close attempt after a fresh one
+      // proves shutdown. Keep forwarding explicit closes so any late failure
+      // is observed exactly once instead of being hidden by host idempotency.
+      await this.#runtime.close({ reason: boundedReason(input.reason) });
+      return;
+    }
     if (this.#closePromise && input.retryPending !== true) {
       return await this.#closePromise;
     }

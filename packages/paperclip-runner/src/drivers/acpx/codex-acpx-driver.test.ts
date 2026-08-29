@@ -124,7 +124,8 @@ describe("Codex ACPX harness driver", () => {
       },
     });
     await session.close({ reason: "complete" });
-    expect(fixture.host.close).toHaveBeenCalledOnce();
+    await session.close({ reason: "reconcile any late close outcome" });
+    expect(fixture.host.close).toHaveBeenCalledTimes(2);
   });
 
   it("rejects terminal disposition drift and bounds interruption", async () => {

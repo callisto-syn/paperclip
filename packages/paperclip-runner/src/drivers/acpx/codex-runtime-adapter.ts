@@ -30,13 +30,6 @@ class AcpxRuntimeCloseTimeoutError extends Error {
   }
 }
 
-class AcpxRuntimeClosePendingError extends Error {
-  constructor() {
-    super("ACPX runtime retains an unsettled earlier close attempt");
-    this.name = "AcpxRuntimeClosePendingError";
-  }
-}
-
 export interface CodexAcpxRuntimeDependencies {
   createRuntime?: (options: AcpRuntimeOptions) => AcpRuntime;
   createRegistry?: (input: {
@@ -332,16 +325,10 @@ function runtimePort(
           "ACPX runtime and provider cleanup failed",
         );
       }
-      if (ownedRuntimeCloseAttempts.size > 0) {
-        // A fresh attempt may prove that the runtime is now closed, but it
-        // cannot erase the outcome of an older attempt. Keep the enclosing
-        // host retryable until every owned attempt settles and its eventual
-        // failure (if any) has been reported.
-        throw new AggregateError(
-          [new AcpxRuntimeClosePendingError()],
-          "ACPX runtime and provider cleanup remains pending",
-        );
-      }
+      // A successful fresh attempt is sufficient proof that the runtime is
+      // closed. Older attempts remain owned so a later close can report an
+      // eventual failure, but a never-settling attempt must not keep cleanup
+      // permanently unresolved.
     },
   };
 }

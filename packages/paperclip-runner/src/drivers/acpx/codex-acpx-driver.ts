@@ -383,14 +383,19 @@ class CodexAcpxSession implements HarnessSession {
         throw new Error("A different semantic result is already committed");
       }
       if (this.#semanticFingerprint === null) {
+        if (!this.#emit("run.result.proposed", validation.result, {
+          turnId,
+          itemId: call.callId,
+        })) {
+          throw new HarnessCapabilityUnavailableError(
+            "run.result.proposed",
+            "the event consumer must drain provider events before a semantic result can be accepted",
+          );
+        }
         this.#semanticResult = structuredClone(validation.result);
         this.#semanticFingerprint = fingerprint;
         this.#semanticCallId = call.callId;
         this.#semanticTurnId = turnId;
-        this.#emit("run.result.proposed", validation.result, {
-          turnId,
-          itemId: call.callId,
-        });
       }
       return { accepted: true };
     }
@@ -485,7 +490,10 @@ class CodexAcpxSession implements HarnessSession {
 
   async close(input: { reason: string }): Promise<void> {
     if (this.#closePromise) return await this.#closePromise;
-    if (this.#closed) return;
+    if (this.#closed) {
+      await this.#host.close({ reason: input.reason });
+      return;
+    }
     this.#closingStarted = true;
     const closePromise = this.#finishClose(input.reason);
     this.#closePromise = closePromise;

@@ -328,6 +328,9 @@ describe("ACPX runtime host", () => {
       retryPending: true,
     })).resolves.toBeUndefined();
     expect(runtime.close).toHaveBeenCalledTimes(2);
+    await expect(host.close({ reason: "closed host reconciliation" }))
+      .resolves.toBeUndefined();
+    expect(runtime.close).toHaveBeenCalledTimes(3);
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
@@ -337,7 +340,7 @@ describe("ACPX runtime host", () => {
       onClose: vi
         .fn()
         .mockRejectedValueOnce(new Error("runtime close timed out"))
-        .mockRejectedValueOnce(new Error("older close attempt remains pending"))
+        .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error("older close attempt failed"))
         .mockResolvedValueOnce(undefined),
     });
@@ -357,10 +360,10 @@ describe("ACPX runtime host", () => {
     );
     await expect(
       host.close({ reason: "fresh attempt", retryPending: true }),
-    ).rejects.toThrow(/cleanup failed/);
-    await expect(host.close({ reason: "reconcile older attempt" })).rejects.toThrow(
-      /cleanup failed/,
-    );
+    ).resolves.toBeUndefined();
+    await expect(
+      host.close({ reason: "reconcile older attempt" }),
+    ).rejects.toThrow("older close attempt failed");
     await expect(host.close({ reason: "ownership released" })).resolves.toBeUndefined();
     expect(runtime.close).toHaveBeenCalledTimes(4);
   });
@@ -455,7 +458,7 @@ describe("ACPX runtime host", () => {
         host.close({ reason: "retry after cancellation timeout" }),
       ).resolves.toBeUndefined();
       expect(turn.cancel).toHaveBeenCalledOnce();
-      expect(runtime.close).toHaveBeenCalledOnce();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
       expect(fixture.commandClose).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
