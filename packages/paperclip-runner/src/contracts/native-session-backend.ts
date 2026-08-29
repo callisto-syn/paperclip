@@ -96,6 +96,8 @@ export interface NativeSession {
    * Idempotently stop provider work and release every pending `events().next()`
    * before this promise resolves. The runtime uses this required boundary when
    * optional interrupt or cancel support cannot release a blocked event read.
+   * It must also revoke every outstanding provider mutation authority before
+   * resolving, even when an earlier interrupt or cancel promise settles later.
    */
   close(input: { reason: string }): Promise<void>;
 }

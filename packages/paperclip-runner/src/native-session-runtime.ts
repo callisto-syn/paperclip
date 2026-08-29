@@ -49,17 +49,13 @@ export interface ExecuteNativeSessionOptions {
    * Detect a durable server-owned wait as soon as its provider tool event is
    * committed. Models are not trusted to stop or avoid polling after creating
    * a question/review interaction; the control plane may park the turn here.
+   * This boundary is deliberately synchronous and observational: asynchronous
+   * mutation authority cannot be revoked safely after a failed execution.
    */
   resolveGovernedWait?: (input: {
     turnId: string | null;
     event: PrpEvent;
-    /**
-     * Resolution must settle when this signal aborts. The runtime grants a
-     * bounded settlement window before closing the provider session; callers
-     * must treat the aborted signal as revocation of mutation authority.
-     */
-    signal: AbortSignal;
-  }) => Promise<PrpStructuredRunResult | null>;
+  }) => PrpStructuredRunResult | null;
 }
 
 function isTurnTerminal(event: PrpEvent): boolean {
@@ -230,15 +226,13 @@ async function consumeTurn(
             clearInputTimer(payload.requestId);
           }
           if (governedResult === null && resolveGovernedWait) {
-            governedResult = await settleBeforeAbort(
-              () => Promise.resolve().then(() => resolveGovernedWait({
-                turnId: event.turnId ?? null,
-                event,
-                signal: appendAbort.signal,
-              })),
-              appendAbort.signal,
-              governedOperations,
-            );
+            if (appendAbort.signal.aborted) {
+              throw appendAbort.signal.reason ?? new Error("native event consumption aborted");
+            }
+            governedResult = resolveGovernedWait({
+              turnId: event.turnId ?? null,
+              event,
+            });
             if (governedResult !== null && !isTurnTerminal(event)) {
               governedCancellationStarted = true;
               await settleBeforeAbort(

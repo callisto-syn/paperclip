@@ -536,10 +536,8 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it("closes after revoking a governed-wait resolver that never settles", async () => {
-    let markResolverStarted = () => {};
-    const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve; });
-    let resolverSignal: AbortSignal | undefined;
+  it("closes after a synchronous governed-wait probe returns no result", async () => {
+    const resolveGovernedWait = vi.fn(() => null);
     const lifecycle: string[] = [];
     const close = vi.fn(async () => { lifecycle.push("closed"); });
     const session: NativeSession = {
@@ -594,15 +592,10 @@ describe("executeNativeSession recovery", () => {
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
       timeoutMs: 5,
-      resolveGovernedWait: ({ signal }) => {
-        resolverSignal = signal;
-        markResolverStarted();
-        return new Promise<never>(() => undefined);
-      },
+      resolveGovernedWait,
     });
-    await resolverStarted;
-    await expect(execution).rejects.toThrow("native session timed out");
-    expect(resolverSignal?.aborted).toBe(true);
+    await expect(execution).rejects.toThrow("before a turn terminal fact");
+    expect(resolveGovernedWait).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalled();
     expect(lifecycle).toEqual(["closed"]);
   });
@@ -669,7 +662,7 @@ describe("executeNativeSession recovery", () => {
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
       timeoutMs: 5,
-      resolveGovernedWait: async () => yieldedResult,
+      resolveGovernedWait: () => yieldedResult,
     });
     await cancelStarted;
     await expect(execution).rejects.toThrow("native session timed out");
@@ -1467,7 +1460,7 @@ describe("executeNativeSession recovery", () => {
       controlPlane: port,
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
-      resolveGovernedWait: async ({ event }) =>
+      resolveGovernedWait: ({ event }) =>
         event.eventType === "item.completed" ? yielded : null,
     });
 
@@ -1621,7 +1614,7 @@ describe("executeNativeSession recovery", () => {
         runnerInstanceId: "runner-recovery",
         controlPlaneInstanceId: "control-recovery",
         runtimeInputLiveWindowMs: 120,
-        resolveGovernedWait: async ({ event }) =>
+        resolveGovernedWait: ({ event }) =>
           event.eventType === "runtime_request.expired" ? yieldedResult : null,
       });
       await createdCommitted;
