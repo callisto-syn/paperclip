@@ -1124,7 +1124,7 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
-  it("does not replay an expired executing extension after executor loss", async () => {
+  it("reconstructs a legacy expired built-in receipt after executor loss", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
       resultSequence: 0,
@@ -1168,15 +1168,20 @@ describe("Capability exposure and authorization", () => {
       input: { key: "case-expired", body: "Case body" },
       idempotencyKey: "expired-case",
     })).resolves.toMatchObject({
-      ok: false,
-      error: { reason: "idempotency_recovery_in_flight" },
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: { key: "case-expired", body: "Case body", upserted: true },
     });
     expect(durableSnapshot.extensions[0]).toMatchObject({
-      status: "pending",
-      ownerId: "terminated-executor",
-      phase: "executing",
+      status: "completed",
+      resultId: "tool-result-1",
+      execution: {
+        value: { key: "case-expired", body: "Case body", upserted: true },
+      },
     });
-    expect(durableSnapshot.operationResults).toEqual({});
+    expect(durableSnapshot.operationResults).toEqual({
+      "tool-result-1": { key: "case-expired", body: "Case body", upserted: true },
+    });
   });
 
   it("recovers an expired built-in extension from its prepared receipt", async () => {

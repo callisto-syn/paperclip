@@ -34,8 +34,10 @@ export interface CapabilitySemanticToolRuntimeOptions {
   /**
    * Optional trusted backend receipt lookup for an expired extension. The
    * package-local mock runtime falls back to the exact prepared receipt stored
-   * before execution; returning null therefore remains recoverable for those
-   * built-in extensions without replaying them.
+   * before execution. Legacy records without a prepared receipt are also
+   * recoverable for replay-safe package-local fixture computations; the
+   * runtime can reconstruct and durably adopt their result without repeating
+   * an external effect. State-derived exports still require an exact receipt.
    */
   resolveExpiredExtensionReceipt?: (input: {
     operationId: string;
@@ -86,6 +88,19 @@ const EXTENSION_EXECUTION_HEARTBEAT_MS = Math.floor(
 );
 const RUNTIME_PERSIST_CAS_ATTEMPTS = 8;
 const RUNTIME_COMPLETION_CAS_ATTEMPTS = 64;
+const REPLAY_SAFE_LEGACY_MOCK_EXTENSIONS = new Set([
+  "discovery.projects",
+  "discovery.goals",
+  "cases.list",
+  "routines.list",
+  "company_skills.list",
+  "secrets.metadata",
+  "company_skills.sync",
+  "routines.manage",
+  "cases.upsert",
+  "company.admin",
+  "test.generic_api",
+]);
 
 export class CapabilitySemanticToolRuntime {
   readonly #adapter: CapabilityMockControlPlanePort;
@@ -661,6 +676,29 @@ export class CapabilitySemanticToolRuntime {
         observed = {
           value: structuredClone(extension.preparedExecution.value),
           entityRefs: [...extension.preparedExecution.entityRefs],
+        };
+      }
+    }
+    if (observed === null) {
+      const descriptor = capabilitySemanticTool(invocation.operationId);
+      if (
+        descriptor?.mockCommandMapping.kind === "mock_extension" &&
+        descriptor.idempotency === "required" &&
+        REPLAY_SAFE_LEGACY_MOCK_EXTENSIONS.has(
+          descriptor.mockCommandMapping.extension,
+        )
+      ) {
+        // Snapshots written before preparedExecution existed can still be
+        // recovered without replaying an external mutation. Every idempotent
+        // extension in this explicit allowlist is a pure fixture computation;
+        // secret reads and state-derived exports are deliberately excluded.
+        const reconstructed = this.#prepareBuiltInExtensionExecution(
+          descriptor,
+          asObject(invocation.input),
+        );
+        observed = {
+          value: structuredClone(reconstructed.value),
+          entityRefs: [...reconstructed.entityRefs],
         };
       }
     }
