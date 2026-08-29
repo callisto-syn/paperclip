@@ -169,32 +169,8 @@ class DeterministicHarnessSession implements HarnessSession {
       // outcome when consumption resumes so the native loop cannot wait until
       // its global timeout. An explicit interrupt issued before consumption
       // still wins and supplies its own reason.
-      this.#recoveredActiveTurn = false;
-      if (this.#semanticResult !== null) {
-        // A result-first checkpoint can still carry activeTurnId when the
-        // terminal checkpoint lagged behind the provider work. Preserve the
-        // authoritative result, but do not turn an interrupted/yielded result
-        // with a continuation into a successful completion during recovery.
-        if (this.#semanticResult.reportedWorkDisposition === "yielded") {
-          this.#appendEvents(
-            this.#event("run.result.proposed", this.#semanticResult),
-            this.#event("turn.interrupted", {
-              reason: "deterministic_active_turn_recovered_with_yielded_result",
-            }),
-            this.#event("run.terminal", cancelledTerminal(), { turn: false }),
-          );
-        } else {
-          this.#appendEvents(
-            this.#event("run.result.proposed", this.#semanticResult),
-            this.#event("turn.completed", {}),
-            this.#event(
-              "run.terminal",
-              completedTerminal(this.#semanticResult.reportedWorkDisposition),
-              { turn: false },
-            ),
-          );
-        }
-      } else {
+      if (!this.#settleRecoveredSemanticResult()) {
+        this.#recoveredActiveTurn = false;
         this.#semanticResult = interruptedResult(
           this.#input.runId,
           "The deterministic provider was unavailable after active-turn recovery.",
@@ -282,6 +258,7 @@ class DeterministicHarnessSession implements HarnessSession {
     if (input.turnId !== undefined && input.turnId !== this.#turnId) {
       throw new Error(`turn ${input.turnId} is not active`);
     }
+    if (this.#settleRecoveredSemanticResult()) return;
     this.#semanticResult = interruptedResult(
       this.#input.runId,
       input.reason ?? "The deterministic turn was interrupted.",
@@ -292,6 +269,40 @@ class DeterministicHarnessSession implements HarnessSession {
       this.#event("run.terminal", cancelledTerminal(), { turn: false }),
     );
     this.#active = false;
+  }
+
+  #settleRecoveredSemanticResult(): boolean {
+    if (
+      !this.#recoveredActiveTurn
+      || !this.#active
+      || this.#turnId === null
+      || this.#semanticResult === null
+    ) return false;
+    this.#recoveredActiveTurn = false;
+    // A result-first checkpoint can still carry activeTurnId when the
+    // terminal checkpoint lagged behind the provider work. Preserve the
+    // authoritative result even if cancellation races event consumption.
+    if (this.#semanticResult.reportedWorkDisposition === "yielded") {
+      this.#appendEvents(
+        this.#event("run.result.proposed", this.#semanticResult),
+        this.#event("turn.interrupted", {
+          reason: "deterministic_active_turn_recovered_with_yielded_result",
+        }),
+        this.#event("run.terminal", cancelledTerminal(), { turn: false }),
+      );
+    } else {
+      this.#appendEvents(
+        this.#event("run.result.proposed", this.#semanticResult),
+        this.#event("turn.completed", {}),
+        this.#event(
+          "run.terminal",
+          completedTerminal(this.#semanticResult.reportedWorkDisposition),
+          { turn: false },
+        ),
+      );
+    }
+    this.#active = false;
+    return true;
   }
 
   async read(): Promise<Record<string, unknown>> {
