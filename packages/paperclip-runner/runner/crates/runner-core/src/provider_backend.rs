@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::codex_provider::{CodexProvider, CodexProviderConfig, CodexProviderEvent};
 use crate::durable::{
-    create_private_temporary_file, open_private_regular_file, sanitize_value,
+    create_private_temporary_file, current_unix_ms, open_private_regular_file, sanitize_value,
     verify_private_directory, Command, CommandExecution, CommandExecutor, DurableRunnerConfig,
     DurableRunnerError, EventPriority, PolledEvent,
 };
@@ -36,6 +36,7 @@ const MAX_TERMINAL_SETTLEMENT_EVENTS: usize = MAX_PENDING_CALLS + 4;
 const MAX_QUEUED_PROVIDER_EVENTS: usize =
     MAX_REGULAR_QUEUED_PROVIDER_EVENTS + MAX_TERMINAL_SETTLEMENT_EVENTS;
 const MAX_RECEIPT_LIMIT_INTERRUPT_ATTEMPTS: u8 = 3;
+const RECEIPT_LIMIT_INTERRUPT_TERMINAL_DEADLINE_MS: u64 = 2_000;
 
 #[derive(Clone, Debug)]
 struct ProviderEventIdentity {
@@ -320,6 +321,8 @@ struct CodexProviderState {
     receipt_limit_interrupt_accepted: bool,
     #[serde(default)]
     receipt_limit_interrupt_attempts: u8,
+    #[serde(default)]
+    receipt_limit_interrupt_deadline_unix_ms: Option<u64>,
     last_agent_message: Option<String>,
     #[serde(default)]
     pending_events: VecDeque<PolledEvent>,
@@ -353,6 +356,7 @@ impl CodexProviderState {
             receipt_limit_interrupt_pending: false,
             receipt_limit_interrupt_accepted: false,
             receipt_limit_interrupt_attempts: 0,
+            receipt_limit_interrupt_deadline_unix_ms: None,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -423,6 +427,9 @@ impl CodexProviderState {
             || (self.receipt_limit_interrupt_accepted && !self.receipt_limit_interrupt_pending)
             || self.receipt_limit_interrupt_attempts > MAX_RECEIPT_LIMIT_INTERRUPT_ATTEMPTS
             || (!self.receipt_limit_interrupt_pending && self.receipt_limit_interrupt_attempts != 0)
+            || self
+                .receipt_limit_interrupt_deadline_unix_ms
+                .is_some_and(|deadline| deadline == 0 || !self.receipt_limit_interrupt_pending)
             || (matches!(
                 self.lifecycle.as_str(),
                 "prepared" | "session_open" | "closed"
@@ -485,6 +492,7 @@ impl CodexProviderState {
         &mut self,
         call_id: String,
         operation_id: String,
+        deadline_unix_ms: u64,
     ) -> Result<bool, DurableRunnerError> {
         if self.receipt_limit_diagnostic_emitted {
             return Ok(self.receipt_limit_interrupt_pending);
@@ -504,6 +512,7 @@ impl CodexProviderState {
         self.receipt_limit_diagnostic_emitted = true;
         self.receipt_limit_interrupt_pending = true;
         self.receipt_limit_interrupt_attempts = 0;
+        self.receipt_limit_interrupt_deadline_unix_ms = Some(deadline_unix_ms);
         Ok(true)
     }
 
@@ -718,6 +727,7 @@ impl CodexCommandExecutor {
                 state.receipt_limit_interrupt_pending = false;
                 state.receipt_limit_interrupt_accepted = false;
                 state.receipt_limit_interrupt_attempts = 0;
+                state.receipt_limit_interrupt_deadline_unix_ms = None;
             }
             state.reconcile_active_provider_turn(recovered_active_turn_id.clone());
             let reconciled = NormalizedProviderEvent {
@@ -957,6 +967,7 @@ impl CodexCommandExecutor {
             state.receipt_limit_interrupt_pending = false;
             state.receipt_limit_interrupt_accepted = false;
             state.receipt_limit_interrupt_attempts = 0;
+            state.receipt_limit_interrupt_deadline_unix_ms = None;
             state.lifecycle = "session_open".to_owned();
             state.config.provider_version.clone()
         };
@@ -1046,6 +1057,7 @@ impl CodexCommandExecutor {
         state.receipt_limit_interrupt_pending = false;
         state.receipt_limit_interrupt_accepted = false;
         state.receipt_limit_interrupt_attempts = 0;
+        state.receipt_limit_interrupt_deadline_unix_ms = None;
         state.last_agent_message = None;
         state.lifecycle = "turn_active".to_owned();
         self.save_state()?;
@@ -1206,12 +1218,20 @@ impl CodexCommandExecutor {
         call_id: String,
         operation_id: String,
     ) -> Result<(), DurableRunnerError> {
+        let deadline_unix_ms = current_unix_ms()?
+            .checked_add(RECEIPT_LIMIT_INTERRUPT_TERMINAL_DEADLINE_MS)
+            .ok_or_else(|| {
+                DurableRunnerError::invalid("Codex receipt-limit interruption deadline overflowed")
+            })?;
         let state = self
             .state
             .as_mut()
             .expect("Codex state remains available at its tool receipt limit");
-        let interrupt_pending =
-            state.begin_receipt_limit_stop(call_id.clone(), operation_id.clone())?;
+        let interrupt_pending = state.begin_receipt_limit_stop(
+            call_id.clone(),
+            operation_id.clone(),
+            deadline_unix_ms,
+        )?;
         let first_interrupt_attempt =
             interrupt_pending && state.receipt_limit_interrupt_attempts == 0;
         if interrupt_pending {
@@ -1294,6 +1314,7 @@ impl CodexCommandExecutor {
         state.receipt_limit_interrupt_pending = false;
         state.receipt_limit_interrupt_accepted = false;
         state.receipt_limit_interrupt_attempts = 0;
+        state.receipt_limit_interrupt_deadline_unix_ms = None;
         state.lifecycle = "provider_exited".to_owned();
         state.push_terminal_event(NormalizedProviderEvent {
             event_type: "turn.failed".to_owned(),
@@ -1311,20 +1332,46 @@ impl CodexCommandExecutor {
     }
 
     fn retry_receipt_limit_interrupt(&mut self) -> Result<(), DurableRunnerError> {
-        let (should_retry, attempts) = self.state.as_ref().map_or((false, 0), |state| {
-            (
-                state.receipt_limit_interrupt_pending && state.active_provider_turn_id.is_some(),
-                state.receipt_limit_interrupt_attempts,
-            )
-        });
+        let (should_retry, attempts, persisted_deadline) =
+            self.state.as_ref().map_or((false, 0, None), |state| {
+                (
+                    state.receipt_limit_interrupt_pending
+                        && state.active_provider_turn_id.is_some(),
+                    state.receipt_limit_interrupt_attempts,
+                    state.receipt_limit_interrupt_deadline_unix_ms,
+                )
+            });
         if !should_retry {
             return Ok(());
         }
-        // Each request gets one complete provider-poll cycle to deliver its
-        // terminal notification. The following poll fails the run instead of
-        // retaining an active durable turn forever.
-        if attempts >= MAX_RECEIPT_LIMIT_INTERRUPT_ATTEMPTS {
-            return self.fail_unconfirmed_receipt_limit_interrupt();
+        let now_unix_ms = current_unix_ms()?;
+        let deadline_unix_ms = match persisted_deadline {
+            Some(deadline) => deadline,
+            None => {
+                // Older durable state did not record this additive field. Give
+                // an already-pending interruption one complete bounded window
+                // after recovery rather than falling back on poll count alone.
+                let deadline = now_unix_ms
+                    .checked_add(RECEIPT_LIMIT_INTERRUPT_TERMINAL_DEADLINE_MS)
+                    .ok_or_else(|| {
+                        DurableRunnerError::invalid(
+                            "Codex receipt-limit interruption deadline overflowed",
+                        )
+                    })?;
+                self.state
+                    .as_mut()
+                    .expect("Codex state remains available while adding its receipt-limit deadline")
+                    .receipt_limit_interrupt_deadline_unix_ms = Some(deadline);
+                self.save_state()?;
+                deadline
+            }
+        };
+        // Attempts bound network traffic, while the durable wall-clock deadline
+        // gives an accepted asynchronous interruption time to deliver its
+        // authoritative terminal. The provider is always polled once more below
+        // before an elapsed deadline is converted into the conservative fallback.
+        if attempts >= MAX_RECEIPT_LIMIT_INTERRUPT_ATTEMPTS || now_unix_ms >= deadline_unix_ms {
+            return Ok(());
         }
         // Polling is the autonomous recovery path until a terminal notification
         // clears the durable marker. RPC acceptance alone does not establish
@@ -1344,6 +1391,21 @@ impl CodexCommandExecutor {
                 .expect("Codex state remains available after receipt-limit retry")
                 .mark_receipt_limit_interrupt_accepted();
             self.save_state()?;
+        }
+        Ok(())
+    }
+
+    fn fail_receipt_limit_interrupt_after_deadline(&mut self) -> Result<(), DurableRunnerError> {
+        let deadline = self.state.as_ref().and_then(|state| {
+            (state.receipt_limit_interrupt_pending && state.active_provider_turn_id.is_some())
+                .then_some(state.receipt_limit_interrupt_deadline_unix_ms)
+                .flatten()
+        });
+        let Some(deadline) = deadline else {
+            return Ok(());
+        };
+        if current_unix_ms()? >= deadline {
+            self.fail_unconfirmed_receipt_limit_interrupt()?;
         }
         Ok(())
     }
@@ -1479,6 +1541,7 @@ impl CodexCommandExecutor {
         state.receipt_limit_interrupt_pending = false;
         state.receipt_limit_interrupt_accepted = false;
         state.receipt_limit_interrupt_attempts = 0;
+        state.receipt_limit_interrupt_deadline_unix_ms = None;
         state.lifecycle = "closed".to_owned();
         let thread_id = state.thread_id.clone();
         self.save_state()?;
@@ -1518,7 +1581,7 @@ impl CodexCommandExecutor {
         }
         self.retry_receipt_limit_interrupt()?;
         if self.provider.is_none() {
-            return Ok(());
+            return self.fail_receipt_limit_interrupt_after_deadline();
         }
         for _ in 0..MAX_EVENTS_PER_POLL {
             let event = self
@@ -1613,6 +1676,7 @@ impl CodexCommandExecutor {
                         state.receipt_limit_interrupt_pending = false;
                         state.receipt_limit_interrupt_accepted = false;
                         state.receipt_limit_interrupt_attempts = 0;
+                        state.receipt_limit_interrupt_deadline_unix_ms = None;
                         state.lifecycle = "session_open".to_owned();
                     }
                     if terminal_event_type.is_some() {
@@ -1706,7 +1770,11 @@ impl CodexCommandExecutor {
                 }
             }
         }
-        Ok(())
+        // Check the durable deadline only after a complete provider poll. A
+        // terminal that arrived after interruption acceptance but before this
+        // observation remains authoritative even when several fast controller
+        // polls have already exhausted the interruption-attempt budget.
+        self.fail_receipt_limit_interrupt_after_deadline()
     }
 }
 
@@ -1828,6 +1896,7 @@ mod tests {
             receipt_limit_interrupt_pending: false,
             receipt_limit_interrupt_accepted: false,
             receipt_limit_interrupt_attempts: 0,
+            receipt_limit_interrupt_deadline_unix_ms: None,
             last_agent_message: None,
             pending_events: VecDeque::new(),
             queued_events: VecDeque::new(),
@@ -1954,11 +2023,11 @@ mod tests {
         state.lifecycle = "turn_active".to_owned();
 
         assert!(state
-            .begin_receipt_limit_stop("call-first".to_owned(), "tool.first".to_owned())
+            .begin_receipt_limit_stop("call-first".to_owned(), "tool.first".to_owned(), 10_000)
             .unwrap());
         state.mark_receipt_limit_interrupt_accepted();
         assert!(state
-            .begin_receipt_limit_stop("call-second".to_owned(), "tool.second".to_owned())
+            .begin_receipt_limit_stop("call-second".to_owned(), "tool.second".to_owned(), 20_000)
             .unwrap());
         assert_eq!(state.pending_events.len(), 1);
         assert_eq!(state.pending_events[0].payload["callId"], "call-first");
@@ -1968,13 +2037,21 @@ mod tests {
         recovered.validate().unwrap();
         assert!(recovered.receipt_limit_interrupt_accepted);
         assert!(recovered
-            .begin_receipt_limit_stop("call-after-restart".to_owned(), "tool.third".to_owned())
+            .begin_receipt_limit_stop(
+                "call-after-restart".to_owned(),
+                "tool.third".to_owned(),
+                30_000,
+            )
             .unwrap());
         assert_eq!(recovered.pending_events.len(), 1);
         // Only a terminal notification clears the retry marker. Accepting an
         // interrupt request does not prove that the provider stopped.
         assert!(recovered
-            .begin_receipt_limit_stop("call-after-success".to_owned(), "tool.fourth".to_owned())
+            .begin_receipt_limit_stop(
+                "call-after-success".to_owned(),
+                "tool.fourth".to_owned(),
+                40_000,
+            )
             .unwrap());
         assert_eq!(recovered.pending_events.len(), 1);
     }

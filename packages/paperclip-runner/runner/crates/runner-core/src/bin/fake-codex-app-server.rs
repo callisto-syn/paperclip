@@ -159,6 +159,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let accept_interrupt_without_terminal = args
         .iter()
         .any(|value| value == "--accept-interrupt-without-terminal");
+    let interrupt_terminal_delay_ms = argument(&args, "--interrupt-terminal-delay-ms")
+        .map(|value| value.parse::<u64>())
+        .transpose()?;
     let exit_after_thread_read = args.iter().any(|value| value == "--exit-after-thread-read");
     let fail_after_turn_completion_delay_ms =
         argument(&args, "--fail-after-turn-completion-delay-ms")
@@ -177,6 +180,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = load_state(&state_path);
     let mut turn_start_count = 0_u64;
     let mut interrupt_count = 0_u64;
+    let mut delayed_interrupt_terminal_scheduled = false;
     let mut answered_questions = 0u8;
 
     for line in io::stdin().lock().lines() {
@@ -391,7 +395,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         && !(accept_interrupt_without_terminal_once
                             && interrupt_count == if fail_first_interrupt { 2 } else { 1 })
                     {
-                        finish_turn(&state_path, &mut state, "interrupted")?;
+                        if let Some(delay_ms) = interrupt_terminal_delay_ms {
+                            if !delayed_interrupt_terminal_scheduled {
+                                delayed_interrupt_terminal_scheduled = true;
+                                let delayed_state_path = state_path.clone();
+                                let mut delayed_state = state.clone();
+                                thread::spawn(move || {
+                                    thread::sleep(Duration::from_millis(delay_ms));
+                                    if let Err(error) = finish_turn(
+                                        &delayed_state_path,
+                                        &mut delayed_state,
+                                        "interrupted",
+                                    ) {
+                                        eprintln!(
+                                            "failed to emit delayed interrupt terminal: {error}"
+                                        );
+                                    }
+                                });
+                            }
+                        } else {
+                            finish_turn(&state_path, &mut state, "interrupted")?;
+                        }
                     }
                 }
             }

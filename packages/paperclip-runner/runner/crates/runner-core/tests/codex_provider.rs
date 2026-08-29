@@ -1440,6 +1440,78 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
 }
 
 #[test]
+fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
+    let directory = temporary_directory("receipt-limit-delayed-terminal");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--hold-turn",
+            "--emit-tool-call-on-resume",
+            "--interrupt-terminal-delay-ms",
+            "25",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut first = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    first
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare Codex provider");
+    first
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open Codex session");
+    first
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Accept a delayed authoritative interruption."}),
+        ))
+        .expect("start held provider turn");
+    drop(first);
+    saturate_provider_tool_receipts(&directory);
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    let mut emitted = Vec::new();
+    for _ in 0..64 {
+        emitted.extend(
+            poll_and_ack(&mut recovered)
+                .expect("a delayed accepted interrupt must remain durably pollable"),
+        );
+        if emitted
+            .iter()
+            .any(|event| event.event_type == "turn.interrupted")
+        {
+            break;
+        }
+    }
+    assert!(
+        emitted
+            .iter()
+            .any(|event| event.event_type == "turn.interrupted"),
+        "the delayed provider terminal must remain authoritative"
+    );
+    assert!(
+        !emitted.iter().any(|event| {
+            event.event_type == "turn.failed"
+                && event.payload["code"] == "semantic_tool_turn_receipt_limit_interrupt_unconfirmed"
+        }),
+        "fast provider polls must not replace a delayed terminal with fallback failure"
+    );
+
+    recovered.shutdown().expect("stop recovered provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
 fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
     let directory = temporary_directory("receipt-limit-missing-terminal");
     let config = provider_config(
@@ -1485,6 +1557,32 @@ fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
             poll_and_ack(&mut recovered)
                 .expect("receipt-limit fallback must remain durably pollable"),
         );
+        if call_count(&directory, "turn/interrupt") == 3 {
+            break;
+        }
+    }
+    assert!(!emitted
+        .iter()
+        .any(|event| event.event_type == "turn.failed"));
+    recovered
+        .shutdown()
+        .expect("pause the provider before expiring its durable deadline");
+    drop(recovered);
+
+    let state_path = directory.join("codex-provider-state.json");
+    let mut persisted: Value =
+        serde_json::from_slice(&fs::read(&state_path).expect("read pending receipt-limit state"))
+            .expect("parse pending receipt-limit state");
+    persisted["receiptLimitInterruptDeadlineUnixMs"] = json!(1);
+    fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .expect("expire the durable receipt-limit deadline");
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    for _ in 0..4 {
+        emitted.extend(
+            poll_and_ack(&mut recovered)
+                .expect("expired receipt-limit fallback must remain durably pollable"),
+        );
         if emitted
             .iter()
             .any(|event| event.event_type == "turn.failed")
@@ -1511,6 +1609,7 @@ fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
     assert!(persisted["activeProviderTurnId"].is_null());
     assert_eq!(persisted["receiptLimitInterruptPending"], false);
     assert_eq!(persisted["receiptLimitInterruptAttempts"], 0);
+    assert!(persisted["receiptLimitInterruptDeadlineUnixMs"].is_null());
 
     recovered
         .shutdown()
