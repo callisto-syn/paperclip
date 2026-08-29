@@ -410,6 +410,52 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
+  it("releases an unresponsive Windows provider when no group reaper is available", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      const child = stubbornChild();
+      const command = fakeCommand();
+      const reaperFailure = new Error(
+        "ACPX provider process-group reaping is unavailable on Windows",
+      );
+      const reapUnresponsiveChild = vi.fn().mockRejectedValue(reaperFailure);
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+        reapUnresponsiveChild,
+        releaseUnresponsiveChildOnReaperFailure: true,
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const closing = expect(
+        port.close({ reason: "provider handoff is unavailable" }),
+      ).rejects.toMatchObject({
+        errors: expect.arrayContaining([reaperFailure]),
+      });
+      await vi.advanceTimersByTimeAsync(4_000);
+      await closing;
+
+      expect(child.stdin?.destroy).toHaveBeenCalledOnce();
+      expect(child.stdout?.destroy).toHaveBeenCalledOnce();
+      expect(child.stderr?.destroy).toHaveBeenCalledOnce();
+      expect(reapUnresponsiveChild).toHaveBeenCalledWith(child);
+      expect(child.unref).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects and independently cleans providers spawned during termination", async () => {
     vi.useFakeTimers();
     try {

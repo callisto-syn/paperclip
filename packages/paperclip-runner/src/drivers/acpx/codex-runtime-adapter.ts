@@ -102,6 +102,8 @@ export interface CodexAcpxRuntimeDependencies {
   retainCleanup?: (cleanup: Promise<void>) => void;
   /** Internal test seam for transferring an unresponsive process group. */
   reapUnresponsiveChild?: (child: ChildProcess) => Promise<void>;
+  /** Internal test seam for Windows, where no detached group reaper exists. */
+  releaseUnresponsiveChildOnReaperFailure?: boolean;
 }
 
 /**
@@ -127,6 +129,7 @@ export async function openCodexAcpxRuntime(
   const children = new SpawnedChildSet(
     dependencies.retainCleanup,
     dependencies.reapUnresponsiveChild,
+    dependencies.releaseUnresponsiveChildOnReaperFailure,
   );
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
@@ -574,6 +577,8 @@ class SpawnedChildSet {
     private readonly retainCleanup?: (cleanup: Promise<void>) => void,
     private readonly reapUnresponsiveChild: (child: ChildProcess) => Promise<void> =
       launchUnresponsiveProviderReaper,
+    private readonly releaseUnresponsiveChildOnReaperFailure =
+      process.platform === "win32",
   ) {}
 
   add(child: ChildProcess): ChildProcess {
@@ -638,8 +643,16 @@ class SpawnedChildSet {
     const existing = this.#terminations.get(child);
     if (existing) return existing;
     const termination = (immediateKill
-      ? terminatePostSealChild(child, this.reapUnresponsiveChild)
-      : terminateChild(child, this.reapUnresponsiveChild)
+      ? terminatePostSealChild(
+          child,
+          this.reapUnresponsiveChild,
+          this.releaseUnresponsiveChildOnReaperFailure,
+        )
+      : terminateChild(
+          child,
+          this.reapUnresponsiveChild,
+          this.releaseUnresponsiveChildOnReaperFailure,
+        )
     ).catch((error: unknown) => [error]);
     this.#terminations.set(child, termination);
     termination.then(() => {
@@ -654,6 +667,7 @@ class SpawnedChildSet {
 async function terminatePostSealChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
@@ -667,7 +681,11 @@ async function terminatePostSealChild(
   }
   if (!killOutcome.exited && running(child)) {
     errors.push(new Error("ACPX post-seal provider did not exit after SIGKILL"));
-    errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
+    errors.push(...await handoffUnresponsiveChild(
+      child,
+      reapUnresponsiveChild,
+      releaseUnresponsiveChildOnReaperFailure,
+    ));
   }
   return errors;
 }
@@ -675,6 +693,7 @@ async function terminatePostSealChild(
 async function terminateChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
@@ -697,7 +716,11 @@ async function terminateChild(
     }
     if (!killOutcome.exited && running(child)) {
       errors.push(new Error("ACPX provider did not exit after SIGKILL"));
-      errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
+      errors.push(...await handoffUnresponsiveChild(
+        child,
+        reapUnresponsiveChild,
+        releaseUnresponsiveChildOnReaperFailure,
+      ));
     }
   }
   return errors;
@@ -706,6 +729,7 @@ async function terminateChild(
 async function handoffUnresponsiveChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
+  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
@@ -724,6 +748,10 @@ async function handoffUnresponsiveChild(
     child.unref();
   } catch (error) {
     errors.push(error);
+    // Windows has no detached process-group reaper to accept ownership. After
+    // TerminateProcess and bounded exit verification have both failed, release
+    // the local handle so the sidecar itself can still complete shutdown.
+    if (releaseUnresponsiveChildOnReaperFailure) child.unref();
   }
   return errors;
 }
