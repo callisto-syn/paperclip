@@ -1245,6 +1245,31 @@ impl CodexCommandExecutor {
         Ok(())
     }
 
+    fn retry_receipt_limit_interrupt(&mut self) -> Result<(), DurableRunnerError> {
+        let should_retry = self.state.as_ref().is_some_and(|state| {
+            state.receipt_limit_interrupt_pending
+                && !state.receipt_limit_interrupt_accepted
+                && state.active_provider_turn_id.is_some()
+        });
+        if !should_retry {
+            return Ok(());
+        }
+        // Polling is the autonomous recovery path for a failed first RPC. The
+        // durable pending marker survives process restarts, so this retry does
+        // not depend on Codex emitting another tool call after saturation.
+        if self
+            .interrupt_turn("semantic_tool_turn_receipt_limit_retry")
+            .is_ok()
+        {
+            self.state
+                .as_mut()
+                .expect("Codex state remains available after receipt-limit retry")
+                .mark_receipt_limit_interrupt_accepted();
+            self.save_state()?;
+        }
+        Ok(())
+    }
+
     fn handle_tool_call(
         &mut self,
         call_id: String,
@@ -1412,6 +1437,7 @@ impl CodexCommandExecutor {
         {
             return Ok(());
         }
+        self.retry_receipt_limit_interrupt()?;
         if self.provider.is_none() {
             return Ok(());
         }
