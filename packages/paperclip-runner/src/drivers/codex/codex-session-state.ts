@@ -203,21 +203,31 @@ export class CodexSessionState {
       && dispositionOnlyRecoveryTurnId !== null
       && this.terminalTurns.has(dispositionOnlyRecoveryTurnId)
       && dispositionOnlyRecoveryPreviouslyConsumed;
-    this.terminal = settledSemanticResult || spentResultlessRecovery;
+    // A result-less terminal proves the prior disposition-only turn stopped,
+    // but it does not prove that its normalized terminal event reached the
+    // control plane. Keep the recovered session startable and release the
+    // one-shot marker. The native runtime first replays durable events and
+    // therefore retries only when that exact terminal is actually missing.
+    this.terminal = settledSemanticResult;
     this.dispositionOnlyRecoveryAvailable =
       input.resumed &&
       this.conversationMode === "task" &&
       this.terminalTurns.size > 0 &&
       this.result === null &&
-      !dispositionOnlyRecoveryPreviouslyConsumed;
+      (
+        !dispositionOnlyRecoveryPreviouslyConsumed
+        || spentResultlessRecovery
+      );
     // Recovery itself does not consume the allowance. A checkpoint can occur
     // before startTurn, and consuming it here would strand the run if the
     // process crashed at that boundary. startTurn consumes it in memory; a
     // later recovery adopts provider evidence for an accepted, uncheckpointed
     // turn before deciding whether another submission is safe.
     this.dispositionOnlyRecoveryConsumed =
-      dispositionOnlyRecoveryPreviouslyConsumed;
-    this.dispositionOnlyRecoveryTurnId = dispositionOnlyRecoveryTurnId;
+      dispositionOnlyRecoveryPreviouslyConsumed && !spentResultlessRecovery;
+    this.dispositionOnlyRecoveryTurnId = spentResultlessRecovery
+      ? null
+      : dispositionOnlyRecoveryTurnId;
   }
 
   requireActiveTurn(turnId: string, operation: string): void {

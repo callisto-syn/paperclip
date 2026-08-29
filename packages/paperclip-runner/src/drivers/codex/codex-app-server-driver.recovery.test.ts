@@ -351,6 +351,9 @@ describe("Codex app-server Codex driver", () => {
         ],
       },
     };
+    fourth.turnStartResponse = Promise.resolve({
+      turn: { id: "turn-3", status: "inProgress", items: [] },
+    });
     const driver = makeDriver([first, second, third, fourth]);
     const original = await driver.openSession({
       runId: "run-result-less-terminal",
@@ -440,19 +443,19 @@ describe("Codex app-server Codex driver", () => {
     const repeatedRecovery = await driver.recoverSession?.(spentSnapshot);
     expect(repeatedRecovery?.session).toBeDefined();
     await repeatedRecovery!.session!.reconcile?.();
+    await expect(repeatedRecovery!.session!.snapshot()).resolves.toMatchObject({
+      activeTurnId: null,
+      semanticResult: null,
+      dispositionOnlyRecoveryConsumed: false,
+      dispositionOnlyRecoveryTurnId: null,
+      terminalTurns: [{ turnId: "turn-1" }, { turnId: "turn-2" }],
+    });
     await expect(repeatedRecovery!.session!.startTurn({
-      message: { role: "user", text: "Do not repeat recovery work." },
-    })).rejects.toThrow("session cannot start another turn");
-    const spentRecoveryEvents: PrpEvent[] = [];
-    for await (const event of repeatedRecovery!.session!.events()) {
-      spentRecoveryEvents.push(event);
-    }
-    expect(
-      spentRecoveryEvents.some((event) => event.eventType.startsWith("turn.")),
-    ).toBe(false);
+      message: { role: "user", text: "Retry only the missing disposition." },
+    })).resolves.toMatchObject({ turnId: "turn-3" });
     expect(
       fourth.calls.filter((call) => call.method === "turn/start"),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     await repeatedRecovery!.session!.close({ reason: "test complete" });
   });
 

@@ -1776,7 +1776,7 @@ describe("executeNativeSession recovery", () => {
     ]);
   });
 
-  it("replays the bound disposition terminal after its fingerprint was checkpointed", async () => {
+  it("retries a checkpointed result-less disposition turn when its terminal event is missing", async () => {
     const workProposal: PrpEvent = {
       ...runnerEvent(1, "run.result.proposed", result),
       turnId: "turn-work",
@@ -1787,7 +1787,7 @@ describe("executeNativeSession recovery", () => {
     };
     const dispositionTerminal: PrpEvent = {
       ...runnerEvent(3, "turn.completed"),
-      turnId: "turn-disposition",
+      turnId: "turn-disposition-retry",
     };
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",
@@ -1805,16 +1805,21 @@ describe("executeNativeSession recovery", () => {
       pendingRuntimeRequests: [],
       lineage: [],
     };
-    const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
+    const recoveredCheckpoint: PersistedNativeSession = {
+      ...checkpoint,
+      dispositionOnlyRecoveryConsumed: false,
+      dispositionOnlyRecoveryTurnId: null,
+    };
+    const startTurn = vi.fn(async () => ({ turnId: "turn-disposition-retry" }));
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
-      async *events() {},
+      async *events() { yield structuredClone(dispositionTerminal); },
       startTurn,
       async result() { return null; },
-      async snapshot() { return structuredClone(checkpoint); },
+      async snapshot() { return structuredClone(recoveredCheckpoint); },
       async close() {},
     };
     const backend: NativeSessionBackend = {
@@ -1868,22 +1873,17 @@ describe("executeNativeSession recovery", () => {
         return result;
       },
     });
-    await expect(execute()).rejects.toThrow(
-      "native event stream closed before a turn terminal fact",
-    );
-    expect(startTurn).not.toHaveBeenCalled();
-
-    bySource.set("runner-recovery", [
+    await expect(execute()).resolves.toMatchObject({
+      result,
+      turnId: "turn-disposition-retry",
+    });
+    expect(startTurn).toHaveBeenCalledOnce();
+    expect(completeRun).toHaveBeenCalledOnce();
+    expect(bySource.get("runner-recovery")).toEqual([
       workProposal,
       workTerminal,
       dispositionTerminal,
     ]);
-    await expect(execute()).resolves.toMatchObject({
-      result,
-      turnId: "turn-disposition",
-    });
-    expect(startTurn).not.toHaveBeenCalled();
-    expect(completeRun).toHaveBeenCalledOnce();
   });
 
   it("recovers a completed checkpoint and appends only a missing control terminal fact", async () => {
