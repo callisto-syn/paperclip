@@ -121,7 +121,6 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
         "src:main.rs",
         "foo:bar/baz",
         r"folder\literal",
-        r"foo\..\bar",
         "reports/100%/summary.txt",
     ] {
         let display = normalize(
@@ -136,6 +135,27 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
             }),
         );
         assert_eq!(display[0].payload["target"], display_path);
+    }
+
+    for unsafe_path in [
+        r"\server\share",
+        r"C:\secret",
+        r"foo\..\bar",
+        r"https:\host\secret",
+        "https://example.test/private",
+    ] {
+        let rejected = normalize(
+            AcpxRuntimeEventKind::ToolCall,
+            json!({
+                "type":"tool_call",
+                "tag":"tool_call_update",
+                "toolCallId":"tool-unsafe-display",
+                "kind":"read",
+                "status":"completed",
+                "locations":[{"path":unsafe_path}]
+            }),
+        );
+        assert_eq!(rejected[0].payload["target"], serde_json::Value::Null);
     }
 
     let uri_only = normalize(

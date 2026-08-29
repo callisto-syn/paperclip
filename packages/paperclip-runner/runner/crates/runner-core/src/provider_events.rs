@@ -676,10 +676,27 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let windows_drive_prefix = raw_path.as_bytes().get(1) == Some(&b':')
+        && raw_path
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic);
+    let uri_prefix = raw_path.split_once(':').is_some_and(|(scheme, suffix)| {
+        let mut characters = scheme.chars();
+        characters
+            .next()
+            .is_some_and(|value| value.is_ascii_alphabetic())
+            && characters
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '+' | '-' | '.'))
+            && (suffix.starts_with('/') || suffix.starts_with('\\'))
+    });
     if raw_path.is_empty()
         || raw_path.starts_with('/')
+        || raw_path.starts_with('\\')
+        || windows_drive_prefix
+        || uri_prefix
         || raw_path.contains('\0')
-        || raw_path.split('/').any(|segment| segment == "..")
+        || raw_path.split(['/', '\\']).any(|segment| segment == "..")
     {
         Value::Null
     } else {
@@ -695,8 +712,13 @@ mod tests {
     fn enforces_the_declared_safe_path_contract() {
         for location in [
             "/absolute/path",
+            r"\server\share",
+            r"C:\secret",
             "../secret",
             "src/../../secret",
+            r"foo\..\bar",
+            r"https:\host\secret",
+            "https://example.test/private",
             "bad\0name",
         ] {
             assert_eq!(
@@ -716,7 +738,6 @@ mod tests {
             "src:main.rs",
             "foo:bar/baz",
             r"folder\literal",
-            r"foo\..\bar",
             "reports/100%/summary.txt",
         ] {
             assert_eq!(
