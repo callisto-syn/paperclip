@@ -10,7 +10,8 @@ use paperclip_runner_core::durable::{
 };
 use paperclip_runner_core::provider_backend::CodexCommandExecutor;
 use paperclip_runner_core::provider_bridge::{
-    authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ToolResult, TOOL_SET_SCHEMA,
+    authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ProviderToolBridge,
+    ToolResult, TOOL_SET_SCHEMA,
 };
 use paperclip_runner_core::provider_events::normalize_codex_notification;
 use serde_json::{json, Value};
@@ -1266,6 +1267,81 @@ fn provider_exit_preserves_and_reconciles_the_active_turn() {
     }
     assert!(terminal_seen);
     executor.shutdown().expect("stop resumed provider process");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
+    let directory = temporary_directory("receipt-limit-interrupt-failure");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--hold-turn",
+            "--emit-tool-call-on-resume",
+            "--fail-first-interrupt",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut first = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    first
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare Codex provider");
+    first
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open Codex session");
+    first
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Hold this saturated turn for recovery."}),
+        ))
+        .expect("start held provider turn");
+    drop(first);
+
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(task_context_tool_set()).unwrap();
+    for index in 0..4_096 {
+        let call_id = format!("retained-call-{index}");
+        bridge
+            .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
+            .unwrap();
+        bridge
+            .apply_result(ToolResult {
+                call_id,
+                operation_id: "get_task_context".into(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .unwrap();
+    }
+    let state_path = directory.join("codex-provider-state.json");
+    let mut persisted: Value =
+        serde_json::from_slice(&fs::read(&state_path).expect("read provider state")).unwrap();
+    persisted["toolBridge"] = serde_json::to_value(bridge).unwrap();
+    fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .expect("write saturated provider state");
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    let events = poll_and_ack(&mut recovered)
+        .expect("a failed first interrupt must not terminate durable provider polling");
+    assert!(events.iter().any(|event| {
+        event.event_type == "harness.diagnostic"
+            && event.payload["code"] == "semantic_tool_turn_receipt_limit"
+    }));
+    assert_eq!(call_count(&directory, "tool-response:failure"), 1);
+    assert_eq!(call_count(&directory, "turn/interrupt"), 1);
+
+    recovered.shutdown().expect("stop recovered provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }
 

@@ -152,6 +152,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .any(|value| value == "--fail-after-second-turn-start");
     let fail_after_thread_read = args.iter().any(|value| value == "--fail-after-thread-read");
+    let fail_first_interrupt = args.iter().any(|value| value == "--fail-first-interrupt");
     let exit_after_thread_read = args.iter().any(|value| value == "--exit-after-thread-read");
     let fail_after_turn_completion_delay_ms =
         argument(&args, "--fail-after-turn-completion-delay-ms")
@@ -169,6 +170,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .any(|value| value == "--notification-before-response");
     let mut state = load_state(&state_path);
     let mut turn_start_count = 0_u64;
+    let mut interrupt_count = 0_u64;
     let mut answered_questions = 0u8;
 
     for line in io::stdin().lock().lines() {
@@ -371,8 +373,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "turn/steer" => send(json!({"id": id, "result": {"accepted": true}}))?,
             "turn/interrupt" => {
-                send(json!({"id": id, "result": {"accepted": true}}))?;
-                finish_turn(&state_path, &mut state, "interrupted")?;
+                interrupt_count += 1;
+                if fail_first_interrupt && interrupt_count == 1 {
+                    send(json!({
+                        "id": id,
+                        "error": {"code": -32001, "message": "configured interrupt failure"}
+                    }))?;
+                } else {
+                    send(json!({"id": id, "result": {"accepted": true}}))?;
+                    finish_turn(&state_path, &mut state, "interrupted")?;
+                }
             }
             _ if id.is_some() => send(json!({
                 "id": id,
