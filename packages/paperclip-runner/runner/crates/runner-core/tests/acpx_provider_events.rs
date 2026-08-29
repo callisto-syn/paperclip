@@ -135,7 +135,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 serde_json::Value::Null
             );
         } else {
-            assert_eq!(backslash_escape[0].payload["target"], platform_path);
+            assert_eq!(
+                backslash_escape[0].payload["target"],
+                platform_path.replace('\\', "%5C")
+            );
         }
     }
 
@@ -185,7 +188,10 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null,
         );
     } else {
-        assert_eq!(windows_drive_relative[0].payload["target"], "a:b/file.txt");
+        assert_eq!(
+            windows_drive_relative[0].payload["target"],
+            "a%3Ab/file.txt"
+        );
     }
 
     for posix_path in ["src:/main.rs", "foo:/bar"] {
@@ -208,7 +214,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
         } else {
             assert_eq!(
                 colon_component[0].payload["target"],
-                format!("./{posix_path}"),
+                posix_path.replace(':', "%3A"),
             );
         }
     }
@@ -232,7 +238,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     } else {
         assert_eq!(
             extensible_scheme[0].payload["target"],
-            "./custom:/host/path"
+            "custom%3A/host/path"
         );
     }
 
@@ -281,7 +287,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null
         );
     } else {
-        assert_eq!(posix_colon_backslash[0].payload["target"], r"./foo:\bar");
+        assert_eq!(posix_colon_backslash[0].payload["target"], "foo%3A%5Cbar");
     }
 
     let custom_backslash_scheme = normalize(
@@ -303,7 +309,7 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
     } else {
         assert_eq!(
             custom_backslash_scheme[0].payload["target"],
-            r"./custom:\host\path"
+            "custom%3A%5Chost%5Cpath"
         );
     }
 }

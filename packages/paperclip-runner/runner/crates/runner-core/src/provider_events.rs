@@ -694,16 +694,23 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     {
         Value::Null
     } else {
-        let display_path = if !cfg!(windows) && has_ambiguous_scheme_prefix(raw_path) {
-            // A leading `./` preserves the exact POSIX-relative target while
-            // preventing consumers from interpreting an extensible prefix
-            // such as `custom:/...` as a URI scheme.
-            format!("./{path}")
-        } else {
+        let display_path = if cfg!(windows) {
             path.to_owned()
+        } else {
+            // This field is an inert display target, not a path to reopen.
+            // Encode POSIX-literal bytes that another platform or URI parser
+            // could reinterpret, retaining the target without exporting raw
+            // traversal, drive-relative, or scheme-looking syntax.
+            encode_posix_display_path(path)
         };
         Value::String(display_path.chars().take(4_000).collect())
     }
+}
+
+fn encode_posix_display_path(path: &str) -> String {
+    path.replace('%', "%25")
+        .replace('\\', "%5C")
+        .replace(':', "%3A")
 }
 
 fn has_drive_relative_prefix(path: &str) -> bool {
@@ -741,19 +748,6 @@ fn has_unsafe_uri_spelling(path: &str) -> bool {
                     || is_known_uri_scheme(scheme)))
             || (suffix.starts_with('/')
                 && (scheme.contains(['+', '-', '.']) || is_known_uri_scheme(scheme)))
-    })
-}
-
-fn has_ambiguous_scheme_prefix(path: &str) -> bool {
-    path.split_once(':').is_some_and(|(prefix, suffix)| {
-        prefix.len() > 1
-            && prefix.bytes().enumerate().all(|(index, byte)| {
-                byte.is_ascii_alphabetic()
-                    || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
-            })
-            && ((suffix.starts_with('/') && !suffix.starts_with("//"))
-                || (suffix.starts_with('\\') && !suffix.starts_with("\\\\")))
-            && !is_known_uri_scheme(prefix)
     })
 }
 
@@ -800,7 +794,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(normalized, Value::Null);
         } else {
-            assert_eq!(normalized, Value::String("a:b/file.txt".to_owned()));
+            assert_eq!(normalized, Value::String("a%3Ab/file.txt".to_owned()));
         }
     }
 
@@ -825,7 +819,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(normalized, Value::Null);
         } else {
-            assert_eq!(normalized, Value::String(r"./foo:\bar".to_owned()));
+            assert_eq!(normalized, Value::String("foo%3A%5Cbar".to_owned()));
         }
     }
 
@@ -836,7 +830,10 @@ mod tests {
             if cfg!(windows) {
                 assert_eq!(normalized, Value::Null);
             } else {
-                assert_eq!(normalized, Value::String(location.to_owned()));
+                assert_eq!(
+                    normalized,
+                    Value::String(encode_posix_display_path(location)),
+                );
             }
         }
     }
@@ -847,13 +844,13 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(literal, Value::String("folder/name".to_owned()));
         } else {
-            assert_eq!(literal, Value::String(r"folder\name".to_owned()));
+            assert_eq!(literal, Value::String("folder%5Cname".to_owned()));
         }
         let custom = safe_acpx_location(Some(&json!({"path": r"custom:\host\path"})));
         if cfg!(windows) {
             assert_eq!(custom, Value::Null);
         } else {
-            assert_eq!(custom, Value::String(r"./custom:\host\path".to_owned()));
+            assert_eq!(custom, Value::String("custom%3A%5Chost%5Cpath".to_owned()),);
         }
     }
 
@@ -864,7 +861,10 @@ mod tests {
             if cfg!(windows) {
                 assert_eq!(normalized, Value::Null);
             } else {
-                assert_eq!(normalized, Value::String(format!("./{location}")));
+                assert_eq!(
+                    normalized,
+                    Value::String(encode_posix_display_path(location)),
+                );
             }
         }
     }
@@ -877,7 +877,7 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(normalized, Value::Null);
         } else {
-            assert_eq!(normalized, Value::String("./custom:/host/path".to_owned()));
+            assert_eq!(normalized, Value::String("custom%3A/host/path".to_owned()),);
         }
     }
 
