@@ -152,6 +152,19 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
     () => assertAcpxQuestionFixture(divergentResponse),
     /canonical and native responses differ/,
   );
+
+  const arrayWithBothOptionForms = structuredClone(canonical);
+  const environment = arrayWithBothOptionForms.nativeRequest.params
+    .requestedSchema.properties.environment;
+  environment.type = "array";
+  environment.items = {
+    anyOf: environment.oneOf,
+    oneOf: [{ const: "wrong", title: "Wrong precedence" }],
+  };
+  delete environment.oneOf;
+  arrayWithBothOptionForms.canonicalQuestionSet.questions[0].answerMode = "multi_select";
+  arrayWithBothOptionForms.nativeResponse.content.environment = ["staging"];
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(arrayWithBothOptionForms));
 });
 
 test("every question adapter fixture satisfies its declared schema", async () => {

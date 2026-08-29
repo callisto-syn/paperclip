@@ -450,7 +450,7 @@ function projectAcpxProperty(name, property, index, required) {
     required,
   };
   if (property.type === "string") {
-    const options = acpxNativeOptions(property);
+    const options = acpxNativeOptions(property, "oneOf");
     if (options.length > 0) return projectedAcpxOptions(name, property.type, base, options, "single_select");
     return {
       name,
@@ -500,7 +500,7 @@ function projectAcpxProperty(name, property, index, required) {
     name,
     property.type,
     base,
-    acpxNativeOptions(property.items),
+    acpxNativeOptions(property.items, "anyOf"),
     "multi_select",
   );
 }
@@ -519,11 +519,12 @@ function projectedAcpxOptions(name, type, base, nativeOptions, answerMode) {
   return { name, type, optionValues, question: { ...base, answerMode, options } };
 }
 
-function acpxNativeOptions(property) {
-  const titled = Array.isArray(property.oneOf)
-    ? property.oneOf
-    : Array.isArray(property.anyOf)
-      ? property.anyOf
+function acpxNativeOptions(property, preferredTitledKey) {
+  const alternateTitledKey = preferredTitledKey === "anyOf" ? "oneOf" : "anyOf";
+  const titled = Array.isArray(property[preferredTitledKey])
+    ? property[preferredTitledKey]
+    : Array.isArray(property[alternateTitledKey])
+      ? property[alternateTitledKey]
       : null;
   if (titled) {
     return titled.map((entry) => ({
@@ -572,11 +573,11 @@ function assertAcpxProperty(name, value) {
     throw contractError("invalid_acpx_question_fixture", `unsupported native property ${name}`);
   }
   if (value.type === "array") {
-    if (!isPlainRecord(value.items) || acpxEnumValues(value.items).length === 0) {
+    if (!isPlainRecord(value.items) || acpxEnumValues(value.items, "anyOf").length === 0) {
       throw contractError("invalid_acpx_question_fixture", `native array property ${name} requires options`);
     }
   } else if (value.type === "string") {
-    acpxEnumValues(value);
+    acpxEnumValues(value, "oneOf");
   }
 }
 
@@ -594,20 +595,21 @@ function assertAcpxPropertyValue(name, property, value) {
     throw contractError("invalid_acpx_question_fixture", `native response type for ${name}`);
   }
   const enumValues = property.type === "array"
-    ? acpxEnumValues(property.items)
-    : acpxEnumValues(property);
+    ? acpxEnumValues(property.items, "anyOf")
+    : acpxEnumValues(property, "oneOf");
   const responseValues = Array.isArray(value) ? value : [value];
   if (enumValues.length > 0 && responseValues.some((item) => !enumValues.includes(item))) {
     throw contractError("invalid_acpx_question_fixture", `native response option for ${name}`);
   }
 }
 
-function acpxEnumValues(property) {
+function acpxEnumValues(property, preferredTitledKey) {
   if (!isPlainRecord(property)) return [];
-  const titled = Array.isArray(property.oneOf)
-    ? property.oneOf
-    : Array.isArray(property.anyOf)
-      ? property.anyOf
+  const alternateTitledKey = preferredTitledKey === "anyOf" ? "oneOf" : "anyOf";
+  const titled = Array.isArray(property[preferredTitledKey])
+    ? property[preferredTitledKey]
+    : Array.isArray(property[alternateTitledKey])
+      ? property[alternateTitledKey]
       : null;
   const values = titled === null ? property.enum ?? [] : titled.map((entry) =>
     isPlainRecord(entry) ? entry.const : undefined
