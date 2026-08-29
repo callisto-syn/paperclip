@@ -28,6 +28,7 @@ pub struct AcpxPendingTool {
 pub struct AcpxSemanticResult {
     pub call_id: String,
     pub operation_id: String,
+    pub ok: bool,
     pub result: Value,
 }
 
@@ -350,6 +351,10 @@ impl AcpxProviderState {
                     .and_then(Value::as_str)
                     .expect("decoded ACPX semantic result has an operation id")
                     .to_owned(),
+                ok: payload
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .expect("decoded ACPX semantic result has an outcome"),
                 result: payload
                     .get("result")
                     .expect("decoded ACPX semantic result has a result")

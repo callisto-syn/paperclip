@@ -89,6 +89,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-tool"
             | "turns-tool-terminal"
             | "turns-tool-result-terminal"
+            | "turns-tool-error-result-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -117,6 +118,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "turns-tool"
                             | "turns-tool-terminal"
                             | "turns-tool-result-terminal"
+                            | "turns-tool-error-result-terminal"
                             | "turns-unauthorized-tool"
                     )
                 {
@@ -128,13 +130,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         turn_id,
                         json!({
                             "callId":"call-1",
-                            "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal" | "turns-tool-result-terminal") { "issues.read" } else { "issues.delete" },
+                            "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal" | "turns-tool-result-terminal" | "turns-tool-error-result-terminal") { "issues.read" } else { "issues.delete" },
                             "input":{"id":"issue-1"},
                         }),
                     )?;
                     next_sequence += 1;
                 }
-                if command == "turn.start" && mode == "turns-tool-result-terminal" {
+                if command == "turn.start"
+                    && matches!(
+                        mode,
+                        "turns-tool-result-terminal" | "turns-tool-error-result-terminal"
+                    )
+                {
                     write_turn_event(
                         &mut stdout,
                         next_sequence,
@@ -145,7 +152,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "type":"semantic_result",
                             "callId":"call-1",
                             "operationId":"issues.read",
-                            "result":{"id":"issue-1"},
+                            "ok":mode == "turns-tool-result-terminal",
+                            "result":if mode == "turns-tool-result-terminal" { json!({"id":"issue-1"}) } else { json!({"error":{"code":"tool_failed"}}) },
                         }),
                     )?;
                     next_sequence += 1;

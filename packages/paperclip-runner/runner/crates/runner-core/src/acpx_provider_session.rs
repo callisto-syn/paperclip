@@ -320,11 +320,18 @@ impl AcpxProviderSession {
                             call_id: result.call_id.clone(),
                             operation_id: result.operation_id.clone(),
                             result: result.result.clone(),
-                            is_error: false,
+                            is_error: !result.ok,
                         })
                     {
                         return Err(self.fail_closed(LocalRunnerError::invalid(format!(
                             "ACPX provider tool result reconciliation failed: {error}"
+                        ))));
+                    }
+                    if let Err(error) =
+                        next_state.complete_tool(&result.call_id, &result.operation_id)
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool completion reconciliation failed: {error}"
                         ))));
                     }
                 }

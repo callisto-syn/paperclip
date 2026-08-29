@@ -478,6 +478,7 @@ async function waitForTool(call: RunnerToolCall): Promise<unknown> {
       type: "semantic_result",
       callId,
       operationId,
+      ok: true,
       result: validation.result,
     });
     return { accepted: true };

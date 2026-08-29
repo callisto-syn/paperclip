@@ -199,13 +199,42 @@ fn completed_tool_results_are_not_cancelled_when_the_turn_terminates() {
     assert!(matches!(
         &result[0],
         AcpxProviderStateEvent::SemanticResult(result)
-            if result.call_id == "call-1" && result.operation_id == "issues.read"
+            if result.call_id == "call-1" && result.operation_id == "issues.read" && result.ok
     ));
+    assert!(session.state().pending_tool("call-1").is_none());
 
     let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
     assert_eq!(terminal.len(), 1);
     assert!(matches!(
         &terminal[0],
+        AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
+    ));
+    session.shutdown("test complete").unwrap();
+}
+
+#[test]
+fn failed_semantic_results_preserve_error_status_and_release_pending_capacity() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-tool-error-result-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+    let tool = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(tool[0], AcpxProviderStateEvent::ToolCall { .. }));
+
+    let result = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &result[0],
+        AcpxProviderStateEvent::SemanticResult(result)
+            if result.call_id == "call-1"
+                && !result.ok
+                && result.result["error"]["code"] == "tool_failed"
+    ));
+    assert!(session.state().pending_tool("call-1").is_none());
+
+    let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        terminal.last().unwrap(),
         AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
     ));
     session.shutdown("test complete").unwrap();

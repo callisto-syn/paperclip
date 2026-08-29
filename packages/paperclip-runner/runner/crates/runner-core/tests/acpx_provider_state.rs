@@ -167,6 +167,7 @@ fn accepts_an_identical_semantic_result_once_and_rejects_a_conflict() {
             "type":"semantic_result",
             "callId":"finish-1",
             "operationId":"paperclip_finish",
+            "ok":true,
             "result":{"reportedWorkDisposition":"done"}
         }),
     );
@@ -189,6 +190,7 @@ fn accepts_an_identical_semantic_result_once_and_rejects_a_conflict() {
             "type":"semantic_result",
             "callId":"finish-2",
             "operationId":"paperclip_finish",
+            "ok":true,
             "result":{"reportedWorkDisposition":"done"}
         }),
     );
