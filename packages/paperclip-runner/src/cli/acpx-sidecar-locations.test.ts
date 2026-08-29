@@ -14,10 +14,26 @@ describe("ACPX sidecar locations", () => {
       { uri: "https://example.test/private" },
       { path: "bad\0name" },
     ], "/workspace/project")).toEqual([
-      { path: "src/main.ts", line: 4 },
-      { path: "src:main.ts", line: null },
-      { path: String.raw`folder\literal`, line: null },
-      { path: "reports/100%/summary.txt", line: null },
+      {
+        path: "src/main.ts",
+        line: 4,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: "src:main.ts",
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: String.raw`folder\literal`,
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: "reports/100%/summary.txt",
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
     ]);
   });
 

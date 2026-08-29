@@ -1,5 +1,8 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+export const ACPX_WORKSPACE_RELATIVE_DISPLAY_BOUNDARY =
+  "paperclip.workspace_relative_display.v1";
+
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -38,6 +41,7 @@ export function safeAcpxLocations(
     return [{
       path: [...portable].slice(0, 4_000).join(""),
       line: candidate.line ?? null,
+      pathBoundary: ACPX_WORKSPACE_RELATIVE_DISPLAY_BOUNDARY,
     }];
   });
 }
