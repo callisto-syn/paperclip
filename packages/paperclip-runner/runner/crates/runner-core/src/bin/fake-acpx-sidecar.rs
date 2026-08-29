@@ -104,6 +104,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .get("turnId")
                     .and_then(Value::as_str)
                     .unwrap_or("missing");
+                let tool_call_id = turn_id
+                    .strip_prefix("turn-")
+                    .map(|suffix| format!("call-{suffix}"))
+                    .unwrap_or_else(|| "call-1".to_owned());
                 if command == "turn.start" && matches!(mode, "turns" | "turns-wrong-scope") {
                     write_turn_event(
                         &mut stdout,
@@ -136,7 +140,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "run-1",
                         turn_id,
                         json!({
-                            "callId":"call-1",
+                            "callId":tool_call_id.clone(),
                             "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal" | "turns-tool-result-terminal" | "turns-tool-error-result-terminal") { "issues.read" } else { "issues.delete" },
                             "input":{"id":"issue-1"},
                         }),
@@ -157,7 +161,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         turn_id,
                         json!({
                             "type":"semantic_result",
-                            "callId":"call-1",
+                            "callId":tool_call_id,
                             "operationId":"issues.read",
                             "ok":mode == "turns-tool-result-terminal",
                             "result":if mode == "turns-tool-result-terminal" { json!({"id":"issue-1"}) } else { json!({"error":{"code":"tool_failed"}}) },
