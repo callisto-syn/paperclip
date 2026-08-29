@@ -195,7 +195,7 @@ export class CodexSessionState {
       && this.result !== null
       && this.resultTurnId !== null
       && this.terminalTurns.has(this.resultTurnId);
-    const spentResultlessRecovery =
+    const completedResultlessRecovery =
       input.resumed
       && this.conversationMode === "task"
       && this.result === null
@@ -203,31 +203,27 @@ export class CodexSessionState {
       && dispositionOnlyRecoveryTurnId !== null
       && this.terminalTurns.has(dispositionOnlyRecoveryTurnId)
       && dispositionOnlyRecoveryPreviouslyConsumed;
-    // A result-less terminal proves the prior disposition-only turn stopped,
-    // but it does not prove that its normalized terminal event reached the
-    // control plane. Keep the recovered session startable and release the
-    // one-shot marker. The native runtime first replays durable events and
-    // therefore retries only when that exact terminal is actually missing.
-    this.terminal = settledSemanticResult;
+    // A bound terminal fingerprint plus the consumed marker proves that the
+    // one-shot disposition turn completed at the provider. Its normalized
+    // event may still be absent after a checkpoint/append crash, but recovery
+    // must not convert that durability gap into authority for another provider
+    // submission. The native runtime replays first, then uses the exact bound
+    // fingerprint only as a non-provider policy fallback.
+    this.terminal = settledSemanticResult || completedResultlessRecovery;
     this.dispositionOnlyRecoveryAvailable =
       input.resumed &&
       this.conversationMode === "task" &&
       this.terminalTurns.size > 0 &&
       this.result === null &&
-      (
-        !dispositionOnlyRecoveryPreviouslyConsumed
-        || spentResultlessRecovery
-      );
+      !dispositionOnlyRecoveryPreviouslyConsumed;
     // Recovery itself does not consume the allowance. A checkpoint can occur
     // before startTurn, and consuming it here would strand the run if the
     // process crashed at that boundary. startTurn consumes it in memory; a
     // later recovery adopts provider evidence for an accepted, uncheckpointed
     // turn before deciding whether another submission is safe.
     this.dispositionOnlyRecoveryConsumed =
-      dispositionOnlyRecoveryPreviouslyConsumed && !spentResultlessRecovery;
-    this.dispositionOnlyRecoveryTurnId = spentResultlessRecovery
-      ? null
-      : dispositionOnlyRecoveryTurnId;
+      dispositionOnlyRecoveryPreviouslyConsumed;
+    this.dispositionOnlyRecoveryTurnId = dispositionOnlyRecoveryTurnId;
   }
 
   requireActiveTurn(turnId: string, operation: string): void {

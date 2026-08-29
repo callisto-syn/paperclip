@@ -508,6 +508,60 @@ async function replayCheckpointedTurnTerminal(input: {
   }
 }
 
+function checkpointedResultlessDispositionFallback(input: {
+  persisted: PersistedNativeSession;
+  recovered: PersistedNativeSession;
+  controlPlaneInstanceId: string;
+}): PrpEvent | null {
+  const turnId = input.persisted.dispositionOnlyRecoveryTurnId;
+  if (
+    !input.persisted.dispositionOnlyRecoveryConsumed
+    || input.persisted.semanticResult
+    || input.persisted.activeTurnId
+    || typeof turnId !== "string"
+    || turnId.length === 0
+  ) return null;
+  const persistedTerminal = input.persisted.terminalTurns?.filter(
+    (terminal) => terminal.turnId === turnId,
+  ) ?? [];
+  if (persistedTerminal.length !== 1 || persistedTerminal[0]!.fingerprint.length === 0) {
+    return null;
+  }
+  const recoveredTurnId = input.recovered.dispositionOnlyRecoveryTurnId;
+  const recoveredTerminal = input.recovered.terminalTurns?.filter(
+    (terminal) => terminal.turnId === recoveredTurnId,
+  ) ?? [];
+  if (
+    !input.recovered.dispositionOnlyRecoveryConsumed
+    || input.recovered.semanticResult
+    || input.recovered.activeTurnId
+    || recoveredTurnId !== turnId
+    || recoveredTerminal.length !== 1
+    || recoveredTerminal[0]!.fingerprint !== persistedTerminal[0]!.fingerprint
+    || canonicalJson(input.recovered.identity) !== canonicalJson(input.persisted.identity)
+  ) {
+    throw new Error("native_disposition_recovery_checkpoint_conflict");
+  }
+  return {
+    schema: "paperclip.prp.event.v1",
+    sourceEventId: `${input.controlPlaneInstanceId}:${input.persisted.identity.runId}:checkpointed-disposition-terminal`,
+    sourceSeq: 1,
+    sourceInstanceId: input.controlPlaneInstanceId,
+    sourceKind: "control_plane",
+    runId: input.persisted.identity.runId,
+    normalizedSessionId: input.persisted.identity.sessionId,
+    turnId,
+    eventType: "turn.completed",
+    schemaVersion: 1,
+    priority: 0,
+    emittedAt: new Date().toISOString(),
+    payload: {
+      recovery: "checkpointed_resultless_disposition",
+      terminalFingerprint: persistedTerminal[0]!.fingerprint,
+    },
+  };
+}
+
 /**
  * Package-owned normalized session loop. Paperclip supplies persistence and
  * authority through ControlPlanePort; provider/session behavior stays here.
@@ -766,17 +820,24 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             expectedTurnId: dispositionRecoveryTurnId,
           })
         : null;
-      // The consumed marker proves only that the recovery turn was submitted,
-      // not that its terminal was durably appended. A bound marker keeps
-      // ownership only while recovery still exposes that exact provider turn;
-      // otherwise a missing durable terminal proves that submission never
-      // became observable and the one-shot recovery may be retried. Legacy
-      // unbound markers remain fail-closed unless the driver explicitly clears
-      // them.
-      const checkpointedDispositionTerminal = replayedDisposition !== null;
-      const replayedTerminal = replayedDisposition?.terminal ?? null;
+      // Durable replay remains authoritative. If it has no terminal, an exact
+      // consumed marker bound to the same terminal fingerprint in both
+      // checkpoints proves provider completion without reconstructing provider
+      // output. Give only that non-provider fact to control-plane policy; a
+      // mismatch fails closed and a null policy result fails finalization.
+      const dispositionFallback =
+        dispositionRecoveryWasSubmitted && replayedDisposition === null && persistedSession
+          ? checkpointedResultlessDispositionFallback({
+              persisted: persistedSession,
+              recovered: recoveredSnapshot,
+              controlPlaneInstanceId: options.controlPlaneInstanceId,
+            })
+          : null;
+      const checkpointedDispositionTerminal =
+        replayedDisposition !== null || dispositionFallback !== null;
+      const recoveryTerminal = replayedDisposition?.terminal ?? dispositionFallback;
       const consumptionAbort = new AbortController();
-      const consuming = replayedTerminal === null
+      const consuming = recoveryTerminal === null
         ? consumeTurn(
             session,
             options.controlPlane,
@@ -788,9 +849,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             consumptionAbort.signal,
           )
         : Promise.resolve({
-            event: replayedTerminal,
+            event: recoveryTerminal,
             eventCount: 0,
-            highestContiguousSourceSeq: replayedTerminal.sourceSeq,
+            highestContiguousSourceSeq:
+              replayedDisposition === null ? 0 : recoveryTerminal.sourceSeq,
             governedResult: null,
           });
       // Event consumption must begin before startTurn so an eager provider cannot

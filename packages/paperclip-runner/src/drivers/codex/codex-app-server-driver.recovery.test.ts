@@ -446,16 +446,16 @@ describe("Codex app-server Codex driver", () => {
     await expect(repeatedRecovery!.session!.snapshot()).resolves.toMatchObject({
       activeTurnId: null,
       semanticResult: null,
-      dispositionOnlyRecoveryConsumed: false,
-      dispositionOnlyRecoveryTurnId: null,
+      dispositionOnlyRecoveryConsumed: true,
+      dispositionOnlyRecoveryTurnId: "turn-2",
       terminalTurns: [{ turnId: "turn-1" }, { turnId: "turn-2" }],
     });
     await expect(repeatedRecovery!.session!.startTurn({
-      message: { role: "user", text: "Retry only the missing disposition." },
-    })).resolves.toMatchObject({ turnId: "turn-3" });
+      message: { role: "user", text: "Do not retry the completed disposition." },
+    })).rejects.toThrow("session cannot start another turn");
     expect(
       fourth.calls.filter((call) => call.method === "turn/start"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     await repeatedRecovery!.session!.close({ reason: "test complete" });
   });
 
