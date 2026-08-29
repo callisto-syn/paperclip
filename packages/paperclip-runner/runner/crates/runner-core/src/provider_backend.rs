@@ -19,7 +19,7 @@ use crate::durable::{
 };
 use crate::provider_bridge::{
     authorized_tool_catalog_digest, semantic_value_digest, AuthorizedToolSet, PendingToolCall,
-    ProviderToolBridge, ToolResult, MAX_PENDING_CALLS, TOOL_SET_SCHEMA,
+    ProviderBridgeError, ProviderToolBridge, ToolResult, MAX_PENDING_CALLS, TOOL_SET_SCHEMA,
 };
 use crate::provider_events::{
     normalize_codex_notification, normalized_codex_terminal_event_type, NormalizedProviderEvent,
@@ -341,6 +341,15 @@ struct CodexProviderState {
     next_provider_event_seq: u64,
 }
 
+#[derive(Debug, PartialEq)]
+enum ToolCallAdmission {
+    CompletedReplay(ToolResult),
+    Pending {
+        call: PendingToolCall,
+        reconciled: bool,
+    },
+}
+
 impl CodexProviderState {
     fn new(
         config: CodexProviderConfig,
@@ -574,6 +583,35 @@ impl CodexProviderState {
             self.push_event(event)?;
         }
         Ok(())
+    }
+
+    fn admit_tool_call(
+        &mut self,
+        call_id: &str,
+        operation_id: &str,
+        input: &Value,
+    ) -> Result<ToolCallAdmission, ProviderBridgeError> {
+        if let Some(result) = self
+            .tool_bridge
+            .replay_result(call_id, operation_id, input)?
+        {
+            // An exact completed replay is a transport retry. Its input and
+            // result receipts are already durable, so recording another event
+            // would make an otherwise idempotent replay consume bounded event
+            // capacity and could prevent returning the stored result.
+            return Ok(ToolCallAdmission::CompletedReplay(result));
+        }
+
+        let reconciled = self
+            .tool_bridge
+            .pending_calls()
+            .any(|pending| pending.call_id == call_id);
+        let call = self.tool_bridge.begin_call(
+            call_id.to_owned(),
+            operation_id.to_owned(),
+            input.clone(),
+        )?;
+        Ok(ToolCallAdmission::Pending { call, reconciled })
     }
 
     fn reconcile_active_provider_turn(&mut self, active_provider_turn_id: Option<String>) {
@@ -1458,24 +1496,13 @@ impl CodexCommandExecutor {
         input: Value,
     ) -> Result<(), DurableRunnerError> {
         let identity = self.event_identity()?;
-        let replay = self
+        let admission = self
             .state
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| DurableRunnerError::invalid("Codex provider is not prepared"))?
-            .tool_bridge
-            .replay_result(&call_id, &operation_id, &input);
-        match replay {
-            Ok(Some(result)) => {
-                let call = PendingToolCall {
-                    call_id,
-                    operation_id,
-                    input,
-                };
-                self.state
-                    .as_mut()
-                    .expect("Codex state remains available for a replayed tool call")
-                    .push_event(semantic_input_event(&identity, &call, "reconciled"))?;
-                self.save_state()?;
+            .admit_tool_call(&call_id, &operation_id, &input);
+        match admission {
+            Ok(ToolCallAdmission::CompletedReplay(result)) => {
                 self.provider
                     .as_mut()
                     .expect("provider remains present while handling its tool call")
@@ -1488,38 +1515,23 @@ impl CodexCommandExecutor {
                 return Ok(());
             }
             Err(error) => {
+                if error.is_active_turn_receipt_limit() {
+                    return self.stop_turn_at_tool_receipt_limit(call_id, operation_id);
+                }
                 return self.reject_tool_call(call_id, operation_id, error.to_string());
             }
-            Ok(None) => {}
+            Ok(ToolCallAdmission::Pending { call, reconciled }) => {
+                self.state
+                    .as_mut()
+                    .expect("Codex state remains available while accepting a tool call")
+                    .push_event(semantic_input_event(
+                        &identity,
+                        &call,
+                        if reconciled { "reconciled" } else { "input" },
+                    ))?;
+                self.save_state()
+            }
         }
-
-        let state = self
-            .state
-            .as_mut()
-            .expect("Codex state remains available while accepting a tool call");
-        let was_pending = state
-            .tool_bridge
-            .pending_calls()
-            .any(|pending| pending.call_id == call_id);
-        let call =
-            state
-                .tool_bridge
-                .begin_call(call_id.clone(), operation_id.clone(), input.clone());
-        let call = match call {
-            Ok(call) => call,
-            Err(error) if error.is_active_turn_receipt_limit() => {
-                return self.stop_turn_at_tool_receipt_limit(call_id, operation_id);
-            }
-            Err(error) => {
-                return self.reject_tool_call(call_id, operation_id, error.to_string());
-            }
-        };
-        state.push_event(semantic_input_event(
-            &identity,
-            &call,
-            if was_pending { "reconciled" } else { "input" },
-        ))?;
-        self.save_state()
     }
 
     fn deliver_semantic_result(
@@ -2184,6 +2196,121 @@ mod tests {
         state.validate().unwrap();
         assert!(state.push_terminal_event(ordinary_event()).is_err());
         assert!(serde_json::to_vec(&state).unwrap().len() as u64 <= MAX_PROVIDER_STATE_BYTES);
+    }
+
+    #[test]
+    fn completed_replays_are_read_only_at_the_regular_event_boundary() {
+        let operation = crate::provider_bridge::AuthorizedTool {
+            operation_id: "get_task_context".to_owned(),
+            version: 1,
+            description: "Read the active task context.".to_owned(),
+            input_schema: json!({"type": "object"}),
+            response_schema: json!({"type": "object"}),
+        };
+        let mut bridge = ProviderToolBridge::default();
+        bridge
+            .prepare(AuthorizedToolSet {
+                schema: TOOL_SET_SCHEMA.to_owned(),
+                schema_version: 1,
+                catalog_digest: authorized_tool_catalog_digest(std::slice::from_ref(&operation))
+                    .unwrap(),
+                operations: vec![operation],
+            })
+            .unwrap();
+        bridge
+            .begin_call(
+                "call-replayed".to_owned(),
+                "get_task_context".to_owned(),
+                json!({}),
+            )
+            .unwrap();
+        let replayed_result = ToolResult {
+            call_id: "call-replayed".to_owned(),
+            operation_id: "get_task_context".to_owned(),
+            result: json!({"ok": true}),
+            is_error: false,
+        };
+        bridge.apply_result(replayed_result.clone()).unwrap();
+
+        let mut state = CodexProviderState::new(
+            CodexProviderConfig {
+                provider: "codex".to_owned(),
+                driver: "codex_app_server".to_owned(),
+                provider_version: "test".to_owned(),
+                command: PathBuf::from("codex"),
+                args: vec!["app-server".to_owned()],
+                cwd: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                model: None,
+                provider_session_id: None,
+                instructions: String::new(),
+                approval_policy: "never".to_owned(),
+            },
+            None,
+            bridge,
+        );
+        let identity = ProviderEventIdentity {
+            run_id: "run-1".to_owned(),
+            normalized_session_id: "session-1".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            item_id: "item-1".to_owned(),
+        };
+
+        // Keep the pending window occupied, then model the input and result
+        // receipts retained by the maximum 4,096 completed calls. Only three
+        // regular queued-event slots remain at this boundary.
+        for index in 0..MAX_EVENTS_PER_POLL {
+            state
+                .push_event(NormalizedProviderEvent {
+                    event_type: "provider.notice.recorded".to_owned(),
+                    priority: EventPriority::P1,
+                    payload: json!({"index": index}),
+                })
+                .unwrap();
+        }
+        for index in 0..MAX_PENDING_CALLS {
+            let call = PendingToolCall {
+                call_id: format!("call-{index}"),
+                operation_id: "get_task_context".to_owned(),
+                input: json!({}),
+            };
+            state
+                .push_event(semantic_input_event(&identity, &call, "input"))
+                .unwrap();
+            state
+                .push_event(semantic_result_event(
+                    &identity,
+                    &ToolResult {
+                        call_id: call.call_id,
+                        operation_id: call.operation_id,
+                        result: json!({"ok": true}),
+                        is_error: false,
+                    },
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            MAX_REGULAR_QUEUED_PROVIDER_EVENTS - state.queued_events.len(),
+            3
+        );
+        let pending_len = state.pending_events.len();
+        let queued_len = state.queued_events.len();
+        let next_sequence = state.next_provider_event_seq;
+
+        for _ in 0..4 {
+            assert_eq!(
+                state
+                    .admit_tool_call("call-replayed", "get_task_context", &json!({}))
+                    .unwrap(),
+                ToolCallAdmission::CompletedReplay(replayed_result.clone())
+            );
+        }
+        assert_eq!(state.pending_events.len(), pending_len);
+        assert_eq!(state.queued_events.len(), queued_len);
+        assert_eq!(state.next_provider_event_seq, next_sequence);
+        state.validate().unwrap();
     }
 
     #[test]
