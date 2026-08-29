@@ -232,7 +232,19 @@ describe("agent auth middleware", () => {
       .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ reachedManagedGatewayProtocol: true });
+    expect(res.body).toMatchObject({ reachedManagedGatewayProtocol: true, actorType: "none" });
+  });
+
+  it("does not bypass actor authentication for lookalike managed MCP paths", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+
+    const res = await request(createApp(db, "local_trusted"))
+      .post(`/api/tool-gateway/gateways/${randomUUID()}/mcp/extra`)
+      .set("Authorization", `Bearer pcgw_${randomUUID()}.runtime-secret`)
+      .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain("Agent token did not verify");
   });
 
   it("does not bypass actor authentication for non-gateway bearers on managed MCP routes", async () => {

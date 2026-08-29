@@ -246,6 +246,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       (hasBearerCredentials && publicMcpGatewayProtocolPath.test(req.path))
       || (hasGatewayBearer && managedMcpGatewayProtocolPath.test(req.path))
     ) {
+      req.actor = { type: "none", source: "none" };
       if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;
