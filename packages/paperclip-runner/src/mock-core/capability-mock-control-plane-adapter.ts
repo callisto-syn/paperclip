@@ -822,17 +822,28 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             "fixture approval has already been decided",
           );
         }
+        const requester = approval.requestedByActorId === null
+          ? null
+          : this.#actor(approval.requestedByActorId);
+        const requesterBudgetAvailable = requester === null
+          || !this.#effectiveBudgets(requester).some(
+            (budget) => budget.hardStop && budget.spentCents >= budget.limitCents,
+          );
         let requesterTarget: { actorId: string; taskId: string } | null = null;
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
           if (
-            approval.requestedByActorId !== null &&
-            linkedTask.assigneeActorId === approval.requestedByActorId &&
+            requester !== null &&
+            requester.status === "active" &&
+            requesterBudgetAvailable &&
+            linkedTask.assigneeActorId === requester.id &&
+            linkedTask.checkoutRunId === null &&
+            linkedTask.executionRunId === null &&
             ["backlog", "todo", "blocked", "in_review"].includes(linkedTask.status)
           ) {
             requesterTarget ??= {
-              actorId: approval.requestedByActorId,
+              actorId: requester.id,
               taskId: linkedTask.id,
             };
           }

@@ -724,6 +724,22 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           startedAt: "2026-08-09T00:00:00.000Z",
           completedAt: "2026-08-09T00:01:00.000Z",
         },
+        {
+          id: "task-4",
+          companyId: "company-1",
+          identifier: "MCK-4",
+          title: "Owned requester task",
+          description: null,
+          status: "in_review",
+          priority: "medium",
+          workMode: "standard",
+          parentId: null,
+          assigneeActorId: "actor-2",
+          checkoutRunId: "run-conflict",
+          executionRunId: "run-conflict",
+          startedAt: "2026-08-09T00:00:00.000Z",
+          completedAt: null,
+        },
       ],
       approvals: [
         {
@@ -769,6 +785,19 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           id: "approval-terminal-requester",
           companyId: "company-1",
           taskIds: ["task-1", "task-3"],
+          type: "request_board_approval",
+          status: "pending",
+          requestedByActorId: "actor-2",
+          payload: {},
+          decisionNote: null,
+          comments: [],
+          createdAt: "2026-08-09T00:00:00.000Z",
+          decidedAt: null,
+        },
+        {
+          id: "approval-owned-requester",
+          companyId: "company-1",
+          taskIds: ["task-1", "task-4"],
           type: "request_board_approval",
           status: "pending",
           requestedByActorId: "actor-2",
@@ -830,6 +859,16 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
     await expect(adapter.applyCommand({
       runId: "run-1",
+      idempotencyKey: "owned-requester-approval-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-owned-requester",
+        decision: "approved",
+        note: "A task owned by another run cannot receive the continuation.",
+      },
+    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
+    await expect(adapter.applyCommand({
+      runId: "run-1",
       idempotencyKey: "unlinked-approval-decision",
       command: {
         kind: "decide_approval",
@@ -851,6 +890,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         },
         { id: "approval-unlinked", status: "pending" },
         { id: "approval-terminal-requester", status: "pending" },
+        { id: "approval-owned-requester", status: "pending" },
       ],
     });
     expect(adapter.snapshot().wakes).toEqual([
