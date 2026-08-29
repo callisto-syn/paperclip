@@ -282,6 +282,39 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
+  it("blocks admission while the first retained host close is still pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+      const stalledClose = deferred<void>();
+      fixture.host.close.mockImplementation(() => stalledClose.promise);
+      const session = await fixture.driver.openSession({
+        runId: "run-close-pending-admission",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+
+      const closing = expect(
+        session.close({ reason: "runtime close remains pending" }),
+      ).rejects.toThrow("host cleanup exceeded its shutdown timeout");
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      const admission = fixture.driver.openSession({
+        runId: "run-before-pending-close-settles",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      const blocked = expect(admission).rejects.toThrow("exceeded the admission grace");
+      await vi.advanceTimersByTimeAsync(27_001);
+      await blocked;
+      expect(fixture.openHost).toHaveBeenCalledOnce();
+      stalledClose.resolve();
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retains autonomous host cleanup recovery through repeated failure", async () => {
     const fixture = driverFixture({}, {
       closeSettlementTimeoutMs: 1,
@@ -418,6 +451,42 @@ describe("Codex ACPX harness driver", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await expect(admission).resolves.toBeDefined();
       expect(quarantineAttempt).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("awaits quarantine recovery installed by an exhausted retained owner", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+      fixture.host.close.mockImplementation(({ reason }) => {
+        if (reason.includes("quarantined cleanup recovery")) {
+          return new Promise<void>((resolve) => setTimeout(resolve, 2));
+        }
+        return Promise.reject(new Error("bounded host recovery failed"));
+      });
+      const session = await fixture.driver.openSession({
+        runId: "run-replacement-cleanup-owner",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      const closing = expect(
+        session.close({ reason: "host cleanup must be replaced" }),
+      ).rejects.toThrow("bounded host recovery failed");
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+
+      const admission = fixture.driver.openSession({
+        runId: "run-after-replacement-cleanup",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      const admitted = await admission;
+      expect(fixture.openHost).toHaveBeenCalledTimes(2);
+      fixture.host.close.mockResolvedValue(undefined);
+      await admitted.close({ reason: "complete after replacement cleanup" });
     } finally {
       vi.useRealTimers();
     }
@@ -639,6 +708,7 @@ function driverFixture(
 ): {
   driver: CodexAcpxDriver;
   host: ReturnType<typeof fakeHost>;
+  openHost: ReturnType<typeof vi.fn>;
   hostOptions: OpenAcpxRuntimeHostOptions | null;
   finishTurn(result: Awaited<AcpxRuntimeTurn["result"]>): void;
 } {
@@ -677,11 +747,12 @@ function driverFixture(
     result.resolve({ status: "cancelled", stopReason: "session_closed" }),
   );
   let hostOptions: OpenAcpxRuntimeHostOptions | null = null;
-  const dependencies: CodexAcpxDriverDependencies = {
-    openHost: async (options) => {
+  const openHost = vi.fn(async (options: OpenAcpxRuntimeHostOptions) => {
       hostOptions = options;
       return host;
-    },
+  });
+  const dependencies: CodexAcpxDriverDependencies = {
+    openHost,
     closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
     maxBufferedEvents: fixtureOptions.maxBufferedEvents,
   };
@@ -704,6 +775,7 @@ function driverFixture(
   return {
     driver,
     host,
+    openHost,
     get hostOptions() {
       return hostOptions;
     },

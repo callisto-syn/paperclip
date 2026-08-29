@@ -348,35 +348,50 @@ export class CodexAcpxDriver implements HarnessDriver {
   }
 
   async #retryQuarantinedHostCleanups(): Promise<void> {
-    const observations: Promise<unknown>[] = [];
-    for (const cleanup of this.#quarantinedHostCleanups) {
-      if (cleanup.timer) {
-        clearTimeout(cleanup.timer);
-        cleanup.timer = null;
+    const deadline = Date.now() + QUARANTINED_HOST_ADMISSION_GRACE_MS;
+    const observedOwners = new Set<Promise<void>>();
+    const acceleratedCleanups = new Set<QuarantinedHostCleanup>();
+    while (true) {
+      // A close that is still pending has not entered quarantine yet, but it
+      // owns the same provider resources. Observe every retained owner and any
+      // replacement quarantine recovery it installs before admitting a host.
+      const cleanupOwners = new Set<Promise<void>>(this.#cleanupOwners);
+      for (const cleanup of this.#quarantinedHostCleanups) {
+        if (cleanup.timer) {
+          clearTimeout(cleanup.timer);
+          cleanup.timer = null;
+        }
+        if (cleanup.recovery) {
+          acceleratedCleanups.add(cleanup);
+          cleanupOwners.add(cleanup.recovery);
+        } else if (!acceleratedCleanups.has(cleanup)) {
+          acceleratedCleanups.add(cleanup);
+          cleanupOwners.add(this.#startQuarantinedHostCleanupRecovery(
+            cleanup,
+            1,
+            "quarantined cleanup admission recovery",
+          ));
+        }
       }
-      const recovery = cleanup.recovery ??
-        this.#startQuarantinedHostCleanupRecovery(
-          cleanup,
-          1,
-          "quarantined cleanup admission recovery",
-        );
-      // Admission observes the exact cleanup owner. Its first close begins
-      // immediately, so the finite admission grace is not consumed by the
-      // retry delay. A rejected recovery remains quarantined below.
-      observations.push(recovery.catch(() => undefined));
-    }
-    if (
-      observations.length > 0 &&
-      !(await settlesWithin(
-        Promise.all(observations),
-        QUARANTINED_HOST_ADMISSION_GRACE_MS,
-      ))
-    ) {
-      throw new Error(
-        "Codex ACPX cannot open a new session because quarantined host cleanup exceeded the admission grace",
+      const replacementOwners = [...cleanupOwners].filter(
+        (owner) => !observedOwners.has(owner),
       );
+      if (replacementOwners.length === 0) break;
+      replacementOwners.forEach((owner) => observedOwners.add(owner));
+      const remainingMs = deadline - Date.now();
+      if (
+        remainingMs <= 0
+        || !(await settlesWithin(
+          Promise.all(replacementOwners.map((owner) => owner.catch(() => undefined))),
+          remainingMs,
+        ))
+      ) {
+        throw new Error(
+          "Codex ACPX cannot open a new session because quarantined host cleanup exceeded the admission grace",
+        );
+      }
     }
-    if (this.#quarantinedHostCleanups.size > 0) {
+    if (this.#cleanupOwners.size > 0 || this.#quarantinedHostCleanups.size > 0) {
       throw new Error(
         "Codex ACPX cannot open a new session while quarantined host cleanup remains incomplete",
       );

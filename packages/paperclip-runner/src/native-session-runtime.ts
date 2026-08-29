@@ -249,33 +249,45 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
   // entered the retry quarantine below. Observe both states through the same
   // finite gate to prevent a later execution from opening a second provider
   // session while the first close still owns provider resources.
-  const cleanupOwners = new Set<Promise<void>>(failedSessionCleanupOwners);
-  for (const cleanup of quarantinedSessionCleanups) {
-    if (cleanup.timer) {
-      clearTimeout(cleanup.timer);
-      cleanup.timer = null;
+  const deadline = Date.now() + QUARANTINED_SESSION_ADMISSION_GRACE_MS;
+  const observedOwners = new Set<Promise<void>>();
+  const acceleratedCleanups = new Set<QuarantinedSessionCleanup>();
+  while (true) {
+    const cleanupOwners = new Set<Promise<void>>(failedSessionCleanupOwners);
+    for (const cleanup of quarantinedSessionCleanups) {
+      if (cleanup.timer) {
+        clearTimeout(cleanup.timer);
+        cleanup.timer = null;
+      }
+      if (cleanup.recovery) {
+        acceleratedCleanups.add(cleanup);
+        cleanupOwners.add(cleanup.recovery);
+      } else if (!acceleratedCleanups.has(cleanup)) {
+        acceleratedCleanups.add(cleanup);
+        cleanupOwners.add(startQuarantinedSessionCleanupRecovery(
+          cleanup,
+          1,
+          "native session quarantined admission recovery",
+        ));
+      }
     }
-    const recovery = cleanup.recovery
-      ?? startQuarantinedSessionCleanupRecovery(
-        cleanup,
-        1,
-        "native session quarantined admission recovery",
-      );
-    // Observe the exact owner for one finite admission grace, but never let a
-    // broken close promise block every later execution indefinitely. The first
-    // recovery attempt starts without consuming that grace on a retry delay.
-    cleanupOwners.add(recovery);
-  }
-  if (
-    cleanupOwners.size > 0
-    && !(await settlesWithin(
-      Promise.all([...cleanupOwners].map((owner) => owner.catch(() => undefined))),
-      QUARANTINED_SESSION_ADMISSION_GRACE_MS,
-    ))
-  ) {
-    throw new Error(
-      "native_session_cleanup_quarantined: prior session cleanup exceeded the admission grace",
+    const replacementOwners = [...cleanupOwners].filter(
+      (owner) => !observedOwners.has(owner),
     );
+    if (replacementOwners.length === 0) break;
+    replacementOwners.forEach((owner) => observedOwners.add(owner));
+    const remainingMs = deadline - Date.now();
+    if (
+      remainingMs <= 0
+      || !(await settlesWithin(
+        Promise.all(replacementOwners.map((owner) => owner.catch(() => undefined))),
+        remainingMs,
+      ))
+    ) {
+      throw new Error(
+        "native_session_cleanup_quarantined: prior session cleanup exceeded the admission grace",
+      );
+    }
   }
   if (
     failedSessionCleanupOwners.size > 0

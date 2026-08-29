@@ -276,6 +276,89 @@ describe("executeNativeSession recovery", () => {
     }
   });
 
+  it("awaits the quarantine owner that replaces an exhausted close recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      let executionCloseCount = 0;
+      const close = vi.fn(({ reason }: { reason: string }) => {
+        if (reason === "native session execution complete") {
+          executionCloseCount += 1;
+          return executionCloseCount === 1
+            ? Promise.reject(new Error("initial close failed"))
+            : Promise.resolve();
+        }
+        if (reason.startsWith("native session cleanup recovery after close failure")) {
+          return Promise.reject(new Error("bounded close recovery failed"));
+        }
+        if (reason === "native session quarantined cleanup recovery") {
+          return new Promise<void>((resolve) => setTimeout(resolve, 50));
+        }
+        return Promise.resolve();
+      });
+      const session: NativeSession = {
+        identity: () => identity,
+        async capabilities() {
+          return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+        },
+        async *events() { yield runnerEvent(1, "turn.completed"); },
+        async startTurn() { return { turnId: "turn-recovery" }; },
+        async result() { return { result, terminal, turnId: "turn-recovery" }; },
+        async snapshot() {
+          return {
+            backendKind: "mock",
+            sessionId: "driver-recovery",
+            identity,
+            providerSessionId: "provider-recovery",
+            cursor: null,
+            activeTurnId: null,
+            pendingRuntimeRequests: [],
+            lineage: [],
+          };
+        },
+        close,
+      };
+      const openSession = vi.fn(async () => session);
+      const backend: NativeSessionBackend = {
+        async descriptor() {
+          return {
+            kind: "mock",
+            name: "recovery-backend",
+            version: "1",
+            capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+          };
+        },
+        openSession,
+      };
+      const port: ControlPlanePort = {
+        async openRun() {},
+        async checkpointSession() {},
+        async appendEvent() {
+          return { cursor: 1, highestContiguousSourceSeq: 1, disposition: "committed" };
+        },
+        async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+        async completeRun() {},
+      };
+      const execute = () => executeNativeSession({
+        input,
+        backend,
+        controlPlane: port,
+        runnerInstanceId: "runner-recovery",
+        controlPlaneInstanceId: "control-recovery",
+      });
+
+      await expect(execute()).resolves.toMatchObject({ result });
+      const admitted = execute();
+      await vi.advanceTimersByTimeAsync(3_100);
+      await expect(admitted).resolves.toMatchObject({ result });
+      expect(openSession).toHaveBeenCalledTimes(2);
+      expect(close).toHaveBeenCalledWith({
+        reason: "native session quarantined cleanup recovery",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails admission within a bound when quarantined close never settles", async () => {
     vi.useFakeTimers();
     try {
