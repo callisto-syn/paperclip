@@ -203,6 +203,13 @@ describeEmbeddedPostgres("native Codex server vertical slice", () => {
           resolve(runtimeRoot, "fake-codex-calls.log"),
           "--require-dynamic-tool",
           "--emit-tool-call",
+          "--expected-canonical-task-context",
+          JSON.stringify({
+            companyId,
+            actorId: agentId,
+            taskId: issueId,
+            runId,
+          }),
         ],
         providerVersion: "fake-codex-v1",
       },
