@@ -4,6 +4,7 @@ import { validatePrpEvent, type PrpEvent } from "./replay-contract.js";
 import {
   createPrpBudgetStopReason,
   createPrpSemanticToolInputEnvelope,
+  createPrpSemanticToolReconciledEnvelope,
   createPrpSemanticToolResultEnvelope,
   semanticAuthorizationBoundaryForCode,
 } from "./semantic-tool-receipts.js";
@@ -90,28 +91,29 @@ describe("PRP provider-neutral semantic receipts", () => {
     });
   });
 
-  it("validates the digest-only receipt emitted when a pending tool call is reconciled", () => {
-    const semanticTool = {
-      schema: "paperclip.prp.semantic_tool.v1",
-      schemaVersion: 1,
-      phase: "reconciled",
+  it("requires a complete terminal receipt when a pending tool call is reconciled", () => {
+    const semanticTool = createPrpSemanticToolReconciledEnvelope({
       operationId: "get_task_context",
       callId: "call_reconciled_test",
       correlation,
-      idempotencyKey: null,
-      content: {
-        digest: `sha256:${"a".repeat(64)}`,
-        redactionDisposition: "digest_only",
-        references: [],
-      },
-    };
+      content: {},
+      outcome: "succeeded",
+      code: "recovered_receipt",
+      retryable: false,
+      authorizationBoundary: "active_task",
+    });
     const reconciled = event("semantic_tool.reconciled", semanticTool);
 
     expect(validatePrpEvent(reconciled).ok).toBe(true);
     expect(
       validatePrpEvent({
         ...reconciled,
-        payload: { semantic_tool: { ...semanticTool, phase: "input" } },
+        payload: {
+          semantic_tool: {
+            ...semanticTool,
+            outcome: undefined,
+          },
+        },
       }).ok,
     ).toBe(false);
   });

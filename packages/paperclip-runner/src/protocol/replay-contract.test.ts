@@ -34,6 +34,30 @@ async function readFixture(
   ) as Record<string, unknown>;
 }
 
+function reconciledEvent(
+  events: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  const reconciled = structuredClone(events[0]!);
+  reconciled.sourceEventId = "semantic_happy_reconciled";
+  reconciled.sourceSeq = 2;
+  reconciled.eventType = "semantic_tool.reconciled";
+  const payload = reconciled.payload as Record<string, unknown>;
+  const semanticTool = payload.semantic_tool as Record<string, unknown>;
+  const resultPayload = events[1]!.payload as Record<string, unknown>;
+  const result = resultPayload.semantic_tool as Record<string, unknown>;
+  semanticTool.phase = "reconciled";
+  for (const field of [
+    "outcome",
+    "code",
+    "retryable",
+    "authorizationBoundary",
+    "operationReceiptId",
+  ]) {
+    semanticTool[field] = structuredClone(result[field]);
+  }
+  return reconciled;
+}
+
 describe("PRP v1 JSON Schema contract", () => {
   for (const fixtureName of validFixtures) {
     it(`validates ${fixtureName}`, async () => {
@@ -102,29 +126,31 @@ describe("PRP v1 JSON Schema contract", () => {
   it("accepts a pending semantic call closed by reconciliation alone", async () => {
     const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
     const events = fixture.events as Array<Record<string, unknown>>;
-    const reconciled = structuredClone(events[0]!);
-    reconciled.sourceEventId = "semantic_happy_reconciled";
-    reconciled.sourceSeq = 2;
-    reconciled.eventType = "semantic_tool.reconciled";
-    const payload = reconciled.payload as Record<string, unknown>;
-    (payload.semantic_tool as Record<string, unknown>).phase = "reconciled";
+    const reconciled = reconciledEvent(events);
     events[1] = reconciled;
 
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
       ok: true,
+    });
+
+    const semanticTool = (
+      reconciled.payload as Record<string, unknown>
+    ).semantic_tool as Record<string, unknown>;
+    delete semanticTool.outcome;
+    expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "schema_validation" }),
+      ]),
     });
   });
 
   it("binds a pending-call reconciliation to its original semantic input", async () => {
     const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
     const events = fixture.events as Array<Record<string, unknown>>;
-    const reconciled = structuredClone(events[0]!);
-    reconciled.sourceEventId = "semantic_happy_reconciled";
-    reconciled.sourceSeq = 2;
-    reconciled.eventType = "semantic_tool.reconciled";
+    const reconciled = reconciledEvent(events);
     const payload = reconciled.payload as Record<string, unknown>;
     const semanticTool = payload.semantic_tool as Record<string, unknown>;
-    semanticTool.phase = "reconciled";
     events[1] = reconciled;
 
     expect(parsePrpFixtureText(JSON.stringify(fixture))).toMatchObject({
@@ -163,12 +189,7 @@ describe("PRP v1 JSON Schema contract", () => {
   it("rejects result and reconciliation as two terminal phases for one call", async () => {
     const fixture = await readFixture("semantic-tool-artifact-happy-path.json");
     const events = fixture.events as Array<Record<string, unknown>>;
-    const reconciled = structuredClone(events[0]!);
-    reconciled.sourceEventId = "semantic_happy_reconciled";
-    reconciled.sourceSeq = 2;
-    reconciled.eventType = "semantic_tool.reconciled";
-    const payload = reconciled.payload as Record<string, unknown>;
-    (payload.semantic_tool as Record<string, unknown>).phase = "reconciled";
+    const reconciled = reconciledEvent(events);
     for (const event of events.slice(1)) {
       event.sourceSeq = Number(event.sourceSeq) + 1;
     }

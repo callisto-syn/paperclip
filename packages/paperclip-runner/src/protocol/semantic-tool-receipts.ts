@@ -102,11 +102,25 @@ export function createPrpSemanticToolInputEnvelope(
 export function createPrpSemanticToolResultEnvelope(
   input: CreatePrpSemanticToolResultInput,
 ): PrpSemanticToolEnvelope {
+  return createPrpSemanticToolTerminalEnvelope(input, "result");
+}
+
+/** Creates a complete terminal receipt for an outcome recovered after restart. */
+export function createPrpSemanticToolReconciledEnvelope(
+  input: CreatePrpSemanticToolResultInput,
+): PrpSemanticToolEnvelope {
+  return createPrpSemanticToolTerminalEnvelope(input, "reconciled");
+}
+
+function createPrpSemanticToolTerminalEnvelope(
+  input: CreatePrpSemanticToolResultInput,
+  phase: "result" | "reconciled",
+): PrpSemanticToolEnvelope {
   const operationReceiptId = input.operationReceiptId ?? derivedReceiptId(input);
   return {
     schema: "paperclip.prp.semantic_tool.v1",
     schemaVersion: 1,
-    phase: "result",
+    phase,
     operationId: input.operationId,
     callId: input.callId,
     correlation: { ...input.correlation },

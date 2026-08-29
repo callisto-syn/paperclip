@@ -80,7 +80,10 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "phase": { "const": "result" } } },
+      "if": {
+        "properties": { "phase": { "enum": ["result", "reconciled"] } },
+        "required": ["phase"]
+      },
       "then": {
         "required": [
           "outcome",

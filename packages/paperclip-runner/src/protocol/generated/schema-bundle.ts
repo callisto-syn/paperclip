@@ -2003,9 +2003,15 @@ export const semanticToolSchema = {
       "if": {
         "properties": {
           "phase": {
-            "const": "result"
+            "enum": [
+              "result",
+              "reconciled"
+            ]
           }
-        }
+        },
+        "required": [
+          "phase"
+        ]
       },
       "then": {
         "required": [

@@ -80,7 +80,7 @@
     {
       "path": "schemas/semantic-tool.schema.json",
       "id": "https://paperclip.dev/schemas/prp/v1/semantic-tool.schema.json",
-      "sha256": "287213dcd46241bfa12b6586993e563e44c66aa072601d5228a50e574666266d"
+      "sha256": "72dba6b17be1358160633e2ac430002b8be1ab311a236289a942cb05b21385da"
     },
     {
       "path": "schemas/stop-reason.schema.json",
