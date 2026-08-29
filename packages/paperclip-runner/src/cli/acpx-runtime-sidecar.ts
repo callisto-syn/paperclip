@@ -51,11 +51,10 @@ import {
   recordAcpxBootstrapFailure,
 } from "./acpx-sidecar-input.js";
 import {
-  awaitSidecarCleanupWithin,
   boundedIdentity,
-  closeActiveSidecarHostWithin,
   closeSidecarHostForCommand,
   combineSidecarAdmissionCleanups,
+  observeSidecarCleanupWithin,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   recoverSidecarHostCleanup,
@@ -1025,41 +1024,60 @@ async function shutdown(reason: string): Promise<void> {
   if (closing) return;
   closing = true;
   if (turnId) rejectTurnWaiters(turnId, reason);
-  let cleanupDeferred = false;
-  if (host) {
+  const cleanupOwners: Array<{
+    kind: "active_host" | "failed_admission";
+    cleanup: Promise<void>;
+  }> = [];
+  if (activeHostCleanup) {
+    // A timed-out close or suspension already owns sequential provider
+    // cleanup. Join that exact owner; starting another host.close here would
+    // overlap it and still lose its eventual failure.
+    cleanupOwners.push({ kind: "active_host", cleanup: activeHostCleanup });
+  } else if (host) {
     const activeHost = host;
-    const cleanupDisposition = await closeActiveSidecarHostWithin(
-      activeHost,
-      reason,
-      undefined,
-      (cleanup) => retainActiveHostCleanup(activeHost, cleanup),
-    );
-    if (cleanupDisposition === "deferred") {
-      cleanupDeferred = true;
+    const cleanup = activeHost.close({ reason });
+    retainActiveHostCleanup(activeHost, cleanup);
+    cleanupOwners.push({ kind: "active_host", cleanup });
+  }
+  if (failedAdmissionCleanup) {
+    cleanupOwners.push({
+      kind: "failed_admission",
+      cleanup: failedAdmissionCleanup,
+    });
+  }
+  let cleanupIncomplete = false;
+  const outcomes = await Promise.all(cleanupOwners.map(async (owner) => ({
+    ...owner,
+    outcome: await observeSidecarCleanupWithin(owner.cleanup),
+  })));
+  for (const { kind, outcome } of outcomes) {
+    if (outcome.status === "deferred") {
+      cleanupIncomplete = true;
       diagnostic(
-        "active_host_cleanup_deferred",
-        "ACPX active-host cleanup exceeded the bounded shutdown wait.",
+        kind === "active_host"
+          ? "active_host_cleanup_deferred"
+          : "failed_admission_cleanup_deferred",
+        kind === "active_host"
+          ? "ACPX active-host cleanup exceeded the bounded shutdown wait."
+          : "ACPX failed-admission cleanup remains owned after the bounded shutdown wait.",
+      );
+    } else if (outcome.status === "failed") {
+      cleanupIncomplete = true;
+      diagnostic(
+        kind === "active_host"
+          ? "active_host_cleanup_failed"
+          : "failed_admission_cleanup_failed",
+        safeMessage(outcome.error),
       );
     }
   }
-  const retainedCleanup = failedAdmissionCleanup;
-  if (retainedCleanup) {
-    const cleanupDisposition = await awaitSidecarCleanupWithin(retainedCleanup);
-    if (cleanupDisposition === "deferred") {
-      cleanupDeferred = true;
-      diagnostic(
-        "failed_admission_cleanup_deferred",
-        "ACPX failed-admission cleanup remains owned after the bounded shutdown wait.",
-      );
-    }
-  }
-  if (!cleanupDeferred) host = null;
+  if (!cleanupIncomplete) host = null;
   openParams = null;
   runId = null;
   turnId = null;
   lines.close();
   process.stdin.pause();
-  process.exitCode = 0;
+  process.exitCode = cleanupIncomplete ? 1 : 0;
 }
 
 function retainActiveHostCleanup(

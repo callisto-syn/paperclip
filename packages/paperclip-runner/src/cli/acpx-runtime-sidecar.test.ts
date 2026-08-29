@@ -9,6 +9,7 @@ import {
   closeActiveSidecarHostWithin,
   closeSidecarHostForCommand,
   combineSidecarAdmissionCleanups,
+  observeSidecarCleanupWithin,
   parseAcpxRunAttachment,
   readSidecarHostStatusWithin,
   recoverSidecarHostCleanup,
@@ -76,6 +77,16 @@ describe("Codex ACPX runtime sidecar", () => {
     await cleanup;
     expect(settled).toBe(true);
     await expect(awaitSidecarCleanupWithin(cleanup, 1)).resolves.toBe("settled");
+  });
+
+  it("preserves retained cleanup failure for shutdown accounting", async () => {
+    const failure = new Error("provider cleanup failed");
+    await expect(
+      observeSidecarCleanupWithin(Promise.reject(failure), 1),
+    ).resolves.toEqual({ status: "failed", error: failure });
+    await expect(
+      observeSidecarCleanupWithin(new Promise<void>(() => undefined), 1),
+    ).resolves.toEqual({ status: "deferred" });
   });
 
   it("preserves failed-admission rejection until every cleanup settles", async () => {

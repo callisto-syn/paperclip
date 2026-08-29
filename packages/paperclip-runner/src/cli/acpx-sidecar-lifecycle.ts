@@ -32,15 +32,28 @@ export async function awaitSidecarCleanupWithin(
   cleanup: Promise<void>,
   timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
 ): Promise<"settled" | "deferred"> {
+  const outcome = await observeSidecarCleanupWithin(cleanup, timeoutMs);
+  return outcome.status === "deferred" ? "deferred" : "settled";
+}
+
+export type SidecarCleanupOutcome =
+  | { status: "settled" }
+  | { status: "deferred" }
+  | { status: "failed"; error: unknown };
+
+export async function observeSidecarCleanupWithin(
+  cleanup: Promise<void>,
+  timeoutMs = FAILED_ADMISSION_CLOSE_TIMEOUT_MS,
+): Promise<SidecarCleanupOutcome> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       cleanup.then(
-        () => "settled" as const,
-        () => "settled" as const,
+        () => ({ status: "settled" as const }),
+        (error: unknown) => ({ status: "failed" as const, error }),
       ),
-      new Promise<"deferred">((resolve) => {
-        timer = setTimeout(() => resolve("deferred"), timeoutMs);
+      new Promise<SidecarCleanupOutcome>((resolve) => {
+        timer = setTimeout(() => resolve({ status: "deferred" }), timeoutMs);
         timer.unref();
       }),
     ]);
