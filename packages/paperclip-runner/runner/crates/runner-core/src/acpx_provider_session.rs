@@ -10,7 +10,10 @@ use crate::generated_acpx_sidecar_contract::{
     GeneratedAcpxSidecarCommand, GENERATED_ACPX_SIDECAR_PROTOCOL_VERSION,
 };
 use crate::local_runner::LocalRunnerError;
-use crate::provider_bridge::{AuthorizedToolSet, ProviderToolBridge};
+use crate::provider_bridge::{
+    authorized_tool_catalog_digest, AuthorizedTool, AuthorizedToolSet, ProviderToolBridge,
+    TOOL_SET_SCHEMA,
+};
 
 const MAX_ID_CHARS: usize = 240;
 const MAX_MODEL_CHARS: usize = 240;
@@ -112,10 +115,21 @@ impl AcpxProviderSessionConfig {
                 "ACPX system instructions exceed their bounded contract",
             ));
         }
+        if self
+            .tool_set
+            .operations
+            .iter()
+            .any(|tool| is_reserved_terminal_operation(&tool.operation_id))
+        {
+            return Err(LocalRunnerError::invalid(
+                "ACPX run catalog cannot replace reserved terminal tools",
+            ));
+        }
         let mut bridge = ProviderToolBridge::default();
         bridge.prepare(self.tool_set.clone()).map_err(|error| {
             LocalRunnerError::invalid(format!("ACPX authorized tools are invalid: {error}"))
         })?;
+        reserved_terminal_tool_bridge()?;
         if let Some(expected_identity) = self.expected_identity.as_ref() {
             expected_identity.validate()?;
             if expected_identity.normalized_session_id != self.normalized_session_id
@@ -167,6 +181,7 @@ pub struct AcpxProviderSession {
     transport: AcpxSidecarTransport,
     state: AcpxProviderState,
     tool_bridge: ProviderToolBridge,
+    reserved_tool_bridge: ProviderToolBridge,
     identity: AcpxProviderSessionIdentity,
     catalog_revision: u64,
     working_directory: PathBuf,
@@ -182,6 +197,7 @@ impl AcpxProviderSession {
             .map_err(|error| {
                 LocalRunnerError::invalid(format!("ACPX authorized tools are invalid: {error}"))
             })?;
+        let reserved_tool_bridge = reserved_terminal_tool_bridge()?;
         let mut transport = AcpxSidecarTransport::start(&config.transport)?;
         let bootstrap = bootstrap(&mut transport, config);
         let (identity, state) = match bootstrap {
@@ -195,6 +211,7 @@ impl AcpxProviderSession {
             transport,
             state,
             tool_bridge,
+            reserved_tool_bridge,
             identity,
             catalog_revision: config.catalog_revision,
             working_directory: config.working_directory.clone(),
@@ -300,16 +317,40 @@ impl AcpxProviderSession {
             Err(error) => return Err(self.fail_closed(error)),
         };
         let mut next_bridge = self.tool_bridge.clone();
+        let mut next_reserved_bridge = self.reserved_tool_bridge.clone();
         let mut reconciled_events = Vec::with_capacity(events.len());
         for event in events {
+            let mut expose_event = true;
             match &event {
                 AcpxProviderStateEvent::ToolCall {
                     call_id,
                     operation_id,
                     input,
                 } => {
+                    let bridge = if is_reserved_terminal_operation(operation_id) {
+                        if let Err(error) = validate_reserved_terminal_value(operation_id, input) {
+                            return Err(self.fail_closed(error));
+                        }
+                        // These built-ins are authorized by the same ledger as
+                        // dynamic tools, but the server dispatcher must never
+                        // execute them as ordinary semantic operations.
+                        expose_event = false;
+                        if next_bridge.has_completed_call(call_id) {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(
+                                "ACPX reused a completed dynamic call id for a reserved terminal invocation",
+                            )));
+                        }
+                        &mut next_reserved_bridge
+                    } else {
+                        if next_reserved_bridge.has_completed_call(call_id) {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(
+                                "ACPX reused a completed reserved call id for a dynamic tool invocation",
+                            )));
+                        }
+                        &mut next_bridge
+                    };
                     if let Err(error) =
-                        next_bridge.begin_call(call_id.clone(), operation_id.clone(), input.clone())
+                        bridge.begin_call(call_id.clone(), operation_id.clone(), input.clone())
                     {
                         return Err(self.fail_closed(LocalRunnerError::invalid(format!(
                             "ACPX provider tool authorization failed: {error}"
@@ -321,9 +362,8 @@ impl AcpxProviderSession {
                         if let Err(error) = validate_reserved_terminal_result(&next_state, result) {
                             return Err(self.fail_closed(error));
                         }
-                    } else {
                         if let Err(error) =
-                            next_bridge.apply_result(crate::provider_bridge::ToolResult {
+                            next_reserved_bridge.apply_result(crate::provider_bridge::ToolResult {
                                 call_id: result.call_id.clone(),
                                 operation_id: result.operation_id.clone(),
                                 result: result.result.clone(),
@@ -331,16 +371,27 @@ impl AcpxProviderSession {
                             })
                         {
                             return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                                "ACPX provider tool result reconciliation failed: {error}"
+                                "ACPX reserved terminal result reconciliation failed: {error}"
                             ))));
                         }
-                        if let Err(error) =
-                            next_state.complete_tool(&result.call_id, &result.operation_id)
-                        {
-                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                                "ACPX provider tool completion reconciliation failed: {error}"
-                            ))));
-                        }
+                    } else if let Err(error) =
+                        next_bridge.apply_result(crate::provider_bridge::ToolResult {
+                            call_id: result.call_id.clone(),
+                            operation_id: result.operation_id.clone(),
+                            result: result.result.clone(),
+                            is_error: !result.ok,
+                        })
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool result reconciliation failed: {error}"
+                        ))));
+                    }
+                    if let Err(error) =
+                        next_state.complete_tool(&result.call_id, &result.operation_id)
+                    {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                            "ACPX provider tool completion reconciliation failed: {error}"
+                        ))));
                     }
                 }
                 AcpxProviderStateEvent::TurnTerminal { .. } => {
@@ -352,6 +403,21 @@ impl AcpxProviderSession {
                             ))));
                         }
                     };
+                    let reserved_settlements = match next_reserved_bridge
+                        .settle_turn("acpx_reserved_terminal_unsettled")
+                    {
+                        Ok(settlements) => settlements,
+                        Err(error) => {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX reserved terminal settlement failed: {error}"
+                            ))));
+                        }
+                    };
+                    if !reserved_settlements.is_empty() {
+                        return Err(self.fail_closed(LocalRunnerError::invalid(
+                            "ACPX turn terminated before its reserved terminal invocation produced a correlated result",
+                        )));
+                    }
                     reconciled_events.extend(
                         settlements
                             .into_iter()
@@ -360,10 +426,13 @@ impl AcpxProviderSession {
                 }
                 _ => {}
             }
-            reconciled_events.push(event);
+            if expose_event {
+                reconciled_events.push(event);
+            }
         }
         self.state = next_state;
         self.tool_bridge = next_bridge;
+        self.reserved_tool_bridge = next_reserved_bridge;
         Ok(Some(reconciled_events))
     }
 
@@ -401,10 +470,11 @@ impl AcpxProviderSession {
 }
 
 fn is_reserved_terminal_result(result: &crate::acpx_provider_state::AcpxSemanticResult) -> bool {
-    matches!(
-        result.operation_id.as_str(),
-        PRP_COMPLETION_TOOL_NAME | PRP_BLOCK_TOOL_NAME
-    )
+    is_reserved_terminal_operation(&result.operation_id)
+}
+
+fn is_reserved_terminal_operation(operation_id: &str) -> bool {
+    matches!(operation_id, PRP_COMPLETION_TOOL_NAME | PRP_BLOCK_TOOL_NAME)
 }
 
 fn validate_reserved_terminal_result(
@@ -416,17 +486,26 @@ fn validate_reserved_terminal_result(
             "ACPX reserved semantic result reported a failed outcome",
         ));
     }
-    if state.pending_tool(&result.call_id).is_some() {
+    let pending = state.pending_tool(&result.call_id).ok_or_else(|| {
+        LocalRunnerError::invalid(
+            "ACPX reserved semantic result has no authorized pending invocation",
+        )
+    })?;
+    if pending.operation_id != result.operation_id || pending.input != result.result {
         return Err(LocalRunnerError::invalid(
-            "ACPX reserved semantic result collided with a pending tool call",
+            "ACPX reserved semantic result does not match its authorized invocation",
         ));
     }
-    validate_prp_run_result(&result.result)?;
-    let disposition = result
-        .result
-        .get("reportedWorkDisposition")
-        .and_then(Value::as_str);
-    let disposition_matches = match result.operation_id.as_str() {
+    validate_reserved_terminal_value(&result.operation_id, &result.result)
+}
+
+fn validate_reserved_terminal_value(
+    operation_id: &str,
+    value: &Value,
+) -> Result<(), LocalRunnerError> {
+    validate_prp_run_result(value)?;
+    let disposition = value.get("reportedWorkDisposition").and_then(Value::as_str);
+    let disposition_matches = match operation_id {
         PRP_BLOCK_TOOL_NAME => disposition == Some("blocked"),
         PRP_COMPLETION_TOOL_NAME => {
             matches!(disposition, Some("done" | "needs_review" | "yielded"))
@@ -439,6 +518,44 @@ fn validate_reserved_terminal_result(
         ));
     }
     Ok(())
+}
+
+fn reserved_terminal_tool_bridge() -> Result<ProviderToolBridge, LocalRunnerError> {
+    let result_schema: Value = serde_json::from_str(include_str!(
+        "../../../../protocol/schemas/result.schema.json"
+    ))
+    .map_err(|_| LocalRunnerError::invalid("embedded Paperclip result schema is invalid"))?;
+    let operations = vec![
+        AuthorizedTool {
+            operation_id: PRP_COMPLETION_TOOL_NAME.to_owned(),
+            version: 1,
+            description: "Return the authoritative Paperclip completion result.".to_owned(),
+            input_schema: result_schema.clone(),
+            response_schema: result_schema.clone(),
+        },
+        AuthorizedTool {
+            operation_id: PRP_BLOCK_TOOL_NAME.to_owned(),
+            version: 1,
+            description: "Return the authoritative Paperclip blocked result.".to_owned(),
+            input_schema: result_schema.clone(),
+            response_schema: result_schema,
+        },
+    ];
+    let catalog_digest = authorized_tool_catalog_digest(&operations).map_err(|error| {
+        LocalRunnerError::invalid(format!("ACPX reserved terminal tools are invalid: {error}"))
+    })?;
+    let mut bridge = ProviderToolBridge::default();
+    bridge
+        .prepare(AuthorizedToolSet {
+            schema: TOOL_SET_SCHEMA.to_owned(),
+            schema_version: 1,
+            catalog_digest,
+            operations,
+        })
+        .map_err(|error| {
+            LocalRunnerError::invalid(format!("ACPX reserved terminal tools are invalid: {error}"))
+        })?;
+    Ok(bridge)
 }
 
 fn validate_prp_run_result(value: &Value) -> Result<(), LocalRunnerError> {

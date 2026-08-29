@@ -241,7 +241,7 @@ fn failed_semantic_results_preserve_error_status_and_release_pending_capacity() 
 }
 
 #[test]
-fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
+fn reserved_terminal_results_require_an_authorized_correlated_invocation() {
     for (mode, operation_id, disposition) in [
         ("turns-reserved-result-terminal", "paperclip_finish", "done"),
         (
@@ -259,6 +259,17 @@ fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
         session
             .start_turn("turn-1", "Please help", &std::env::temp_dir())
             .unwrap();
+
+        let invocation = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(invocation.is_empty());
+        assert_eq!(
+            session
+                .state()
+                .pending_tool("call-finish")
+                .unwrap()
+                .operation_id,
+            operation_id
+        );
 
         let result = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
         assert!(matches!(
@@ -278,6 +289,49 @@ fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
         ));
         session.shutdown("test complete").unwrap();
     }
+}
+
+#[test]
+fn fails_closed_before_returning_an_uncorrelated_reserved_result() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-uncorrelated-reserved-result-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+
+    let error = session
+        .poll_event(Duration::from_secs(1))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no authorized pending invocation"),
+        "{error}"
+    );
+    assert!(session.shutdown("already closed").is_ok());
+}
+
+#[test]
+fn fails_closed_before_returning_a_mismatched_reserved_result() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-mismatched-reserved-result-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+    assert!(session
+        .poll_event(Duration::from_secs(1))
+        .unwrap()
+        .unwrap()
+        .is_empty());
+
+    let error = session
+        .poll_event(Duration::from_secs(1))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("does not match its authorized invocation"),
+        "{error}"
+    );
+    assert!(session.shutdown("already closed").is_ok());
 }
 
 #[test]

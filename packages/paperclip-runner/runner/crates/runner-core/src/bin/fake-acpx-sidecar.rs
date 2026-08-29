@@ -94,6 +94,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-reserved-yielded-terminal"
             | "turns-reserved-block-terminal"
             | "turns-invalid-reserved-block-terminal"
+            | "turns-uncorrelated-reserved-result-terminal"
+            | "turns-mismatched-reserved-result-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -189,6 +191,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             | "turns-reserved-yielded-terminal"
                             | "turns-reserved-block-terminal"
                             | "turns-invalid-reserved-block-terminal"
+                            | "turns-uncorrelated-reserved-result-terminal"
+                            | "turns-mismatched-reserved-result-terminal"
                     )
                 {
                     let (operation_id, result) = if matches!(
@@ -270,6 +274,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }),
                         )
                     };
+                    if mode != "turns-uncorrelated-reserved-result-terminal" {
+                        write_turn_event(
+                            &mut stdout,
+                            next_sequence,
+                            "runtime.tool_called",
+                            "run-1",
+                            turn_id,
+                            json!({
+                                "callId":"call-finish",
+                                "operationId":operation_id,
+                                "input":result.clone(),
+                            }),
+                        )?;
+                        next_sequence += 1;
+                    }
+                    let semantic_result = if mode == "turns-mismatched-reserved-result-terminal" {
+                        let mut changed = result.clone();
+                        changed["summary"] = json!("A different terminal result.");
+                        changed
+                    } else {
+                        result
+                    };
                     write_turn_event(
                         &mut stdout,
                         next_sequence,
@@ -281,7 +307,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "callId":"call-finish",
                             "operationId":operation_id,
                             "ok":true,
-                            "result":result,
+                            "result":semantic_result,
                         }),
                     )?;
                     next_sequence += 1;
