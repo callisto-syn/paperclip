@@ -826,9 +826,13 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();
         const wakeTargets: Array<{ actorId: string; taskId: string }> = [];
+        let requesterTaskId: string | undefined;
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
+          if (linkedTask.assigneeActorId === approval.requestedByActorId) {
+            requesterTaskId ??= linkedTask.id;
+          }
           if (linkedTask.assigneeActorId !== null) {
             wakeTargets.push({
               actorId: linkedTask.assigneeActorId,
@@ -837,9 +841,9 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
           }
         }
         // Resolution is both a task handoff and a reply to the requesting
-        // actor. A shared approval therefore wakes each executable assignee
-        // and the requester once on the approval's canonical linked task.
-        const requesterTaskId = approval.taskIds[0];
+        // actor. The requester may only be woken on a linked task they can
+        // actually check out; binding them to another actor's canonical task
+        // would create a scheduled wake that always fails openRun.
         if (approval.requestedByActorId !== null && requesterTaskId !== undefined) {
           wakeTargets.push({
             actorId: approval.requestedByActorId,

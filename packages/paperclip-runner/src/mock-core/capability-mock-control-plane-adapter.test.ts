@@ -702,7 +702,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           priority: "medium",
           workMode: "standard",
           parentId: null,
-          assigneeActorId: "actor-1",
+          assigneeActorId: "actor-2",
           checkoutRunId: null,
           executionRunId: null,
           startedAt: null,
@@ -821,30 +821,37 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         payload: { approvalId: "approval-other-task", decision: "approved" },
       }),
       expect.objectContaining({
-        actorId: "actor-1",
+        actorId: "actor-2",
         taskId: "task-2",
         reason: "approval_resolved",
         payload: { approvalId: "approval-other-task", decision: "approved" },
       }),
       expect.objectContaining({
-        actorId: "actor-2",
-        taskId: "task-1",
-        reason: "approval_resolved",
-        payload: { approvalId: "approval-other-task", decision: "approved" },
-      }),
-      expect.objectContaining({
         actorId: "actor-1",
         taskId: "task-1",
         reason: "approval_resolved",
         payload: { approvalId: "approval-active-task", decision: "approved" },
       }),
-      expect.objectContaining({
-        actorId: "actor-2",
-        taskId: "task-1",
-        reason: "approval_resolved",
-        payload: { approvalId: "approval-active-task", decision: "approved" },
-      }),
     ]);
+    const requesterWake = adapter.snapshot().wakes.find((wake) => wake.actorId === "actor-2");
+    expect(requesterWake).toMatchObject({ taskId: "task-2", status: "scheduled" });
+    await expect(adapter.openFixtureRun({
+      ...OPEN,
+      identity: {
+        ...OPEN.identity,
+        runId: "run-requester-wake",
+        sessionId: "session-requester-wake",
+        agentId: "actor-2",
+        issueId: requesterWake!.taskId,
+      },
+      wake: {
+        reason: requesterWake!.reason,
+        payload: requesterWake!.payload,
+      },
+    })).resolves.toMatchObject({
+      actor: { id: "actor-2" },
+      activeTask: { id: "task-2", checkoutRunId: "run-requester-wake" },
+    });
   });
 
   it("rejects fixture wake references outside the company actor scope", () => {
