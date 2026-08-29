@@ -50,6 +50,7 @@ const MAX_TRANSCRIPT_EVENTS = 1_024;
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
+const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
 
 export interface CodexAcpxDynamicToolCall {
   tool: string;
@@ -245,20 +246,37 @@ export class CodexAcpxDriver implements HarnessDriver {
       recovery: null,
     };
     this.#quarantinedHostCleanups.add(cleanup);
+    this.#startQuarantinedHostCleanupRecovery(
+      cleanup,
+      MAX_QUARANTINED_HOST_CLOSE_RETRIES,
+      "quarantined cleanup recovery",
+    );
+  }
+
+  #startQuarantinedHostCleanupRecovery(
+    cleanup: QuarantinedHostCleanup,
+    maxAttempts: number,
+    reason: string,
+  ): Promise<void> {
+    if (cleanup.recovery) return cleanup.recovery;
     const recovery = (async () => {
-      while (this.#quarantinedHostCleanups.has(cleanup)) {
+      for (
+        let attemptCount = 0;
+        attemptCount < maxAttempts && this.#quarantinedHostCleanups.has(cleanup);
+        attemptCount += 1
+      ) {
         await waitForCleanupRetry(
           Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
         );
         const attempt = Promise.resolve().then(() => cleanup.host.close({
-          reason: `${cleanup.reason} (quarantined cleanup recovery)`,
+          reason: `${cleanup.reason} (${reason})`,
         }));
         cleanup.attempt = attempt;
         try {
           await attempt;
           this.#quarantinedHostCleanups.delete(cleanup);
         } catch {
-          // Keep the autonomous owner alive and retry sequentially.
+          // Retain the quarantine after this finite, sequential retry batch.
         } finally {
           if (cleanup.attempt === attempt) cleanup.attempt = null;
         }
@@ -266,18 +284,26 @@ export class CodexAcpxDriver implements HarnessDriver {
     })();
     cleanup.recovery = recovery;
     this.#retainCleanup(recovery);
+    void recovery.finally(() => {
+      if (cleanup.recovery === recovery) cleanup.recovery = null;
+    }).catch(() => undefined);
+    return recovery;
   }
 
   async #retryQuarantinedHostCleanups(): Promise<void> {
     const observations: Promise<unknown>[] = [];
     for (const cleanup of this.#quarantinedHostCleanups) {
-      if (cleanup.attempt) {
-        observations.push(
-          settleWithin(cleanup.attempt, this.#closeSettlementTimeoutMs).catch(
-            () => undefined,
-          ),
+      const recovery = cleanup.recovery ??
+        this.#startQuarantinedHostCleanupRecovery(
+          cleanup,
+          1,
+          "quarantined cleanup admission recovery",
         );
-      }
+      observations.push(
+        settleWithin(recovery, this.#closeSettlementTimeoutMs).catch(
+          () => undefined,
+        ),
+      );
     }
     await Promise.all(observations);
     if (this.#quarantinedHostCleanups.size > 0) {

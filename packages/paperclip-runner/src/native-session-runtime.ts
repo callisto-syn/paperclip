@@ -14,6 +14,7 @@ const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
+const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
 
 interface QuarantinedSessionCleanup {
   session: NativeSession;
@@ -157,18 +158,35 @@ function quarantineSessionCleanup(session: NativeSession): void {
     recovery: null,
   };
   quarantinedSessionCleanups.add(cleanup);
+  startQuarantinedSessionCleanupRecovery(
+    cleanup,
+    MAX_QUARANTINED_SESSION_CLOSE_RETRIES,
+    "native session quarantined cleanup recovery",
+  );
+}
+
+function startQuarantinedSessionCleanupRecovery(
+  cleanup: QuarantinedSessionCleanup,
+  maxAttempts: number,
+  reason: string,
+): Promise<void> {
+  if (cleanup.recovery) return cleanup.recovery;
   const recovery = (async () => {
-    while (quarantinedSessionCleanups.has(cleanup)) {
+    for (
+      let attemptCount = 0;
+      attemptCount < maxAttempts && quarantinedSessionCleanups.has(cleanup);
+      attemptCount += 1
+    ) {
       await waitForSessionCloseRetry();
       const attempt = Promise.resolve().then(() => cleanup.session.close({
-        reason: "native session quarantined cleanup recovery",
+        reason,
       }));
       cleanup.attempt = attempt;
       try {
         await attempt;
         quarantinedSessionCleanups.delete(cleanup);
       } catch {
-        // Retain the quarantine and retry without overlapping this attempt.
+        // Retain the quarantine after this finite, sequential retry batch.
       } finally {
         if (cleanup.attempt === attempt) cleanup.attempt = null;
       }
@@ -180,11 +198,19 @@ function quarantineSessionCleanup(session: NativeSession): void {
     failedSessionCleanupOwners.delete(recovery);
     if (cleanup.recovery === recovery) cleanup.recovery = null;
   }).catch(() => undefined);
+  return recovery;
 }
 
 async function retryQuarantinedSessionCleanups(): Promise<void> {
   const observations: Promise<unknown>[] = [];
   for (const cleanup of quarantinedSessionCleanups) {
+    if (!cleanup.recovery) {
+      startQuarantinedSessionCleanupRecovery(
+        cleanup,
+        1,
+        "native session quarantined admission recovery",
+      );
+    }
     if (cleanup.attempt) {
       observations.push(
         settlesWithin(

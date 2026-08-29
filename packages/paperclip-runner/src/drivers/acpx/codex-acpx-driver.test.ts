@@ -316,7 +316,7 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps an autonomous owner after bounded foreground cleanup retries", async () => {
+  it("bounds autonomous quarantine retries and recovers on later admission", async () => {
     const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
     fixture.host.close.mockRejectedValue(new Error("persistent cleanup failure"));
     const session = await fixture.driver.openSession({
@@ -337,16 +337,18 @@ describe("Codex ACPX harness driver", () => {
       }),
     ).rejects.toThrow("quarantined host cleanup remains incomplete");
     const callsBeforeRecovery = fixture.host.close.mock.calls.length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(fixture.host.close).toHaveBeenCalledTimes(callsBeforeRecovery);
     fixture.host.close.mockResolvedValue(undefined);
-    await vi.waitFor(() => expect(fixture.host.close.mock.calls.length).toBeGreaterThan(callsBeforeRecovery));
-    expect(fixture.host.close).toHaveBeenLastCalledWith({
-      reason: "runtime close persistently failed (quarantined cleanup recovery)",
-    });
     await expect(fixture.driver.openSession({
       runId: "run-after-recovery",
       normalizedSessionId: "session-1",
       workingDirectory: "/workspace",
     })).resolves.toBeDefined();
+    expect(fixture.host.close).toHaveBeenCalledTimes(callsBeforeRecovery + 1);
+    expect(fixture.host.close).toHaveBeenLastCalledWith({
+      reason: "runtime close persistently failed (quarantined cleanup admission recovery)",
+    });
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {
