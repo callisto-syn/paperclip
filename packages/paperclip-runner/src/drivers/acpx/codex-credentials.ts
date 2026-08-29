@@ -228,7 +228,23 @@ async function writeCredential(
     await handle.writeFile(bytes);
     await handle.sync();
     await handle.close();
-    await rename(temporaryPath, destination);
+    try {
+      await rename(temporaryPath, destination);
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EACCES", "EEXIST", "ENOTEMPTY", "EPERM"].includes(
+          errorCode(error) ?? "",
+        )
+      ) {
+        throw error;
+      }
+      // Win32 rename does not replace an existing destination. Remove only
+      // the already-conflicting pathname (never a real directory), then move
+      // the fully synced private temporary file into place.
+      await removeReplaceableCredential(destination);
+      await rename(temporaryPath, destination);
+    }
   } finally {
     await handle.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
@@ -240,6 +256,18 @@ async function writeCredential(
   // crash with no caller holding cleanup ownership. Lease.close() performs and
   // retries the durable removal boundary.
   await syncDirectory(home).catch(() => undefined);
+}
+
+async function removeReplaceableCredential(path: string): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      throw new Error("Managed Codex credential destination is a directory");
+    }
+    await unlink(path);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
 }
 
 async function removeCredential(path: string, home: string): Promise<void> {

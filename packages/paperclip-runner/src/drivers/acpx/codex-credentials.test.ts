@@ -146,6 +146,23 @@ describe("managed Codex credentials", () => {
     await expect(readFile(source, "utf8")).resolves.toContain("managed-canary");
   });
 
+  it("replaces a stale regular auth destination in JSON modes", async () => {
+    const fixture = await credentialFixture();
+    const destination = join(fixture.home, "auth.json");
+    await writeFile(destination, '{"stale":true}', { mode: 0o600 });
+
+    const lease = await stageManagedCodexCredential({
+      agentHomeDirectory: fixture.home,
+      environment: {
+        PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: '{"fresh":true}',
+      },
+    });
+    await expect(readFile(destination, "utf8")).resolves.toBe(
+      '{"fresh":true}',
+    );
+    await lease.close();
+  });
+
   it("cleans stale and provider-generated auth in API-key mode", async () => {
     const fixture = await credentialFixture();
     const destination = join(fixture.home, "auth.json");
