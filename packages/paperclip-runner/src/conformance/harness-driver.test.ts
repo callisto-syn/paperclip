@@ -161,4 +161,43 @@ describe("harness-driver conformance V1", () => {
     await recovered.close({ reason: "recovered_complete" });
     await session.close({ reason: "original_complete" });
   });
+
+  it("preserves an interrupted result when its terminal checkpoint lagged", async () => {
+    const driver = new DeterministicHarnessDriver();
+    const session = await driver.openSession({
+      runId: "run_yielded_result_first_recovery",
+      normalizedSessionId: "session_yielded_result_first_recovery",
+      workingDirectory: "/deterministic/conformance",
+    });
+    const { turnId } = await session.startTurn({
+      message: { role: "user", text: "[conformance:interrupt]" },
+    });
+    await session.interrupt?.({ turnId, reason: "checkpoint_after_result" });
+    const interruptedSnapshot = await session.snapshot();
+    const recovery = await driver.recoverSession({
+      ...interruptedSnapshot,
+      activeTurnId: turnId,
+      terminalTurns: [],
+    });
+    const recovered = recovery.session!;
+    const events = [];
+    for await (const event of recovered.events()) events.push(event);
+
+    expect(events.map((event) => event.eventType)).toEqual([
+      "run.result.proposed",
+      "turn.interrupted",
+      "run.terminal",
+    ]);
+    expect(events[0]?.payload).toMatchObject({
+      reportedWorkDisposition: "yielded",
+      continuation: { kind: "same_agent" },
+    });
+    expect(events[2]?.payload).toMatchObject({
+      turnTerminalState: "interrupted",
+      runTerminalState: "cancelled",
+      reportedWorkDisposition: "yielded",
+    });
+    await recovered.close({ reason: "recovered_complete" });
+    await session.close({ reason: "original_complete" });
+  });
 });

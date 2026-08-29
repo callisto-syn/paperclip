@@ -172,14 +172,28 @@ class DeterministicHarnessSession implements HarnessSession {
       this.#recoveredActiveTurn = false;
       if (this.#semanticResult !== null) {
         // A result-first checkpoint can still carry activeTurnId when the
-        // terminal checkpoint lagged behind the completed provider work.
-        // Preserve that authoritative result and synthesize only its missing
-        // terminal facts.
-        this.#appendEvents(
-          this.#event("run.result.proposed", this.#semanticResult),
-          this.#event("turn.completed", {}),
-          this.#event("run.terminal", completedTerminal(), { turn: false }),
-        );
+        // terminal checkpoint lagged behind the provider work. Preserve the
+        // authoritative result, but do not turn an interrupted/yielded result
+        // with a continuation into a successful completion during recovery.
+        if (this.#semanticResult.reportedWorkDisposition === "yielded") {
+          this.#appendEvents(
+            this.#event("run.result.proposed", this.#semanticResult),
+            this.#event("turn.interrupted", {
+              reason: "deterministic_active_turn_recovered_with_yielded_result",
+            }),
+            this.#event("run.terminal", cancelledTerminal(), { turn: false }),
+          );
+        } else {
+          this.#appendEvents(
+            this.#event("run.result.proposed", this.#semanticResult),
+            this.#event("turn.completed", {}),
+            this.#event(
+              "run.terminal",
+              completedTerminal(this.#semanticResult.reportedWorkDisposition),
+              { turn: false },
+            ),
+          );
+        }
       } else {
         this.#semanticResult = interruptedResult(
           this.#input.runId,
@@ -396,12 +410,14 @@ function completedResult(): PrpStructuredRunResult {
   };
 }
 
-function completedTerminal(): PrpTerminalState {
+function completedTerminal(
+  disposition: PrpTerminalState["reportedWorkDisposition"] = "done",
+): PrpTerminalState {
   return {
     schema: "paperclip.prp.terminal.v1",
     turnTerminalState: "completed",
     runTerminalState: "succeeded",
-    reportedWorkDisposition: "done",
+    reportedWorkDisposition: disposition,
   };
 }
 
