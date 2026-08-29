@@ -350,7 +350,6 @@ export function assertAcpxQuestionFixture(fixture) {
     !isPlainRecord(params)
     || params.mode !== "form"
     || !isPlainRecord(requestedSchema)
-    || requestedSchema.type !== "object"
     || !isPlainRecord(requestedSchema.properties)
   ) {
     throw contractError("invalid_acpx_question_fixture", "native form request");

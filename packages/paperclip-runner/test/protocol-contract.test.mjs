@@ -119,6 +119,14 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
   const canonical = await fixture("questions/acpx.json");
   assert.doesNotThrow(() => assertAcpxQuestionFixture(canonical));
 
+  const implicitObjectSchema = structuredClone(canonical);
+  delete implicitObjectSchema.nativeRequest.params.requestedSchema.type;
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(implicitObjectSchema));
+
+  const unionObjectSchema = structuredClone(canonical);
+  unionObjectSchema.nativeRequest.params.requestedSchema.type = ["object", "null"];
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(unionObjectSchema));
+
   const malformedRequest = structuredClone(canonical);
   malformedRequest.nativeRequest.params.requestedSchema.properties.environment.type = "object";
   assert.throws(
