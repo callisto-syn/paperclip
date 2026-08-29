@@ -169,7 +169,13 @@ class HarnessNativeSession implements NativeSession {
   }
 
   async attachRun(input: { identity: OpenNativeSessionInput["identity"] }): Promise<void> {
-    if (input.identity.sessionId !== this.#input.identity.sessionId) {
+    const currentIdentity = this.#input.identity;
+    if (
+      input.identity.sessionId !== currentIdentity.sessionId
+      || input.identity.companyId !== currentIdentity.companyId
+      || input.identity.issueId !== currentIdentity.issueId
+      || input.identity.agentId !== currentIdentity.agentId
+    ) {
       throw new Error("native_session_attach_binding_mismatch");
     }
     if (this.#session.attachRun === undefined) {

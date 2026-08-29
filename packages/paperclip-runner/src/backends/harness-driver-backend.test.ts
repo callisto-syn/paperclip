@@ -221,6 +221,49 @@ describe("HarnessDriverBackend", () => {
     expect(recoveredProviderIdentity).toEqual(providerIdentity);
   });
 
+  it("allows only the run id to change when a harness session is attached", async () => {
+    const attachedRunIds: string[] = [];
+    class AttachableHarnessSession extends FakeHarnessSession {
+      async attachRun(input: { runId: string }) {
+        attachedRunIds.push(input.runId);
+      }
+    }
+    const backend = new HarnessDriverBackend({
+      ...driver,
+      async openSession() { return new AttachableHarnessSession(); },
+    });
+    const originalIdentity = {
+      runId: "run-1",
+      sessionId: "session-1",
+      companyId: "company-1",
+      issueId: "issue-1",
+      agentId: "agent-1",
+    };
+    const session = await backend.openSession({
+      identity: originalIdentity,
+      workingDirectory: "/workspace",
+    });
+
+    for (const identity of [
+      { ...originalIdentity, runId: "run-forged-company", companyId: "company-2" },
+      { ...originalIdentity, runId: "run-forged-issue", issueId: "issue-2" },
+      { ...originalIdentity, runId: "run-forged-agent", agentId: "agent-2" },
+      { ...originalIdentity, runId: "run-forged-session", sessionId: "session-2" },
+    ]) {
+      await expect(session.attachRun?.({ identity })).rejects.toThrow(
+        "native_session_attach_binding_mismatch",
+      );
+      expect(session.identity()).toEqual(originalIdentity);
+    }
+    expect(attachedRunIds).toEqual([]);
+
+    await expect(session.attachRun?.({
+      identity: { ...originalIdentity, runId: "run-2" },
+    })).resolves.toBeUndefined();
+    expect(attachedRunIds).toEqual(["run-2"]);
+    expect(session.identity()).toEqual({ ...originalIdentity, runId: "run-2" });
+  });
+
   it("delegates native runtime-request resolutions to the harness session", async () => {
     runtimeResolutions.length = 0;
     const backend = new HarnessDriverBackend(driver);
