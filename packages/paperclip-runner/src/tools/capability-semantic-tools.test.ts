@@ -628,6 +628,13 @@ describe("Capability exposure and authorization", () => {
         runId: OPEN.identity.runId,
         scenarioGrants: ["cases:write"],
         now: () => now,
+        resolveExpiredExtensionReceipt: async () => ({
+          value: {
+            key: "case-ambiguous-effect",
+            body: "Case body",
+            upserted: true,
+          },
+        }),
       });
       await expect(follower.invoke(invocation)).resolves.toMatchObject({
         ok: true,
@@ -1002,6 +1009,64 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
+  it("does not replay an executing extension after repeated heartbeat failures", async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
+      let failHeartbeatLoads = false;
+      const durableStore: CapabilitySemanticToolRuntimeStore = {
+        load: () => {
+          if (failHeartbeatLoads) throw new Error("persistent store read failure");
+          return durableSnapshot === null ? null : structuredClone(durableSnapshot);
+        },
+        save: (_runId, snapshot) => { durableSnapshot = structuredClone(snapshot); },
+        compareAndSwap: (_runId, expected, snapshot) => {
+          if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+          durableSnapshot = structuredClone(snapshot);
+          return true;
+        },
+      };
+      const { adapter, runtime } = await runtimeFor({
+        scenarioGrants: ["cases:write"],
+        semanticToolRuntimeStore: durableStore,
+        now: () => Date.now(),
+      });
+      const invocation = {
+        operationId: "upsert_case",
+        input: { key: "case-heartbeat-loss", body: "Case body" },
+        idempotencyKey: "heartbeat-loss",
+      } as const;
+
+      const inFlight = runtime.invoke(invocation);
+      failHeartbeatLoads = true;
+      vi.advanceTimersByTime(40_000);
+      failHeartbeatLoads = false;
+      expect(durableSnapshot?.extensions[0]).toMatchObject({
+        status: "pending",
+        phase: "executing",
+        leaseExpiresAtMs: 30_000,
+      });
+
+      const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+        adapter.serialize(),
+        { semanticToolRuntimeStore: durableStore },
+      );
+      const restored = new CapabilitySemanticToolRuntime({
+        adapter: restoredAdapter,
+        runId: OPEN.identity.runId,
+        scenarioGrants: ["cases:write"],
+        now: () => Date.now(),
+      });
+      await expect(restored.invoke(invocation)).resolves.toMatchObject({
+        ok: false,
+        error: { reason: "idempotency_recovery_in_flight" },
+      });
+      await expect(inFlight).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retries initial acquisition after a transient durable-store failure", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
     let failNextLoad = false;
@@ -1045,7 +1110,7 @@ describe("Capability exposure and authorization", () => {
     });
   });
 
-  it("reclaims an expired durable extension lease after executor loss", async () => {
+  it("does not replay an expired executing extension after executor loss", async () => {
     let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
       schema: "paperclip.capability.semantic-tool-runtime.v1",
       resultSequence: 0,
@@ -1089,22 +1154,15 @@ describe("Capability exposure and authorization", () => {
       input: { key: "case-expired", body: "Case body" },
       idempotencyKey: "expired-case",
     })).resolves.toMatchObject({
-      ok: true,
-      operationResultId: "tool-result-1",
-      value: { key: "case-expired", body: "Case body", upserted: true },
+      ok: false,
+      error: { reason: "idempotency_recovery_in_flight" },
     });
-    expect(durableSnapshot.extensions).toEqual([
-      expect.objectContaining({
-        key: `${OPEN.identity.runId}:upsert_case:expired-case`,
-        status: "completed",
-        resultId: "tool-result-1",
-      }),
-    ]);
-    expect(durableSnapshot.operationResults["tool-result-1"]).toEqual({
-      key: "case-expired",
-      body: "Case body",
-      upserted: true,
+    expect(durableSnapshot.extensions[0]).toMatchObject({
+      status: "pending",
+      ownerId: "terminated-executor",
+      phase: "executing",
     });
+    expect(durableSnapshot.operationResults).toEqual({});
   });
 
   it("reconciles an expired mutable export without replaying its effect", async () => {

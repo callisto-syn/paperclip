@@ -129,9 +129,10 @@ export class CapabilitySemanticToolRuntime {
   }
 
   /**
-   * Publishes the exact observed result of an expired, non-replay-safe mock
-   * extension. This is a trusted recovery boundary: normal tool invocations
-   * cannot guess or replace an ambiguous effect after its executor exits.
+   * Publishes the exact observed result of an expired extension that entered
+   * execution. This is a trusted recovery boundary: normal tool invocations
+   * cannot guess, replay, or replace an ambiguous effect after its executor
+   * exits.
    */
   reconcileExpiredExtensionReceipt(
     receipt: CapabilityExpiredExtensionReceipt,
@@ -139,8 +140,7 @@ export class CapabilitySemanticToolRuntime {
     const descriptor = capabilitySemanticTool(receipt.operationId);
     if (
       descriptor?.mockCommandMapping.kind !== "mock_extension" ||
-      descriptor.idempotency !== "required" ||
-      isReplaySafeMockExtension(descriptor)
+      descriptor.idempotency !== "required"
     ) {
       throw new Error("extension receipt reconciliation is not available");
     }
@@ -404,8 +404,7 @@ export class CapabilitySemanticToolRuntime {
               };
             }
             if (
-              durableExtension.phase === "executing" &&
-              !isReplaySafeMockExtension(descriptor)
+              durableExtension.phase === "executing"
             ) {
               const recovered = await this.#resolveExpiredExtension(
                 invocation,
@@ -660,8 +659,7 @@ export class CapabilitySemanticToolRuntime {
         existing !== undefined &&
         (existing.status !== "pending" ||
           existing.input !== record.input ||
-          (existing.phase === "executing" &&
-            !isReplaySafeMockExtension(descriptor)) ||
+          existing.phase === "executing" ||
           (existing.leaseExpiresAtMs ?? 0) > this.#now())
       ) {
         return false;
@@ -1288,35 +1286,6 @@ export class CapabilitySemanticToolRuntime {
       },
       authorization,
     });
-  }
-}
-
-/**
- * These package-local mock extensions are pure result projections: they do
- * not call the control plane, filesystem, or network. Only that closed set may
- * replay after an executor disappears in the executing phase. A future
- * effectful extension remains fail-closed until its backend provides its own
- * durable idempotency/reconciliation contract.
- */
-function isReplaySafeMockExtension(
-  descriptor: CapabilitySemanticToolDescriptor,
-): boolean {
-  if (descriptor.mockCommandMapping.kind !== "mock_extension") return false;
-  switch (descriptor.mockCommandMapping.extension) {
-    case "company_skills.sync":
-    case "routines.manage":
-    case "cases.upsert":
-    case "company.admin":
-    case "test.generic_api":
-      return true;
-    // The export is a projection of mutable control-plane state. If its
-    // executor disappears after starting, re-running it could publish a
-    // different snapshot for the same idempotency key. Keep that lease
-    // fail-closed until the original exact result can be reconciled.
-    case "portability.export":
-      return false;
-    default:
-      return false;
   }
 }
 
