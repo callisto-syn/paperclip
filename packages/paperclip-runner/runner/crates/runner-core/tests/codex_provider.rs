@@ -457,15 +457,18 @@ fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
         );
         if recovered_event_types
             .iter()
-            .any(|event| event == "session.failed")
+            .any(|event| event == "session.reconciled")
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(recovered_event_types
+    assert!(!recovered_event_types
         .iter()
         .any(|event| event == "session.failed"));
+    assert!(recovered_event_types
+        .iter()
+        .any(|event| event == "session.reconciled"));
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

@@ -269,11 +269,11 @@ impl CodexProvider {
     }
 
     pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
-        // Completion authority belongs to the provider process that emitted
-        // the terminal. A freshly resumed idle process may exit cleanly after
-        // thread/read, but it must not inherit authority that would mask its
-        // own later nonzero exit as reconciliation.
-        self.completed_turn_authoritative = false;
+        // Durable completion authority belongs to the completed turn, not the
+        // provider process that happened to emit it. Preserve that authority
+        // across an idle resume so a process exit cannot retroactively refail
+        // completed work. start_turn revokes both flags before new work begins.
+        self.completed_turn_authoritative = authoritative;
         self.expected_shutdown = authoritative;
     }
 
