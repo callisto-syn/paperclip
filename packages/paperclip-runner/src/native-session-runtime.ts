@@ -244,7 +244,12 @@ function scheduleQuarantinedSessionCleanup(
 }
 
 async function retryQuarantinedSessionCleanups(): Promise<void> {
-  const observations: Promise<unknown>[] = [];
+  // A close attempt becomes admission-visible as soon as the runtime retains
+  // its exact cleanup owner. It may not have rejected yet, so it may not have
+  // entered the retry quarantine below. Observe both states through the same
+  // finite gate to prevent a later execution from opening a second provider
+  // session while the first close still owns provider resources.
+  const cleanupOwners = new Set<Promise<void>>(failedSessionCleanupOwners);
   for (const cleanup of quarantinedSessionCleanups) {
     if (cleanup.timer) {
       clearTimeout(cleanup.timer);
@@ -259,12 +264,12 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
     // Observe the exact owner for one finite admission grace, but never let a
     // broken close promise block every later execution indefinitely. The first
     // recovery attempt starts without consuming that grace on a retry delay.
-    observations.push(recovery.catch(() => undefined));
+    cleanupOwners.add(recovery);
   }
   if (
-    observations.length > 0
+    cleanupOwners.size > 0
     && !(await settlesWithin(
-      Promise.all(observations),
+      Promise.all([...cleanupOwners].map((owner) => owner.catch(() => undefined))),
       QUARANTINED_SESSION_ADMISSION_GRACE_MS,
     ))
   ) {
@@ -272,7 +277,10 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
       "native_session_cleanup_quarantined: prior session cleanup exceeded the admission grace",
     );
   }
-  if (quarantinedSessionCleanups.size > 0) {
+  if (
+    failedSessionCleanupOwners.size > 0
+    || quarantinedSessionCleanups.size > 0
+  ) {
     throw new Error(
       "native_session_cleanup_quarantined: prior session cleanup remains incomplete",
     );

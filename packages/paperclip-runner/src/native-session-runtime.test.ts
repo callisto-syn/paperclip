@@ -359,6 +359,86 @@ describe("executeNativeSession recovery", () => {
     }
   });
 
+  it("quarantines a pending first close before another provider session can open", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseClose = () => {};
+      const pendingClose = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const close = vi.fn(() => pendingClose);
+      const session: NativeSession = {
+        identity: () => identity,
+        async capabilities() {
+          return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+        },
+        async *events() { yield runnerEvent(1, "turn.completed"); },
+        async startTurn() { return { turnId: "turn-recovery" }; },
+        async result() { return { result, terminal, turnId: "turn-recovery" }; },
+        async snapshot() {
+          return {
+            backendKind: "mock",
+            sessionId: "driver-recovery",
+            identity,
+            providerSessionId: "provider-recovery",
+            cursor: null,
+            activeTurnId: null,
+            pendingRuntimeRequests: [],
+            lineage: [],
+          };
+        },
+        close,
+      };
+      const openSession = vi.fn(async () => session);
+      const backend: NativeSessionBackend = {
+        async descriptor() {
+          return {
+            kind: "mock",
+            name: "recovery-backend",
+            version: "1",
+            capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+          };
+        },
+        openSession,
+      };
+      const port: ControlPlanePort = {
+        async openRun() {},
+        async checkpointSession() {},
+        async appendEvent() {
+          return { cursor: 1, highestContiguousSourceSeq: 1, disposition: "committed" };
+        },
+        async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+        async completeRun() {},
+      };
+      const execute = () => executeNativeSession({
+        input,
+        backend,
+        controlPlane: port,
+        runnerInstanceId: "runner-recovery",
+        controlPlaneInstanceId: "control-recovery",
+      });
+
+      const firstExecution = execute();
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(firstExecution).resolves.toMatchObject({ result });
+      expect(close).toHaveBeenCalledOnce();
+
+      const blockedAdmission = execute();
+      const blockedResult = expect(blockedAdmission).rejects.toThrow(
+        "prior session cleanup exceeded the admission grace",
+      );
+      await vi.advanceTimersByTimeAsync(23_100);
+      await blockedResult;
+      expect(openSession).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+
+      releaseClose();
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed before launch when a v3 driver does not declare complete native context realization", async () => {
     const digest = "0".repeat(64);
     const context = {
@@ -751,7 +831,11 @@ describe("executeNativeSession recovery", () => {
 
   it("bounds failure when iterator teardown and provider close never settle", async () => {
     const never = new Promise<void>(() => undefined);
-    const close = vi.fn(() => never);
+    let releaseClose = () => {};
+    const pendingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const close = vi.fn(() => pendingClose);
     const session: NativeSession = {
       identity: () => identity,
       async capabilities() {
@@ -806,11 +890,16 @@ describe("executeNativeSession recovery", () => {
       keepSessionOpen: true,
     })).rejects.toThrow("native session timed out");
     expect(close).toHaveBeenCalledOnce();
+    releaseClose();
+    await pendingClose;
   });
 
   it("preserves durable success when provider close never settles", async () => {
-    const never = new Promise<void>(() => undefined);
-    const close = vi.fn(() => never);
+    let releaseClose = () => {};
+    const pendingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const close = vi.fn(() => pendingClose);
     const completeRun = vi.fn(async () => undefined);
     const session: NativeSession = {
       identity: () => identity,
@@ -870,6 +959,8 @@ describe("executeNativeSession recovery", () => {
     })).resolves.toMatchObject({ result, terminal });
     expect(completeRun).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
+    releaseClose();
+    await pendingClose;
   });
 
   it("closes after a synchronous governed-wait probe returns no result", async () => {
