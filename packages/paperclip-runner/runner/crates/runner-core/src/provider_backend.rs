@@ -1247,16 +1247,15 @@ impl CodexCommandExecutor {
 
     fn retry_receipt_limit_interrupt(&mut self) -> Result<(), DurableRunnerError> {
         let should_retry = self.state.as_ref().is_some_and(|state| {
-            state.receipt_limit_interrupt_pending
-                && !state.receipt_limit_interrupt_accepted
-                && state.active_provider_turn_id.is_some()
+            state.receipt_limit_interrupt_pending && state.active_provider_turn_id.is_some()
         });
         if !should_retry {
             return Ok(());
         }
-        // Polling is the autonomous recovery path for a failed first RPC. The
-        // durable pending marker survives process restarts, so this retry does
-        // not depend on Codex emitting another tool call after saturation.
+        // Polling is the autonomous recovery path until a terminal notification
+        // clears the durable marker. RPC acceptance alone does not establish
+        // that Codex stopped the turn, so accepted-but-unsettled interruptions
+        // remain idempotently retryable across polls and process restarts.
         if self
             .interrupt_turn("semantic_tool_turn_receipt_limit_retry")
             .is_ok()

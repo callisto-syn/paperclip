@@ -1348,6 +1348,7 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
             "--hold-turn",
             "--emit-tool-call-on-resume",
             "--fail-first-interrupt",
+            "--accept-interrupt-without-terminal-once",
         ],
     );
     let runner_config = durable_config(&directory);
@@ -1410,7 +1411,7 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
     assert_eq!(call_count(&directory, "turn/interrupt"), 1);
 
     let mut settled = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         settled.extend(
             poll_and_ack(&mut recovered)
                 .expect("polling must autonomously retry the durable receipt-limit interrupt"),
@@ -1428,7 +1429,7 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
             .any(|event| event.event_type == "turn.interrupted"),
         "the retry must settle the receipt-exhausted turn"
     );
-    assert_eq!(call_count(&directory, "turn/interrupt"), 2);
+    assert_eq!(call_count(&directory, "turn/interrupt"), 3);
 
     recovered.shutdown().expect("stop recovered provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
