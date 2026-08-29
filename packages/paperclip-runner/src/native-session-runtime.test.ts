@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ControlPlanePort } from "./contracts/control-plane-port.js";
 import type { NativeExecutionInputV1 } from "./contracts/native-execution.js";
+import type { NativeRunIdentity } from "./contracts/types.js";
 import type {
   NativeSession,
   NativeSessionBackend,
@@ -892,22 +893,28 @@ describe("executeNativeSession recovery", () => {
     expect(attachRun).not.toHaveBeenCalled();
   });
 
-  it("does not leak an open control-plane run when existing-session attachment fails", async () => {
+  it("quarantines a retained session when attachment partially mutates then fails", async () => {
+    const attachmentFailure = new Error("provider attachment failed");
     const openRun = vi.fn(async () => undefined);
-    const attachRun = vi.fn(async () => {
-      throw new Error("provider attachment failed");
+    let retainedIdentity = { ...identity, runId: "run-previous" };
+    const attachRun = vi.fn(async (input: { identity: NativeRunIdentity }) => {
+      retainedIdentity = structuredClone(input.identity);
+      throw attachmentFailure;
     });
+    const close = vi.fn(() => new Promise<void>(() => {}));
+    const startTurn = vi.fn(async () => ({ turnId: "unexpected" }));
+    const onSession = vi.fn();
     const existingSession: NativeSession = {
-      identity: () => identity,
+      identity: () => structuredClone(retainedIdentity),
       async capabilities() {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
       attachRun,
       async *events() {},
-      async startTurn() { return { turnId: "unexpected" }; },
+      startTurn,
       async result() { return null; },
       async snapshot() { throw new Error("unexpected snapshot"); },
-      async close() {},
+      close,
     };
     const backend: NativeSessionBackend = {
       async descriptor() {
@@ -934,9 +941,17 @@ describe("executeNativeSession recovery", () => {
       runnerInstanceId: "runner-recovery",
       controlPlaneInstanceId: "control-recovery",
       existingSession,
-    })).rejects.toThrow("provider attachment failed");
+      onSession,
+    })).rejects.toBe(attachmentFailure);
     expect(attachRun).toHaveBeenCalledWith({ identity });
+    expect(retainedIdentity).toEqual(identity);
+    expect(onSession).toHaveBeenCalledOnce();
+    expect(onSession).toHaveBeenCalledWith(null);
+    expect(close).toHaveBeenCalledWith({
+      reason: "native session attachment failed",
+    });
     expect(openRun).not.toHaveBeenCalled();
+    expect(startTurn).not.toHaveBeenCalled();
   });
 
   it("quarantines an attached session when control-plane run admission fails", async () => {

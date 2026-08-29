@@ -105,6 +105,24 @@ async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Pr
   return settled;
 }
 
+async function quarantineRetainedSession(
+  session: NativeSession,
+  onSession: ExecuteNativeSessionOptions["onSession"],
+  reason: string,
+): Promise<void> {
+  // Eviction and provider cleanup are independent obligations. Keep both
+  // observed so a throwing owner callback cannot prevent close from starting,
+  // and a broken provider cannot keep the failed execution pending forever.
+  const quarantineSettlement = Promise.allSettled([
+    Promise.resolve().then(() => onSession?.(null)),
+    Promise.resolve().then(() => session.close({ reason })),
+  ]);
+  await settlesWithin(
+    quarantineSettlement,
+    FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+  );
+}
+
 async function settleBeforeAbort<T>(
   operation: () => Promise<T>,
   signal: AbortSignal,
@@ -496,7 +514,19 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     // static binding check (for example, when the provider lost multi-run
     // state). Prove the provider attachment before opening durable
     // control-plane state because ControlPlanePort has no rollback operation.
-    await options.existingSession.attachRun({ identity });
+    try {
+      await options.existingSession.attachRun({ identity });
+    } catch (error) {
+      // attachRun has no transactional guarantee: a provider may bind the new
+      // run before reporting a later failure. Conservatively quarantine the
+      // session so neither the old nor partially attached run can reuse it.
+      await quarantineRetainedSession(
+        options.existingSession,
+        options.onSession,
+        "native session attachment failed",
+      );
+      throw error;
+    }
   }
   try {
     await options.controlPlane.openRun({
@@ -510,15 +540,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       // attachRun mutates the retained provider session to the new run. If
       // durable admission then fails, that session no longer represents the
       // previously retained run and must not remain available for reuse.
-      options.onSession?.(null);
-      const closeSettlement = Promise.allSettled([
-        Promise.resolve().then(() => attachedSession.close({
-          reason: "native control-plane run admission failed",
-        })),
-      ]);
-      await settlesWithin(
-        closeSettlement,
-        FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+      await quarantineRetainedSession(
+        attachedSession,
+        options.onSession,
+        "native control-plane run admission failed",
       );
     }
     throw error;
