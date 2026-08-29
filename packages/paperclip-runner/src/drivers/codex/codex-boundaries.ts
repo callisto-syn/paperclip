@@ -33,14 +33,20 @@ export function validateCodexWorkingDirectory(
     throw new Error("Codex working directory is required");
   }
   const requested = resolve(workingDirectory);
-  const resolved = canonicalPathWithMissingTail(requested);
+  let resolved: string;
   try {
+    resolved = realpathSync.native(requested);
     if (!statSync(resolved).isDirectory()) {
       throw new Error("Codex working directory must be a directory");
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw error;
+    if (code === "ENOENT") {
+      throw new Error(
+        "Codex working directory must exist before provider admission",
+      );
+    }
+    throw error;
   }
   if (resolved === parse(resolved).root) {
     throw new Error("Codex working directory cannot be a filesystem root");
@@ -194,7 +200,9 @@ export function redactCodexValue(value: unknown, depth = 0): unknown {
   );
 }
 
-export function rejectedCodexToolCall(message: string): Record<string, unknown> {
+export function rejectedCodexToolCall(
+  message: string,
+): Record<string, unknown> {
   return {
     success: false,
     contentItems: [{ type: "inputText", text: message }],

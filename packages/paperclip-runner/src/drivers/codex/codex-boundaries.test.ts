@@ -34,37 +34,51 @@ describe("Codex value and workspace boundaries", () => {
         mkdirSync(directory, { recursive: true });
       }
 
-      expect(validateCodexWorkingDirectory(workspace, {
-        HOME: hostHome,
-        CODEX_HOME: codexHome,
-        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
-      })).toBe(realpathSync.native(workspace));
-      expect(validateCodexWorkingDirectory(join(workspaceRoot, "future-run"), {
-        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
-      })).toBe(join(realpathSync.native(workspaceRoot), "future-run"));
+      expect(
+        validateCodexWorkingDirectory(workspace, {
+          HOME: hostHome,
+          CODEX_HOME: codexHome,
+          PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+        }),
+      ).toBe(realpathSync.native(workspace));
+      expect(() =>
+        validateCodexWorkingDirectory(join(workspaceRoot, "future-run"), {
+          PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+        }),
+      ).toThrow("must exist before provider admission");
 
-      expect(() => validateCodexWorkingDirectory(parse(fixture).root, {}))
-        .toThrow("filesystem root");
-      expect(() => validateCodexWorkingDirectory(hostRoot, { HOME: hostHome }))
-        .toThrow("cannot contain the host HOME");
-      expect(() => validateCodexWorkingDirectory(outside, {
-        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
-      })).toThrow("outside the assigned workspace");
-      expect(() => validateCodexWorkingDirectory(codexWorkspace, {
-        CODEX_HOME: codexHome,
-      })).toThrow("cannot overlap host CODEX_HOME");
+      expect(() =>
+        validateCodexWorkingDirectory(parse(fixture).root, {}),
+      ).toThrow("filesystem root");
+      expect(() =>
+        validateCodexWorkingDirectory(hostRoot, { HOME: hostHome }),
+      ).toThrow("cannot contain the host HOME");
+      expect(() =>
+        validateCodexWorkingDirectory(outside, {
+          PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+        }),
+      ).toThrow("outside the assigned workspace");
+      expect(() =>
+        validateCodexWorkingDirectory(codexWorkspace, {
+          CODEX_HOME: codexHome,
+        }),
+      ).toThrow("cannot overlap host CODEX_HOME");
 
       const escaped = join(workspaceRoot, "escaped");
       symlinkSync(outside, escaped, "dir");
-      expect(() => validateCodexWorkingDirectory(escaped, {
-        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
-      })).toThrow("outside the assigned workspace");
+      expect(() =>
+        validateCodexWorkingDirectory(escaped, {
+          PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+        }),
+      ).toThrow("outside the assigned workspace");
 
       const file = join(workspaceRoot, "not-a-directory");
       writeFileSync(file, "not a directory");
-      expect(() => validateCodexWorkingDirectory(file, {
-        PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
-      })).toThrow("must be a directory");
+      expect(() =>
+        validateCodexWorkingDirectory(file, {
+          PAPERCLIP_WORKSPACE_CWD: workspaceRoot,
+        }),
+      ).toThrow("must be a directory");
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }
@@ -80,10 +94,12 @@ describe("Codex value and workspace boundaries", () => {
     expect(bounded.many).toHaveLength(129);
     expect(isRetainableCodexPayload({ value: "x".repeat(70_000) })).toBe(false);
 
-    expect(redactCodexValue({
-      token: "sensitive",
-      message: "Authorization: Bearer abcdefghijklmnop",
-    })).toEqual({
+    expect(
+      redactCodexValue({
+        token: "sensitive",
+        message: "Authorization: Bearer abcdefghijklmnop",
+      }),
+    ).toEqual({
       token: "[REDACTED]",
       message: "Authorization: Bearer [REDACTED]",
     });
@@ -94,8 +110,12 @@ describe("Codex value and workspace boundaries", () => {
     expect(isCodexSemanticTool("paperclip_block")).toBe(true);
     expect(isCodexSemanticTool("shell")).toBe(false);
     expect(codexToolAcceptsDisposition("paperclip_finish", "done")).toBe(true);
-    expect(codexToolAcceptsDisposition("paperclip_finish", "blocked")).toBe(false);
-    expect(codexToolAcceptsDisposition("paperclip_block", "blocked")).toBe(true);
+    expect(codexToolAcceptsDisposition("paperclip_finish", "blocked")).toBe(
+      false,
+    );
+    expect(codexToolAcceptsDisposition("paperclip_block", "blocked")).toBe(
+      true,
+    );
     expect(codexToolAcceptsDisposition("unknown_tool", "done")).toBe(false);
   });
 });
