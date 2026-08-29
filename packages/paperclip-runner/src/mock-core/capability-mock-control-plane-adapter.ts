@@ -848,6 +848,35 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             };
           }
         }
+        if (requester !== null && requesterTarget === null) {
+          // Persist an unowned continuation task rather than dropping the
+          // requester notification or making the governance decision depend
+          // on today's checkout/budget state. The actor can consume this wake
+          // as soon as it becomes runnable without stealing a linked task from
+          // another run or reopening terminal work.
+          const recoveryTask: CapabilityFixtureTask = {
+            id: this.#id("task"),
+            companyId: task.companyId,
+            identifier: `${this.#state.company.issuePrefix}-APPROVAL-${approval.id}`,
+            title: `Continue after approval ${approval.id}`,
+            description: "Review the recorded approval decision and continue any remaining work.",
+            status: "todo",
+            priority: "medium",
+            workMode: "standard",
+            parentId: null,
+            assigneeActorId: requester.id,
+            checkoutRunId: null,
+            executionRunId: null,
+            startedAt: null,
+            completedAt: null,
+          };
+          this.#state.tasks.push(recoveryTask);
+          requesterTarget = {
+            actorId: requester.id,
+            taskId: recoveryTask.id,
+          };
+          entityRefs.push(`task:${recoveryTask.id}`);
+        }
         approval.status = command.decision;
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();

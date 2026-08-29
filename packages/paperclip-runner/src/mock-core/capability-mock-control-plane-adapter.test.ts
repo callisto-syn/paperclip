@@ -893,14 +893,36 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         { id: "approval-owned-requester", status: "approved" },
       ],
     });
-    expect(adapter.snapshot().wakes).toEqual([
+    expect(adapter.snapshot().wakes).toHaveLength(4);
+    expect(adapter.snapshot().wakes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         actorId: "actor-2",
         taskId: "task-2",
         reason: "approval_resolved",
         payload: { approvalId: "approval-other-task", decision: "approved" },
       }),
-    ]);
+      ...[
+        "approval-active-task",
+        "approval-terminal-requester",
+        "approval-owned-requester",
+      ].map((approvalId) => expect.objectContaining({
+        actorId: "actor-2",
+        reason: "approval_resolved",
+        payload: { approvalId, decision: "approved" },
+      })),
+    ]));
+    const recoveryTaskIds = adapter.snapshot().wakes
+      .filter((wake) => wake.taskId !== "task-2")
+      .map((wake) => wake.taskId);
+    expect(recoveryTaskIds).toHaveLength(3);
+    for (const taskId of recoveryTaskIds) {
+      expect(adapter.snapshot().tasks.find((candidate) => candidate.id === taskId)).toMatchObject({
+        status: "todo",
+        assigneeActorId: "actor-2",
+        checkoutRunId: null,
+        executionRunId: null,
+      });
+    }
     const requesterWake = adapter.snapshot().wakes.find((wake) => wake.actorId === "actor-2");
     expect(requesterWake).toMatchObject({ taskId: "task-2", status: "scheduled" });
     await expect(adapter.openFixtureRun({
