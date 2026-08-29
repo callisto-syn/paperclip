@@ -311,7 +311,7 @@ fn cancellation_completes_pending_calls_and_rejects_late_results() {
 }
 
 #[test]
-fn turn_settlement_releases_completed_call_capacity() {
+fn turn_settlement_releases_value_capacity_without_reusing_call_ids() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
     bridge
@@ -330,9 +330,12 @@ fn turn_settlement_releases_completed_call_capacity() {
         .settle_turn("provider_turn_terminated")
         .unwrap()
         .is_empty());
-    bridge
+    assert!(bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
-        .expect("a new turn can reuse a provider-scoped call id");
+        .is_err());
+    bridge
+        .begin_call("call-2".into(), "get_task_context".into(), json!({}))
+        .expect("a new turn can use a fresh call id after releasing exact values");
 }
 
 #[test]
@@ -404,9 +407,16 @@ fn turn_settlement_cannot_be_blocked_by_completed_value_pressure() {
     let settled = bridge.settle_turn("provider_turn_terminated").unwrap();
     assert_eq!(settled.len(), 1);
     assert!(settled[0].is_error);
-    bridge
+    assert!(bridge
         .begin_call("call-0".into(), "get_task_context".into(), json!({}))
-        .expect("settlement releases all prior turn retention");
+        .is_err());
+    bridge
+        .begin_call(
+            "call-after-settlement".into(),
+            "get_task_context".into(),
+            json!({}),
+        )
+        .expect("settlement releases prior turn value retention");
 }
 
 #[test]

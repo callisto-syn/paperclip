@@ -19,10 +19,10 @@ const MAX_TOOL_VALUE_BYTES: usize = 768 * 1024;
 const MAX_ACCEPTED_TOOL_VALUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RETAINED_TOOL_VALUE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_PENDING_CALLS: usize = 4_096;
-// Receipts are turn-scoped and cleared by `settle_turn`. Keep exact inputs and
-// results so every accepted call can be replayed byte-for-byte after recovery.
-// At the bound the backend interrupts the turn in a controlled way instead of
-// discarding replay data or allowing the provider state to grow without limit.
+// Exact inputs and results are turn-scoped and cleared by `settle_turn`; their
+// call IDs remain durable for the run. At the bound the backend interrupts the
+// turn in a controlled way instead of discarding replay data or allowing the
+// provider state to grow without limit.
 const MAX_DURABLE_CALL_RECEIPTS: usize = 4_096;
 const MAX_SETTLED_CALL_IDS: usize = 65_536;
 const ACTIVE_TURN_RECEIPT_LIMIT_MESSAGE: &str =
