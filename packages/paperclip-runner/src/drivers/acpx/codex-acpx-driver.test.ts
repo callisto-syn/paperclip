@@ -282,12 +282,13 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledOnce();
   });
 
-  it("autonomously retries a terminal host cleanup failure once", async () => {
+  it("retains autonomous host cleanup recovery through repeated failure", async () => {
     const fixture = driverFixture({}, {
       closeSettlementTimeoutMs: 1,
     });
     fixture.host.close
       .mockRejectedValueOnce(new Error("transient cleanup failure"))
+      .mockRejectedValueOnce(new Error("second cleanup failure"))
       .mockResolvedValueOnce(undefined);
     const session = await fixture.driver.openSession({
       runId: "run-close-permanent-failure",
@@ -305,14 +306,14 @@ describe("Codex ACPX harness driver", () => {
         payload: expect.objectContaining({ code: "acpx_host_cleanup_deferred" }),
       }),
     ]));
-    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(3));
     expect(fixture.host.close).toHaveBeenLastCalledWith({
-      reason: "runtime close initially failed (automatic cleanup recovery)",
+      reason: "runtime close initially failed (automatic cleanup recovery 2)",
     });
     await expect(
       session.close({ reason: "observe recovered cleanup" }),
     ).resolves.toBeUndefined();
-    expect(fixture.host.close).toHaveBeenCalledTimes(2);
+    expect(fixture.host.close).toHaveBeenCalledTimes(3);
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {

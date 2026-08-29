@@ -11,6 +11,7 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
+const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -130,6 +131,12 @@ async function quarantineRetainedSession(
   );
 }
 
+function waitForSessionCloseRetry(): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, FAILED_SESSION_CLOSE_RETRY_MS);
+    timer.unref?.();
+  });
+}
 async function consumeTurn(
   session: NativeSession,
   controlPlane: ControlPlanePort,
@@ -721,26 +728,23 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     if (sessionClosePromise === null) {
       quarantineSession();
       sessionClosePromise = (async () => {
-        try {
-          await session.close({
-            reason: "native session execution complete",
-          });
-        } catch (firstError) {
+        let retryCount = 0;
+        let firstError: unknown;
+        while (true) {
           try {
-            // A close rejection does not prove cleanup occurred. Retry once in
-            // order, but keep the first failure authoritative for the caller.
-            // The returned execution remains pending until this recovery
-            // settles, so no cleanup operation escapes the run boundary.
             await session.close({
-              reason: "native session cleanup recovery after close failure",
+              reason: retryCount === 0
+                ? "native session execution complete"
+                : `native session cleanup recovery after close failure (${retryCount})`,
             });
-          } catch (recoveryError) {
-            throw new AggregateError(
-              [firstError, recoveryError],
-              "native session cleanup failed after recovery",
-            );
+          } catch (error) {
+            firstError ??= error;
+            retryCount += 1;
+            await waitForSessionCloseRetry();
+            continue;
           }
-          throw firstError;
+          if (firstError !== undefined) throw firstError;
+          return;
         }
       })();
     }

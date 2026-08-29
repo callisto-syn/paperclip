@@ -571,32 +571,35 @@ class CodexAcpxSession implements HarnessSession {
     const failedOrPendingClose = this.#hostClosePromise;
     if (!failedOrPendingClose) return;
     // Never overlap the exact cleanup that exceeded the caller's wait bound.
-    // If it eventually fails, however, production owns one autonomous retry
-    // instead of requiring an otherwise-finished native execution to call
-    // close again. A permanently pending cleanup remains the sole owner while
-    // the runtime adapter independently terminates its tracked child process.
-    const recovery = failedOrPendingClose.then(
-      () => {
-        this.#closed = true;
-      },
-      async () => {
-        if (this.#hostClosePromise === failedOrPendingClose) {
+    // Once an attempt rejects, keep one backoff-bounded recovery owner alive
+    // until cleanup succeeds. A permanently pending attempt remains the sole
+    // owner while the runtime adapter independently terminates its children.
+    const recovery = (async () => {
+      let attempt = failedOrPendingClose;
+      let retryCount = 0;
+      while (!this.#hostClosed) {
+        try {
+          await attempt;
+          this.#closed = true;
+          return;
+        } catch {
+          retryCount += 1;
+        }
+        await waitForCleanupRetry(
+          Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
+        );
+        if (this.#hostClosed) {
+          this.#closed = true;
+          return;
+        }
+        if (this.#hostClosePromise === attempt) {
           this.#hostClosePromise = null;
         }
-        const retry = this.#startHostClose({
-          reason: `${reason} (automatic cleanup recovery)`,
+        attempt = this.#startHostClose({
+          reason: `${reason} (automatic cleanup recovery ${retryCount})`,
         });
-        try {
-          await retry;
-          this.#closed = true;
-        } catch (error) {
-          if (this.#hostClosePromise === retry) {
-            this.#hostClosePromise = null;
-          }
-          throw error;
-        }
-      },
-    );
+      }
+    })();
     this.#hostCloseRecoveryPromise = recovery;
     this.#retainCleanup(recovery);
     void recovery
@@ -835,6 +838,13 @@ class CodexAcpxSession implements HarnessSession {
       throw new Error("Codex ACPX session is closing or closed");
     }
   }
+}
+
+function waitForCleanupRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    timer.unref();
+  });
 }
 
 function canonicalJson(value: unknown): string {
