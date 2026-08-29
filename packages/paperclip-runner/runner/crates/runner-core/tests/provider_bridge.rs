@@ -511,7 +511,7 @@ fn settles_completed_receipts_before_the_next_turn() {
     assert!(bridge
         .begin_call("call-next".into(), "get_task_context".into(), json!({}))
         .is_err());
-    bridge.settle_turn().unwrap();
+    bridge.settle_turn("provider_turn_terminated").unwrap();
     assert!(bridge
         .begin_call("call-next".into(), "get_task_context".into(), json!({}))
         .is_ok());
@@ -532,7 +532,7 @@ fn settlement_preserves_call_ids_for_the_durable_run() {
             is_error: false,
         })
         .unwrap();
-    bridge.settle_turn().unwrap();
+    bridge.settle_turn("provider_turn_terminated").unwrap();
 
     assert!(bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
@@ -550,13 +550,16 @@ fn settlement_preserves_call_ids_for_the_durable_run() {
 }
 
 #[test]
-fn refuses_to_settle_receipts_while_calls_are_pending() {
+fn settles_pending_receipts_with_explicit_terminal_results() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();
     bridge
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .unwrap();
 
-    assert!(bridge.settle_turn().is_err());
-    assert_eq!(bridge.pending_calls().count(), 1);
+    let settled = bridge.settle_turn("provider_turn_terminated").unwrap();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].call_id, "call-1");
+    assert!(settled[0].is_error);
+    assert_eq!(bridge.pending_calls().count(), 0);
 }
