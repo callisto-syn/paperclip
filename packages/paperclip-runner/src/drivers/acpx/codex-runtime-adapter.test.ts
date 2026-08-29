@@ -8,6 +8,7 @@ import type {
   AcpRuntimeOptions,
   AcpSessionStore,
 } from "acpx/runtime";
+import { decodeAcpxRuntimeHandleState } from "acpx/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import type { VerifiedAcpxCommandLease } from "./installation-integrity.js";
@@ -182,6 +183,7 @@ describe("Codex ACPX runtime adapter", () => {
       acpxRecordId: "recovered-record",
       acpSessionId: "recovered-backend-session",
       agentSessionId: "recovered-agent-session",
+      name: "recovered-runtime-name",
       cwd: "/workspace",
     } as never);
     const failure = new Error("recovered ACP handshake rejected");
@@ -199,11 +201,12 @@ describe("Codex ACPX runtime adapter", () => {
         },
       }),
     ).rejects.toBe(failure);
-    expect(runtime.close).toHaveBeenCalledWith({
+    expect(runtime.close).toHaveBeenCalledOnce();
+    const recoveredClose = vi.mocked(runtime.close).mock.calls[0]![0];
+    expect(recoveredClose).toMatchObject({
       handle: {
         sessionKey: "provider-key",
         backend: "acpx",
-        runtimeSessionName: "provider-key",
         cwd: "/workspace",
         acpxRecordId: "recovered-record",
         backendSessionId: "recovered-backend-session",
@@ -211,6 +214,17 @@ describe("Codex ACPX runtime adapter", () => {
       },
       reason: "ACPX session handshake failed",
       discardPersistentState: false,
+    });
+    expect(
+      decodeAcpxRuntimeHandleState(recoveredClose.handle.runtimeSessionName),
+    ).toEqual({
+      name: "recovered-runtime-name",
+      agent: "codex",
+      cwd: "/workspace",
+      mode: "persistent",
+      acpxRecordId: "recovered-record",
+      backendSessionId: "recovered-backend-session",
+      agentSessionId: "recovered-agent-session",
     });
     expect(recoveredStore.save).not.toHaveBeenCalled();
   });
@@ -234,6 +248,7 @@ describe("Codex ACPX runtime adapter", () => {
               acpxRecordId: "actual-record",
               acpSessionId: "backend-session",
               agentSessionId: "agent-session",
+              name: "actual-runtime-name",
               cwd: "/workspace",
             } as never);
             runtimeOptions.spawnAgent?.({
@@ -248,11 +263,12 @@ describe("Codex ACPX runtime adapter", () => {
         runtimeCloseTimeoutMs: 5,
       }),
     ).rejects.toThrow("ACPX session handshake and runtime cleanup failed");
-    expect(runtime.close).toHaveBeenCalledWith({
+    expect(runtime.close).toHaveBeenCalledOnce();
+    const stalledClose = vi.mocked(runtime.close).mock.calls[0]![0];
+    expect(stalledClose).toMatchObject({
       handle: {
         sessionKey: "provider-key",
         backend: "acpx",
-        runtimeSessionName: "provider-key",
         cwd: "/workspace",
         acpxRecordId: "actual-record",
         backendSessionId: "backend-session",
@@ -261,6 +277,9 @@ describe("Codex ACPX runtime adapter", () => {
       reason: "ACPX session handshake failed",
       discardPersistentState: false,
     });
+    expect(
+      decodeAcpxRuntimeHandleState(stalledClose.handle.runtimeSessionName),
+    ).toMatchObject({ name: "actual-runtime-name", agent: "codex" });
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 

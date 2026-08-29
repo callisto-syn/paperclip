@@ -4,6 +4,7 @@ import {
   createAcpRuntime,
   createAgentRegistry,
   createRuntimeStore,
+  encodeAcpxRuntimeHandleState,
   type AcpAgentRegistry,
   type AcpRuntime,
   type AcpRuntimeHandle,
@@ -54,9 +55,11 @@ export async function openCodexAcpxRuntime(
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
   const rememberHandshakeHandle = (record: AcpSessionRecord): void => {
+    const runtimeSessionName = record.name?.trim();
     if (
       typeof record.acpxRecordId !== "string"
       || record.acpxRecordId.length === 0
+      || !runtimeSessionName
       || record.cwd !== options.cwd
     ) {
       return;
@@ -64,7 +67,15 @@ export async function openCodexAcpxRuntime(
     failedHandshakeHandle = {
       sessionKey: options.providerSessionKey,
       backend: "acpx",
-      runtimeSessionName: options.providerSessionKey,
+      runtimeSessionName: encodeAcpxRuntimeHandleState({
+        name: runtimeSessionName,
+        agent: "codex",
+        cwd: record.cwd,
+        mode: "persistent",
+        acpxRecordId: record.acpxRecordId,
+        backendSessionId: record.acpSessionId,
+        agentSessionId: record.agentSessionId,
+      }),
       cwd: record.cwd,
       acpxRecordId: record.acpxRecordId,
       backendSessionId: record.acpSessionId,
