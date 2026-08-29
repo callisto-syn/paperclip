@@ -3402,13 +3402,20 @@ describe("Codex app-server Codex driver", () => {
     await expect(repeatedRecovery!.session!.startTurn({
       message: { role: "user", text: "Do not repeat recovery work." },
     })).rejects.toThrow("session cannot start another turn");
+    const spentRecoveryEvents: PrpEvent[] = [];
+    for await (const event of repeatedRecovery!.session!.events()) {
+      spentRecoveryEvents.push(event);
+    }
+    expect(
+      spentRecoveryEvents.some((event) => event.eventType.startsWith("turn.")),
+    ).toBe(false);
     expect(
       fourth.calls.filter((call) => call.method === "turn/start"),
     ).toHaveLength(0);
     await repeatedRecovery!.session!.close({ reason: "test complete" });
   });
 
-  it("adopts a disposition turn accepted before its checkpoint", async () => {
+  it("adopts a checkpointed disposition turn before its terminal is durable", async () => {
     const first = new FakeCodexTransport();
     const second = new FakeCodexTransport();
     second.readResponse = {
@@ -3437,7 +3444,10 @@ describe("Codex app-server Codex driver", () => {
     const preDispositionSnapshot = await original.snapshot();
     await original.close({ reason: "simulate crash after provider acceptance" });
 
-    const recovery = await driver.recoverSession?.(preDispositionSnapshot);
+    const recovery = await driver.recoverSession?.({
+      ...preDispositionSnapshot,
+      dispositionOnlyRecoveryConsumed: true,
+    });
     expect(recovery).toMatchObject({ recovered: true });
     await expect(recovery!.session!.snapshot()).resolves.toMatchObject({
       activeTurnId: "turn-2",

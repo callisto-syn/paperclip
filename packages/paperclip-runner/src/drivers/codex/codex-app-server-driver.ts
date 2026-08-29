@@ -638,7 +638,6 @@ export class CodexAppServerDriver implements HarnessDriver {
         && snapshot.semanticResult == null
         && recoveredActiveTurnId === null
         && (snapshot.terminalTurns?.length ?? 0) > 0
-        && !dispositionOnlyRecoveryConsumed
       ) {
         const turns = Array.isArray(existingThread.turns)
           ? existingThread.turns.map(record)
@@ -669,9 +668,11 @@ export class CodexAppServerDriver implements HarnessDriver {
           };
         }
         if (uncheckpointedTurnId.length > 0) {
-          // A previous process reached the provider but crashed before it could
-          // checkpoint the accepted turn. Adopt that exact turn instead of
-          // submitting the disposition-only recovery a second time.
+          // A previous process reached the provider but crashed before it
+          // could checkpoint the accepted turn or durably append its terminal.
+          // Inspect provider history even when the one-shot submitted marker
+          // was checkpointed, and adopt the exact turn instead of waiting on a
+          // reconstructed terminal session or submitting a duplicate.
           recoveredActiveTurnId = uncheckpointedTurnId;
           dispositionOnlyRecoveryConsumed = true;
           reconcileUncheckpointedDispositionTurn = true;
@@ -1142,7 +1143,15 @@ class CodexHarnessSession implements HarnessSession {
       },
       { itemId: `${input.opened.threadId}:model` },
     );
-    void this.#pumpNotifications();
+    if (this.#terminal) {
+      // A result-less disposition recovery that was already consumed has no
+      // live producer. Close its reconstructed stream after the finite resume
+      // facts so orchestration fails reconciliation promptly instead of
+      // waiting for a terminal event this session can never emit.
+      this.#events.close();
+    } else {
+      void this.#pumpNotifications();
+    }
   }
 
   ids(): ReturnType<HarnessSession["ids"]> {
