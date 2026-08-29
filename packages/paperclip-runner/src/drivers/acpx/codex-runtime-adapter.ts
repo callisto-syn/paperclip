@@ -91,8 +91,11 @@ export async function openCodexAcpxRuntime(
       return record;
     },
     async save(record) {
-      await baseStore.save(record);
+      // ACPX has already created this runtime-owned identity before it asks
+      // the store to persist it. Capture cleanup authority first so a storage
+      // rejection cannot orphan the live session created by the handshake.
       rememberHandshakeHandle(record);
+      await baseStore.save(record);
     },
   };
   const runtime = createRuntime({

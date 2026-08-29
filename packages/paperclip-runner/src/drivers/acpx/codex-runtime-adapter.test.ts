@@ -229,6 +229,50 @@ describe("Codex ACPX runtime adapter", () => {
     expect(recoveredStore.save).not.toHaveBeenCalled();
   });
 
+  it("closes a newly created session when its record save rejects", async () => {
+    const runtime = fakeRuntime();
+    const failingStore = store();
+    const failure = new Error("session store unavailable");
+    vi.mocked(failingStore.save).mockRejectedValue(failure);
+
+    await expect(
+      openCodexAcpxRuntime(openOptions(fakeCommand()), {
+        createRegistry: () => registry(),
+        createStore: () => failingStore,
+        createRuntime: (runtimeOptions) => {
+          vi.mocked(runtime.ensureSession).mockImplementation(async () => {
+            await runtimeOptions.sessionStore.save({
+              acpxRecordId: "new-record",
+              acpSessionId: "new-backend-session",
+              agentSessionId: "new-agent-session",
+              name: "new-runtime-name",
+              cwd: "/workspace",
+            } as never);
+            return HANDLE;
+          });
+          return runtime;
+        },
+      }),
+    ).rejects.toBe(failure);
+    expect(runtime.close).toHaveBeenCalledOnce();
+    const failedSaveClose = vi.mocked(runtime.close).mock.calls[0]![0];
+    expect(failedSaveClose).toMatchObject({
+      handle: {
+        sessionKey: "provider-key",
+        backend: "acpx",
+        cwd: "/workspace",
+        acpxRecordId: "new-record",
+        backendSessionId: "new-backend-session",
+        agentSessionId: "new-agent-session",
+      },
+      reason: "ACPX session handshake failed",
+      discardPersistentState: false,
+    });
+    expect(
+      decodeAcpxRuntimeHandleState(failedSaveClose.handle.runtimeSessionName),
+    ).toMatchObject({ name: "new-runtime-name", agent: "codex" });
+  });
+
   it("bounds a stalled runtime close before terminating a failed-handshake provider", async () => {
     const child = fakeChild();
     const command = fakeCommand();
