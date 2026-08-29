@@ -259,6 +259,38 @@ fn settles_completed_receipts_before_the_next_turn() {
 }
 
 #[test]
+fn settlement_preserves_call_ids_for_the_durable_run() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+    bridge
+        .apply_result(ToolResult {
+            call_id: "call-1".into(),
+            operation_id: "get_task_context".into(),
+            result: json!({"ok": true}),
+            is_error: false,
+        })
+        .unwrap();
+    bridge.settle_turn().unwrap();
+
+    assert!(bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .is_err());
+    bridge
+        .begin_call("call-2".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+
+    let encoded = serde_json::to_string(&bridge).unwrap();
+    let mut recovered: ProviderToolBridge = serde_json::from_str(&encoded).unwrap();
+    recovered.attach_existing_run().unwrap();
+    assert!(recovered
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .is_err());
+}
+
+#[test]
 fn refuses_to_settle_receipts_while_calls_are_pending() {
     let mut bridge = ProviderToolBridge::default();
     bridge.prepare(tools("computed")).unwrap();

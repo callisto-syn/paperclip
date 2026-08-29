@@ -15,6 +15,7 @@ const MAX_SCHEMA_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_SET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_CALLS: usize = 4_096;
+const MAX_SETTLED_CALL_IDS: usize = 65_536;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +61,8 @@ pub struct ProviderToolBridge {
     catalog_digest: Option<String>,
     pending: BTreeMap<String, PendingToolCall>,
     completed: BTreeMap<String, ToolResult>,
+    #[serde(default)]
+    settled_call_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +95,7 @@ impl ProviderToolBridge {
         }
         self.prepare_internal(tool_set, true)?;
         self.completed.clear();
+        self.settled_call_ids.clear();
         Ok(())
     }
 
@@ -100,6 +104,19 @@ impl ProviderToolBridge {
         // preserve them so an interrupted dispatcher can resume or replay the
         // authoritative result. `attach_run` remains the boundary that rejects
         // carrying pending calls into a different run.
+        if self.settled_call_ids.len() > MAX_SETTLED_CALL_IDS
+            || self
+                .settled_call_ids
+                .iter()
+                .any(|call_id| !is_stable_call_id(call_id))
+            || self.settled_call_ids.iter().any(|call_id| {
+                self.pending.contains_key(call_id) || self.completed.contains_key(call_id)
+            })
+        {
+            return Err(ProviderBridgeError::invalid(
+                "recovered settled provider tool call identities are invalid",
+            ));
+        }
         Ok(())
     }
 
@@ -211,7 +228,7 @@ impl ProviderToolBridge {
         operation_id: String,
         input: Value,
     ) -> Result<PendingToolCall, ProviderBridgeError> {
-        if call_id.is_empty() || call_id.len() > 160 || call_id.chars().any(char::is_control) {
+        if !is_stable_call_id(&call_id) {
             return Err(ProviderBridgeError::invalid("tool call id is invalid"));
         }
         validate_operation_id(&operation_id)?;
@@ -245,7 +262,7 @@ impl ProviderToolBridge {
                 ))
             };
         }
-        if self.completed.contains_key(&call_id) {
+        if self.completed.contains_key(&call_id) || self.settled_call_ids.contains(&call_id) {
             return Err(ProviderBridgeError::invalid(
                 "provider reused a completed tool call id",
             ));
@@ -323,9 +340,20 @@ impl ProviderToolBridge {
                 "cannot settle provider tool receipts while calls are pending",
             ));
         }
-        // Completed identities are needed only while their turn can be
-        // replayed. The provider session calls this durable turn boundary
-        // before admitting calls for the next turn.
+        if self
+            .settled_call_ids
+            .len()
+            .checked_add(self.completed.len())
+            .is_none_or(|total| total > MAX_SETTLED_CALL_IDS)
+        {
+            return Err(ProviderBridgeError::invalid(
+                "durable provider tool call identity limit reached",
+            ));
+        }
+        // Exact results are turn-scoped, but their IDs remain durable for the
+        // lifetime of the run so a provider retry cannot dispatch the same
+        // semantic action again after a turn boundary or recovery.
+        self.settled_call_ids.extend(self.completed.keys().cloned());
         self.completed.clear();
         Ok(())
     }
@@ -333,6 +361,10 @@ impl ProviderToolBridge {
     pub fn pending_calls(&self) -> impl Iterator<Item = &PendingToolCall> {
         self.pending.values()
     }
+}
+
+fn is_stable_call_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 160 && !value.chars().any(char::is_control)
 }
 
 pub fn authorized_tool_catalog_digest(
