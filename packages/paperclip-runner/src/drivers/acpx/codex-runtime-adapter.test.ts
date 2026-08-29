@@ -175,6 +175,46 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("closes a recovered session when its handshake rejects before another save", async () => {
+    const runtime = fakeRuntime();
+    const recoveredStore = store();
+    vi.mocked(recoveredStore.load).mockResolvedValue({
+      acpxRecordId: "recovered-record",
+      acpSessionId: "recovered-backend-session",
+      agentSessionId: "recovered-agent-session",
+      cwd: "/workspace",
+    } as never);
+    const failure = new Error("recovered ACP handshake rejected");
+
+    await expect(
+      openCodexAcpxRuntime(openOptions(fakeCommand()), {
+        createRegistry: () => registry(),
+        createStore: () => recoveredStore,
+        createRuntime: (runtimeOptions) => {
+          vi.mocked(runtime.ensureSession).mockImplementation(async () => {
+            await runtimeOptions.sessionStore.load("provider-key");
+            throw failure;
+          });
+          return runtime;
+        },
+      }),
+    ).rejects.toBe(failure);
+    expect(runtime.close).toHaveBeenCalledWith({
+      handle: {
+        sessionKey: "provider-key",
+        backend: "acpx",
+        runtimeSessionName: "provider-key",
+        cwd: "/workspace",
+        acpxRecordId: "recovered-record",
+        backendSessionId: "recovered-backend-session",
+        agentSessionId: "recovered-agent-session",
+      },
+      reason: "ACPX session handshake failed",
+      discardPersistentState: false,
+    });
+    expect(recoveredStore.save).not.toHaveBeenCalled();
+  });
+
   it("bounds a stalled runtime close before terminating a failed-handshake provider", async () => {
     const child = fakeChild();
     const command = fakeCommand();

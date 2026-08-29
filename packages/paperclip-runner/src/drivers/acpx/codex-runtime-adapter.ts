@@ -8,6 +8,7 @@ import {
   type AcpRuntime,
   type AcpRuntimeHandle,
   type AcpRuntimeOptions,
+  type AcpSessionRecord,
   type AcpSessionStore,
 } from "acpx/runtime";
 
@@ -52,27 +53,35 @@ export async function openCodexAcpxRuntime(
   const children = new SpawnedChildSet();
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
+  const rememberHandshakeHandle = (record: AcpSessionRecord): void => {
+    if (
+      typeof record.acpxRecordId !== "string"
+      || record.acpxRecordId.length === 0
+      || record.cwd !== options.cwd
+    ) {
+      return;
+    }
+    failedHandshakeHandle = {
+      sessionKey: options.providerSessionKey,
+      backend: "acpx",
+      runtimeSessionName: options.providerSessionKey,
+      cwd: record.cwd,
+      acpxRecordId: record.acpxRecordId,
+      backendSessionId: record.acpSessionId,
+      ...(record.agentSessionId
+        ? { agentSessionId: record.agentSessionId }
+        : {}),
+    };
+  };
   const sessionStore: AcpSessionStore = {
-    load: (sessionId) => baseStore.load(sessionId),
+    async load(sessionId) {
+      const record = await baseStore.load(sessionId);
+      if (record !== undefined) rememberHandshakeHandle(record);
+      return record;
+    },
     async save(record) {
       await baseStore.save(record);
-      if (
-        typeof record.acpxRecordId === "string" &&
-        record.acpxRecordId.length > 0 &&
-        record.cwd === options.cwd
-      ) {
-        failedHandshakeHandle = {
-          sessionKey: options.providerSessionKey,
-          backend: "acpx",
-          runtimeSessionName: options.providerSessionKey,
-          cwd: record.cwd,
-          acpxRecordId: record.acpxRecordId,
-          backendSessionId: record.acpSessionId,
-          ...(record.agentSessionId
-            ? { agentSessionId: record.agentSessionId }
-            : {}),
-        };
-      }
+      rememberHandshakeHandle(record);
     },
   };
   const runtime = createRuntime({
