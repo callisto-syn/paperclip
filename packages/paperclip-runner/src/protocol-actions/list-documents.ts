@@ -71,6 +71,15 @@ export const listDocumentsAction = {
   },
   "scenario": {
     "order": 2,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "list_documents",
+      "operationResultId": "example-result",
+      "value": {},
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "list_documents",
       "version": 1,

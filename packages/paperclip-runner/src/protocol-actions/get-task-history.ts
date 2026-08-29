@@ -78,6 +78,15 @@ export const getTaskHistoryAction = {
   },
   "scenario": {
     "order": 1,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "get_task_history",
+      "operationResultId": "example-result",
+      "value": {},
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "get_task_history",
       "version": 1,

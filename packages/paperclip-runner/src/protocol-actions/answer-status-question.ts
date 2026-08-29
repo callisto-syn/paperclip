@@ -145,6 +145,21 @@ export const answerStatusQuestionAction = {
   },
   "scenario": {
     "order": 6,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "answer_status_question",
+      "operationResultId": "example-result",
+      "value": {
+        "commandId": "example",
+        "disposition": "applied",
+        "stateRevision": 1,
+        "entityRefs": ["example"],
+        "scheduledWakeIds": ["example"]
+      },
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "answer_status_question",
       "version": 1,

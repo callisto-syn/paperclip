@@ -147,6 +147,21 @@ export const reportProgressAction = {
   },
   "scenario": {
     "order": 5,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "report_progress",
+      "operationResultId": "example-result",
+      "value": {
+        "commandId": "example",
+        "disposition": "applied",
+        "stateRevision": 1,
+        "entityRefs": ["example"],
+        "scheduledWakeIds": ["example"]
+      },
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "report_progress",
       "version": 1,

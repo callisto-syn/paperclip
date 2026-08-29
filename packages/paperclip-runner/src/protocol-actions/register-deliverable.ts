@@ -180,6 +180,21 @@ export const registerDeliverableAction = {
   },
   "scenario": {
     "order": 12,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "register_deliverable",
+      "operationResultId": "example-result",
+      "value": {
+        "commandId": "example",
+        "disposition": "applied",
+        "stateRevision": 1,
+        "entityRefs": ["example"],
+        "scheduledWakeIds": ["example"]
+      },
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "register_deliverable",
       "version": 1,

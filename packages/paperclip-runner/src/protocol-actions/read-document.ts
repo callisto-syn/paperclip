@@ -82,6 +82,15 @@ export const readDocumentAction = {
   },
   "scenario": {
     "order": 3,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "read_document",
+      "operationResultId": "example-result",
+      "value": {},
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "read_document",
       "version": 1,

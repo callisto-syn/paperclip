@@ -88,6 +88,15 @@ export const listDocumentRevisionsAction = {
   },
   "scenario": {
     "order": 4,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "list_document_revisions",
+      "operationResultId": "example-result",
+      "value": {},
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "list_document_revisions",
       "version": 1,

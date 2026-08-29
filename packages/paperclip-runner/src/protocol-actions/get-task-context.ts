@@ -73,6 +73,15 @@ export const getTaskContextAction = {
   },
   "scenario": {
     "order": 0,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "get_task_context",
+      "operationResultId": "example-result",
+      "value": {},
+      "commandResult": null,
+      "authorization": {}
+    },
     "descriptor": {
       "operationId": "get_task_context",
       "version": 1,

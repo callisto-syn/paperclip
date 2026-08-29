@@ -54,6 +54,15 @@ export const inspectOperationResultAction = {
   "live": null,
   "scenario": {
     "order": 13,
+    "successExample": {
+      "schema": "paperclip.capability.tool-result.v1",
+      "ok": true,
+      "operationId": "example",
+      "operationResultId": "example",
+      "value": "example",
+      "commandResult": "example",
+      "authorization": "example"
+    },
     "descriptor": {
       "operationId": "inspect_operation_result",
       "version": 1,

@@ -43,24 +43,15 @@ describe("core Paperclip protocol action contracts", () => {
         const scenarioInput = Object.fromEntries(
           callEntries.filter(([key]) => key !== "idempotencyKey"),
         );
-        const scenarioOutput = action.live === null
-          ? action.examples.success.result
-          : {
-            schema: "paperclip.capability.tool-result.v1",
-            ok: true,
-            operationId,
-            operationResultId: "example-result",
-            value: action.examples.success.result,
-            commandResult: null,
-            authorization: {},
-          };
-
         expect(
           ajv.validate(action.scenario.descriptor.inputSchema, scenarioInput),
           JSON.stringify(ajv.errors),
         ).toBe(true);
         expect(
-          ajv.validate(action.scenario.descriptor.outputSchema, scenarioOutput),
+          ajv.validate(
+            action.scenario.descriptor.outputSchema,
+            action.scenario.successExample,
+          ),
           JSON.stringify(ajv.errors),
         ).toBe(true);
       }
