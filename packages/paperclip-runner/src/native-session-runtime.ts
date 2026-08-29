@@ -252,6 +252,7 @@ async function consumeTurn(
   // A timeout can win the race while an iterator is still waiting for data.
   // Observe any later consumer rejection so it cannot become process-fatal.
   void consumer.catch(() => undefined);
+  let consumptionFailed = false;
   try {
     return await Promise.race([
       consumer,
@@ -264,6 +265,7 @@ async function consumeTurn(
       externalAbortFailure,
     ]);
   } catch (error) {
+    consumptionFailed = true;
     stopConsumer = true;
     appendAbort.abort(error);
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
@@ -298,6 +300,18 @@ async function consumeTurn(
     throw error;
   } finally {
     stopConsumer = true;
+    for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
+    inputTimers.clear();
+    const activeHandoffSettlement = handoffOperations.size > 0
+      ? Promise.allSettled([...handoffOperations])
+      : null;
+    if (!consumptionFailed && !appendAbort.signal.aborted) {
+      // A provider terminal revokes the live-turn authority of every pending
+      // durable handoff. Join those exact operations before reading the final
+      // result or closing the provider session, so a late handoff cannot
+      // mutate control-plane state after the run has completed.
+      appendAbort.abort(new Error("native turn reached a terminal state"));
+    }
     // Do not let failure escape while the provider iterator still owns a live
     // subscription. Cancellation above is responsible for releasing a blocked
     // `next()`; awaiting `return()` then synchronizes the iterator's `finally`
@@ -311,13 +325,17 @@ async function consumeTurn(
     const teardownSettlement = Promise.allSettled([
       iteratorTeardown,
       consumer,
-      ...(deferredHandoffSettlement ? [deferredHandoffSettlement] : []),
+      ...(deferredHandoffSettlement
+        ? [deferredHandoffSettlement]
+        : activeHandoffSettlement
+          ? [activeHandoffSettlement]
+          : []),
       ...(deferredGovernedSettlement ? [deferredGovernedSettlement] : []),
       ...(deferredSessionCancellationSettlement
         ? [deferredSessionCancellationSettlement]
         : []),
     ]);
-    if (appendAbort.signal.aborted) {
+    if (consumptionFailed) {
       if (await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS)) {
         await closeFailedSession();
       } else {
@@ -335,8 +353,6 @@ async function consumeTurn(
     }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
-    for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
-    inputTimers.clear();
   }
 }
 

@@ -1764,6 +1764,136 @@ describe("executeNativeSession recovery", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
   });
 
+  it("revokes and joins a pending durable handoff before successful finalization", async () => {
+    const request = {
+      schema: "paperclip.runtime_request.v2",
+      requestKind: "runtime",
+      requestId: "input-terminal",
+      type: "input",
+      status: "pending",
+      prompt: "Which region?",
+      input: {
+        schema: "paperclip.question_set.v1",
+        questions: [{
+          id: "region",
+          prompt: "Which region?",
+          required: true,
+          answerMode: "text",
+        }],
+      },
+      origin: { adapter: "mock" },
+      turnId: "turn-terminal",
+      itemId: "input-terminal",
+    };
+    let markHandoffStarted = () => {};
+    const handoffStarted = new Promise<void>((resolve) => {
+      markHandoffStarted = resolve;
+    });
+    let releaseHandoff = () => {};
+    let handoffSignal: AbortSignal | undefined;
+    const close = vi.fn(async () => undefined);
+    const readResult = vi.fn(async () => ({
+      result,
+      terminal,
+      turnId: "turn-terminal",
+    }));
+    const providerEvents = [
+      {
+        ...runnerEvent(1, "runtime_request.created", { request }),
+        turnId: "turn-terminal",
+      },
+      { ...runnerEvent(2, "turn.completed"), turnId: "turn-terminal" },
+    ];
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return {
+          resume: false,
+          typedEvents: true,
+          steering: false,
+          interruption: true,
+          structuredResult: true,
+          runtimeRequestHandoff: true,
+        };
+      },
+      async *events() {
+        yield providerEvents[0]!;
+        await handoffStarted;
+        yield providerEvents[1]!;
+      },
+      async startTurn() {
+        return { turnId: "turn-terminal" };
+      },
+      handoffRuntimeRequest(input) {
+        handoffSignal = input.signal;
+        markHandoffStarted();
+        return new Promise<"handed_off">((resolve) => {
+          releaseHandoff = () => resolve("handed_off");
+        });
+      },
+      result: readResult,
+      async snapshot() {
+        return {
+          backendKind: "mock",
+          sessionId: identity.sessionId,
+          identity,
+          providerSessionId: "provider-terminal",
+          cursor: "2",
+          activeTurnId: null,
+        };
+      },
+      close,
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "terminal-handoff-backend",
+          version: "1",
+          capabilities: await session.capabilities(),
+        };
+      },
+      async openSession() {
+        return session;
+      },
+    };
+    const appended: PrpEvent[] = [];
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async checkpointSession() {},
+      async appendEvent(event) {
+        appended.push(structuredClone(event as PrpEvent));
+        return {
+          cursor: appended.length,
+          highestContiguousSourceSeq: highestContiguous(appended),
+          disposition: "committed",
+        };
+      },
+      async replayEvents() {
+        return { events: [], highestContiguousSourceSeq: 0 };
+      },
+      async completeRun() {},
+    };
+
+    const execution = executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      runtimeInputLiveWindowMs: 1,
+    });
+
+    await handoffStarted;
+    await vi.waitFor(() => expect(handoffSignal?.aborted).toBe(true));
+    expect(readResult).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    releaseHandoff();
+    await expect(execution).resolves.toMatchObject({ result });
+    expect(readResult).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("keeps a structured input in the original turn when it resolves before expiry", async () => {
     const request = {
       schema: "paperclip.runtime_request.v2",
