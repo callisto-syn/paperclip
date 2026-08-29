@@ -335,7 +335,20 @@ describe("runtime context materialization", () => {
       context: context(assigned, instructions, "../outside"),
       codexHome,
     })).rejects.toThrow("skill name must be a safe relative path");
-    for (const runtimeName of ["CON", "con.txt", "group/AUX", "Lpt1.json"]) {
+    for (const runtimeName of [
+      "CON",
+      "con.txt",
+      "group/AUX",
+      "Lpt1.json",
+      "group:name",
+      "group?name",
+      "group*name",
+      'group"name',
+      "group<name",
+      "group>name",
+      "group|name",
+      "group\u0001name",
+    ]) {
       await expect(prepareIsolatedCodexHome({
         context: context(assigned, instructions, runtimeName),
         codexHome,

@@ -50,6 +50,7 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
     runtimeName.startsWith("/")
     || runtimeName.includes("\\")
     || runtimeName.includes("\0")
+    || segments.some((segment) => /[<>:"|?*\u0000-\u001f\u007f]/u.test(segment))
     || segments.some((segment) => !segment || segment === "." || segment === "..")
     || segments.some(isWin32ReservedPathSegment)
   ) {
