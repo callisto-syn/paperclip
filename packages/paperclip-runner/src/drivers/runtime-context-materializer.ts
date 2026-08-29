@@ -71,8 +71,14 @@ function portableRuntimeNameKey(runtimeName: string): string {
   // Skill assignments must remain unambiguous when the same context is moved
   // between the case-sensitive Linux runner and the case-insensitive default
   // filesystems on macOS or Windows. NFC also catches composed/decomposed
-  // aliases before either spelling reaches the staging tree.
-  return runtimeName.normalize("NFC").toLowerCase();
+  // aliases, while per-segment trimming matches Win32's treatment of trailing
+  // dots and spaces before either spelling reaches the staging tree.
+  return runtimeName
+    .normalize("NFC")
+    .split("/")
+    .map((segment) => segment.replace(/[ .]+$/u, ""))
+    .join("/")
+    .toLowerCase();
 }
 
 async function protectStagedTree(root: string): Promise<void> {

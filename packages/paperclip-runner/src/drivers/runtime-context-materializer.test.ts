@@ -229,7 +229,7 @@ describe("runtime context materialization", () => {
       codexHome,
     });
     const replacementContext = context(replacement, instructions, "group/child");
-    for (const runtimeName of ["group", "GROUP"]) {
+    for (const runtimeName of ["group", "GROUP", "group.", "group "]) {
       const collidingSkill = {
         ...replacementContext.skills[0]!,
         key: `company/${runtimeName}`,
@@ -256,6 +256,23 @@ describe("runtime context materialization", () => {
         await expect(stat(join(codexHome, "skills", "group"))).rejects.toThrow();
       }
     }
+
+    const win32AliasedChild = {
+      ...replacementContext.skills[0]!,
+      key: "company/group-dot-child",
+      runtimeName: "group./child",
+    };
+    const value = {
+      ...replacementContext,
+      skills: [...replacementContext.skills, win32AliasedChild],
+    };
+    await expect(prepareIsolatedCodexHome({
+      context: {
+        ...value,
+        aggregateDigest: canonicalNativeRuntimeContextDigest(value),
+      },
+      codexHome,
+    })).rejects.toThrow("skill names must not overlap");
   });
 
   it("does not report replacement failure after the live-tree swap commits", async () => {
