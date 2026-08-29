@@ -118,6 +118,14 @@ fn call_count(directory: &Path, method: &str) -> usize {
         .count()
 }
 
+fn recorded_tool_responses(directory: &Path) -> Vec<String> {
+    fs::read_to_string(directory.join("calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("tool-response:").map(str::to_owned))
+        .collect()
+}
+
 fn poll_and_ack(
     executor: &mut CodexCommandExecutor,
 ) -> Result<Vec<PolledEvent>, DurableRunnerError> {
@@ -1032,6 +1040,114 @@ fn durable_backend_routes_a_semantic_tool_result_back_to_codex() {
     }
     assert!(result_seen);
     assert!(terminal_seen);
+    executor.shutdown().expect("stop provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_replays_completed_results_without_mutating_the_event_queue() {
+    let directory = temporary_directory("durable-completed-tool-replay");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--emit-tool-call",
+            "--hold-turn",
+            "--replay-completed-tool-call-count",
+            "4",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare the durable Codex tool set");
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open the Codex session");
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Replay the completed fake tool call."}),
+        ))
+        .expect("start the Codex turn");
+
+    let mut input_seen = false;
+    for _ in 0..32 {
+        input_seen |= poll_and_ack(&mut executor)
+            .expect("poll semantic input")
+            .iter()
+            .any(|event| event.event_type == "semantic_tool.input");
+        if input_seen {
+            break;
+        }
+    }
+    assert!(input_seen, "durable semantic input is emitted");
+
+    executor
+        .execute(&command(
+            "tool-result",
+            4,
+            "semantic_tool.result",
+            json!({
+                "callId": "semantic-call-1",
+                "operationId": "get_task_context",
+                "result": {"ok": true, "task": {"id": "task-1"}},
+                "isError": false,
+            }),
+        ))
+        .expect("deliver the original durable semantic result");
+    let result_events = poll_and_ack(&mut executor).expect("acknowledge semantic result");
+    assert_eq!(
+        result_events
+            .iter()
+            .filter(|event| event.event_type == "semantic_tool.result")
+            .count(),
+        1
+    );
+
+    let state_path = directory.join("codex-provider-state.json");
+    let state_before_replays = fs::read(&state_path).expect("read state before exact replays");
+    let expected_response = r#"{"ok":true,"task":{"id":"task-1"}}"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while recorded_tool_responses(&directory).len() < 5 && std::time::Instant::now() < deadline {
+        let events = poll_and_ack(&mut executor).expect("service completed tool replay");
+        assert!(
+            events.iter().all(|event| {
+                event.event_type != "semantic_tool.input"
+                    && event.event_type != "semantic_tool.reconciled"
+                    && event.event_type != "semantic_tool.result"
+            }),
+            "an exact completed replay must not add semantic reconciliation events"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let responses = recorded_tool_responses(&directory);
+    assert_eq!(
+        responses.len(),
+        5,
+        "the original result and four replays return"
+    );
+    assert!(responses
+        .iter()
+        .all(|response| response == expected_response));
+    assert_eq!(
+        fs::read(&state_path).expect("read state after exact replays"),
+        state_before_replays,
+        "exact completed replays must not consume durable event capacity"
+    );
+
     executor.shutdown().expect("stop provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }

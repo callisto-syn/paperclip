@@ -134,6 +134,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let emit_tool_call_on_resume = args
         .iter()
         .any(|value| value == "--emit-tool-call-on-resume");
+    let replay_completed_tool_call_count = argument(&args, "--replay-completed-tool-call-count")
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or_default();
     let finish_turn_with_pending_tool = args
         .iter()
         .any(|value| value == "--finish-turn-with-pending-tool");
@@ -195,6 +199,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut interrupt_count = 0_u64;
     let mut delayed_interrupt_terminal_scheduled = false;
     let mut answered_questions = 0u8;
+    let mut replayed_completed_tool_calls = 0_u64;
 
     for line in io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line?)?;
@@ -227,7 +232,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if result != json!({"ok": true, "task": {"id": "task-1"}}) {
                 return Err("semantic tool response changed the operation result".into());
             }
-            finish_turn(&state_path, &mut state, "completed")?;
+            log_call(call_log.as_deref(), &format!("tool-response:{text}"))?;
+            if replayed_completed_tool_calls < replay_completed_tool_call_count {
+                replayed_completed_tool_calls += 1;
+                send(json!({
+                    "id": "tool-request-1",
+                    "method": "item/tool/call",
+                    "params": {
+                        "threadId": state.thread_id,
+                        "turnId": state.active_turn_id,
+                        "callId": "semantic-call-1",
+                        "tool": "get_task_context",
+                        "arguments": {}
+                    }
+                }))?;
+            } else if !hold_turn {
+                finish_turn(&state_path, &mut state, "completed")?;
+            }
             continue;
         }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
