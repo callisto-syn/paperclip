@@ -161,6 +161,24 @@ describe("ACP form question adapter", () => {
     ).toThrow(/more than 128 options/);
   });
 
+  it("ignores unknown required names before applying field semantics", () => {
+    const normalized = normalizeAcpFormElicitation({
+      mode: "form",
+      requestedSchema: {
+        type: "object",
+        required: [
+          ...Array.from({ length: 80 }, (_, index) => `unknown-${index}`),
+          "known",
+        ],
+        properties: { known: { type: "string" } },
+      },
+    });
+
+    expect(normalized?.questionSet.questions).toEqual([
+      expect.objectContaining({ required: true }),
+    ]);
+  });
+
   it("preserves property names without allowing prototype mutation", () => {
     const properties = JSON.parse(
       '{"__proto__":{"type":"string","title":"Value"}}',

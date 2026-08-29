@@ -62,16 +62,16 @@ export function normalizeAcpFormElicitation(
       `ACP form elicitation must define between 1 and ${MAX_ACP_FORM_FIELDS} supported properties`,
     );
   }
+  const propertyNames = new Set(propertyEntries.map(([name]) => name));
   const required = new Set(
     Array.isArray(schema.required)
       ? schema.required
-          .slice(0, MAX_ACP_FORM_FIELDS + 1)
-          .filter((value): value is string => typeof value === "string")
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && propertyNames.has(value),
+          )
       : [],
   );
-  if (required.size > MAX_ACP_FORM_FIELDS) {
-    throw new Error("ACP form elicitation has too many required properties");
-  }
   const bindings = propertyEntries.map(([propertyName, value], index) =>
     normalizeField(propertyName, value, index, required.has(propertyName)),
   );
