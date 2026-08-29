@@ -14,22 +14,23 @@ const schema = JSON.parse(
   ),
 );
 const validate = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
+const protocolVersion = schema.$defs.request.properties.protocolVersion.const;
 
 const messages = [
   {
-    protocolVersion: 2,
+    protocolVersion,
     id: 1,
     command: "initialize",
     params: {},
   },
   {
-    protocolVersion: 2,
+    protocolVersion,
     id: 1,
     ok: true,
     result: {},
   },
   {
-    protocolVersion: 2,
+    protocolVersion,
     sequence: 1,
     eventType: "runtime.event",
     runId: "run-1",
@@ -46,12 +47,12 @@ test("the ACPX sidecar schema accepts each versioned message family", () => {
 
 test("the ACPX sidecar schema fails closed on drift", () => {
   for (const message of [
-    { ...messages[0], protocolVersion: 3 },
+    { ...messages[0], protocolVersion: protocolVersion + 1 },
     { ...messages[0], command: "session.destroy" },
-    { protocolVersion: 2, id: 1, ok: true, result: {}, error: error() },
-    { protocolVersion: 2, id: 1, ok: true },
-    { protocolVersion: 2, id: 1, ok: false },
-    { protocolVersion: 2, id: 1, ok: false, result: {}, error: error() },
+    { protocolVersion, id: 1, ok: true, result: {}, error: error() },
+    { protocolVersion, id: 1, ok: true },
+    { protocolVersion, id: 1, ok: false },
+    { protocolVersion, id: 1, ok: false, result: {}, error: error() },
     { ...messages[2], unexpected: true },
   ]) {
     assert.equal(validate(message), false);
