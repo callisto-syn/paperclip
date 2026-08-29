@@ -15,6 +15,13 @@ const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 
+interface QuarantinedSessionCleanup {
+  session: NativeSession;
+  attempt: Promise<void> | null;
+}
+
+const quarantinedSessionCleanups = new Set<QuarantinedSessionCleanup>();
+
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
   backend: NativeSessionBackend;
@@ -138,6 +145,44 @@ function waitForSessionCloseRetry(): Promise<void> {
     const timer = setTimeout(resolve, FAILED_SESSION_CLOSE_RETRY_MS);
     timer.unref?.();
   });
+}
+function quarantineSessionCleanup(session: NativeSession): void {
+  if ([...quarantinedSessionCleanups].some((entry) => entry.session === session)) {
+    return;
+  }
+  quarantinedSessionCleanups.add({ session, attempt: null });
+}
+
+async function retryQuarantinedSessionCleanups(): Promise<void> {
+  const observations: Promise<unknown>[] = [];
+  for (const cleanup of quarantinedSessionCleanups) {
+    if (cleanup.attempt === null) {
+      const attempt = Promise.resolve().then(() => cleanup.session.close({
+        reason: "native session quarantined cleanup retry",
+      }));
+      cleanup.attempt = attempt;
+      void attempt.then(
+        () => quarantinedSessionCleanups.delete(cleanup),
+        () => {
+          if (cleanup.attempt === attempt) cleanup.attempt = null;
+        },
+      );
+    }
+    if (cleanup.attempt) {
+      observations.push(
+        settlesWithin(
+          cleanup.attempt,
+          FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+        ).catch(() => false),
+      );
+    }
+  }
+  await Promise.all(observations);
+  if (quarantinedSessionCleanups.size > 0) {
+    throw new Error(
+      "native_session_cleanup_quarantined: prior session cleanup remains incomplete",
+    );
+  }
 }
 async function consumeTurn(
   session: NativeSession,
@@ -576,6 +621,7 @@ function checkpointedResultlessDispositionFallback(input: {
  * authority through ControlPlanePort; provider/session behavior stays here.
  */
 export async function executeNativeSession(options: ExecuteNativeSessionOptions): Promise<NativeSessionExecutionResult> {
+  await retryQuarantinedSessionCleanups();
   const input = parseNativeExecutionInput(options.input);
   const descriptor = await options.backend.descriptor();
   if ("runtimeContext" in input) {
@@ -761,6 +807,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             return;
           } catch (error) {
             if (retryCount >= MAX_FAILED_SESSION_CLOSE_RETRIES) {
+              quarantineSessionCleanup(session);
               throw error;
             }
             retryCount += 1;

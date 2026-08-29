@@ -331,6 +331,14 @@ describe("Codex ACPX harness driver", () => {
     await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(4));
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
     expect(fixture.host.close).toHaveBeenCalledTimes(4);
+    await expect(
+      fixture.driver.openSession({
+        runId: "run-after-quarantine",
+        normalizedSessionId: "session-2",
+        workingDirectory: "/workspace",
+      }),
+    ).rejects.toThrow("quarantined host cleanup remains incomplete");
+    expect(fixture.host.close).toHaveBeenCalledTimes(5);
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {

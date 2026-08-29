@@ -83,6 +83,12 @@ interface CodexAcpxHost {
   close(input: { reason: string }): Promise<void>;
 }
 
+interface QuarantinedHostCleanup {
+  host: CodexAcpxHost;
+  reason: string;
+  attempt: Promise<void> | null;
+}
+
 export interface CodexAcpxDriverDependencies {
   openHost?: (options: OpenAcpxRuntimeHostOptions) => Promise<CodexAcpxHost>;
   /** Internal test seam; production uses the fixed close-settlement bound. */
@@ -98,6 +104,7 @@ export class CodexAcpxDriver implements HarnessDriver {
   readonly #closeSettlementTimeoutMs: number;
   readonly #maxBufferedEvents: number;
   readonly #cleanupOwners = new Set<Promise<void>>();
+  readonly #quarantinedHostCleanups = new Set<QuarantinedHostCleanup>();
 
   constructor(
     options: CodexAcpxDriverOptions,
@@ -171,6 +178,7 @@ export class CodexAcpxDriver implements HarnessDriver {
   }
 
   async openSession(input: OpenHarnessSessionInput): Promise<HarnessSession> {
+    await this.#retryQuarantinedHostCleanups();
     let session: CodexAcpxSession | null = null;
     const host = await this.#openHost({
       runtimeDirectory: this.#options.runtimeDirectory,
@@ -202,6 +210,8 @@ export class CodexAcpxDriver implements HarnessDriver {
         closeSettlementTimeoutMs: this.#closeSettlementTimeoutMs,
         maxBufferedEvents: this.#maxBufferedEvents,
         retainCleanup: (cleanup) => this.#retainCleanup(cleanup),
+        quarantineCleanup: (hostToRetain, reason) =>
+          this.#quarantineHostCleanup(hostToRetain, reason),
       });
       return session;
     } catch (error) {
@@ -222,6 +232,45 @@ export class CodexAcpxDriver implements HarnessDriver {
       .finally(() => this.#cleanupOwners.delete(cleanup))
       .catch(() => undefined);
   }
+
+  #quarantineHostCleanup(host: CodexAcpxHost, reason: string): void {
+    if ([...this.#quarantinedHostCleanups].some((entry) => entry.host === host)) {
+      return;
+    }
+    this.#quarantinedHostCleanups.add({ host, reason, attempt: null });
+  }
+
+  async #retryQuarantinedHostCleanups(): Promise<void> {
+    const observations: Promise<unknown>[] = [];
+    for (const cleanup of this.#quarantinedHostCleanups) {
+      if (cleanup.attempt === null) {
+        const attempt = Promise.resolve().then(() => cleanup.host.close({
+          reason: `${cleanup.reason} (quarantined cleanup retry)`,
+        }));
+        cleanup.attempt = attempt;
+        this.#retainCleanup(attempt);
+        void attempt.then(
+          () => this.#quarantinedHostCleanups.delete(cleanup),
+          () => {
+            if (cleanup.attempt === attempt) cleanup.attempt = null;
+          },
+        );
+      }
+      if (cleanup.attempt) {
+        observations.push(
+          settleWithin(cleanup.attempt, this.#closeSettlementTimeoutMs).catch(
+            () => undefined,
+          ),
+        );
+      }
+    }
+    await Promise.all(observations);
+    if (this.#quarantinedHostCleanups.size > 0) {
+      throw new Error(
+        "Codex ACPX cannot open a new session while quarantined host cleanup remains incomplete",
+      );
+    }
+  }
 }
 
 class CodexAcpxSession implements HarnessSession {
@@ -233,6 +282,7 @@ class CodexAcpxSession implements HarnessSession {
   readonly #maxBufferedEvents: number;
   readonly #events: AsyncQueue<PrpEvent>;
   readonly #retainCleanup: (cleanup: Promise<void>) => void;
+  readonly #quarantineCleanup: (host: CodexAcpxHost, reason: string) => void;
   readonly #transcript: Array<{ event: PrpEvent; bytes: number }> = [];
   readonly #terminalTurns = new Map<string, string>();
   readonly #sourceInstanceId: string;
@@ -265,6 +315,7 @@ class CodexAcpxSession implements HarnessSession {
     closeSettlementTimeoutMs: number;
     maxBufferedEvents: number;
     retainCleanup: (cleanup: Promise<void>) => void;
+    quarantineCleanup: (host: CodexAcpxHost, reason: string) => void;
   }) {
     const identity = input.host.identity();
     if (identity.normalizedSessionId !== input.input.normalizedSessionId) {
@@ -277,6 +328,7 @@ class CodexAcpxSession implements HarnessSession {
     this.#closeSettlementTimeoutMs = input.closeSettlementTimeoutMs;
     this.#maxBufferedEvents = input.maxBufferedEvents;
     this.#retainCleanup = input.retainCleanup;
+    this.#quarantineCleanup = input.quarantineCleanup;
     this.#events = new AsyncQueue<PrpEvent>(input.maxBufferedEvents);
     this.#sourceInstanceId = stableId(
       "paperclip-acpx",
@@ -586,6 +638,7 @@ class CodexAcpxSession implements HarnessSession {
           return;
         } catch (error) {
           if (retryCount >= MAX_AUTONOMOUS_HOST_CLOSE_RETRIES) {
+            this.#quarantineCleanup(this.#host, reason);
             throw error;
           }
           retryCount += 1;
