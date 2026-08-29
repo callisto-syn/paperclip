@@ -1,4 +1,4 @@
-import { link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,7 +10,7 @@ import {
 } from "./workspace-file-reference.js";
 
 describe("workspace file references", () => {
-  it("normalizes Markdown links and verifies a bounded preview", async () => {
+  it("normalizes Markdown links without retaining unproven file bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "paperclip-file-reference-"));
     try {
       await writeFile(join(root, "guide.md"), "# Guide\n\nSafe content.\n");
@@ -27,13 +27,9 @@ describe("workspace file references", () => {
         displayName: "the guide",
         presentation: "document",
         line: 2,
-        preview: process.platform === "linux" ? "# Guide\n\nSafe content.\n" : null,
+        preview: null,
+        contentDigest: null,
       });
-      if (process.platform === "linux") {
-        expect(references[0]?.contentDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
-      } else {
-        expect(references[0]?.contentDigest).toBeNull();
-      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -76,6 +72,34 @@ describe("workspace file references", () => {
       const protectedPath = join(outside, "protected.md");
       await writeFile(protectedPath, "must not be disclosed");
       await link(protectedPath, join(root, "linked.md"));
+
+      await expect(discoverPaperclipWorkspaceFileReferences(
+        root,
+        "[linked](linked.md)",
+        "turn-1",
+      )).resolves.toEqual([
+        expect.objectContaining({
+          path: "linked.md",
+          preview: null,
+          contentDigest: null,
+        }),
+      ]);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(outside, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("does not expose bytes after an outside hard link is removed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-file-reference-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "paperclip-file-reference-outside-"));
+    try {
+      const protectedPath = join(outside, "protected.md");
+      await writeFile(protectedPath, "must not be disclosed");
+      await link(protectedPath, join(root, "linked.md"));
+      await unlink(protectedPath);
 
       await expect(discoverPaperclipWorkspaceFileReferences(
         root,

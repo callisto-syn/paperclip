@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const PAPERCLIP_WORKSPACE_FILE_REFERENCE_SCHEMA = "paperclip.workspace.file_reference.v1" as const;
@@ -20,8 +19,6 @@ export interface PaperclipWorkspaceFileReference {
 }
 
 const MAX_REFERENCES = 32;
-const MAX_PREVIEW_BYTES = 256 * 1024;
-const MAX_READ_BYTES = 1024 * 1024;
 const MAX_LINE_NUMBER = 1_000_000;
 
 function media(path: string): Pick<PaperclipWorkspaceFileReference, "mediaType" | "presentation"> {
@@ -81,17 +78,6 @@ function workspaceRelativePath(root: string, target: string): string | null {
   return candidate.split(sep).join("/");
 }
 
-async function canonicalOpenedDescriptorPath(fd: number): Promise<string | null> {
-  try {
-    return await realpath(`/proc/self/fd/${fd}`);
-  } catch {
-    // Node does not expose openat(2) or F_GETPATH portably. Hosts without a
-    // descriptor-backed canonical path retain reference metadata but must not
-    // expose file bytes based on a mutable pathname check.
-    return null;
-  }
-}
-
 export function paperclipWorkspaceFileReferencesFromText(
   workspace: string,
   assistantText: string,
@@ -141,51 +127,12 @@ export async function discoverPaperclipWorkspaceFileReferences(
     let canonicalPath: string;
     try { canonicalPath = await realpath(resolve(workspace, reference.path)); } catch { continue; }
     if (workspaceRelativePath(canonicalRoot, canonicalPath) === null) continue;
-    let bytes: Buffer;
-    try {
-      const handle = await open(
-        canonicalPath,
-        constants.O_RDONLY | constants.O_NOFOLLOW,
-      );
-      try {
-        const openedInfo = await handle.stat();
-        if (!openedInfo.isFile()) continue;
-        if (openedInfo.nlink !== 1) {
-          // A descriptor path proves where this link lives, not where every
-          // link to the same inode lives. Refuse bytes for multiply-linked
-          // files so an in-workspace hard link cannot disclose outside data.
-          verified.push(reference);
-          continue;
-        }
-        const openedPath = await canonicalOpenedDescriptorPath(handle.fd);
-        if (openedPath === null) {
-          verified.push(reference);
-          continue;
-        }
-        if (workspaceRelativePath(canonicalRoot, openedPath) === null) continue;
-        if (openedInfo.size > MAX_READ_BYTES) {
-          verified.push({ ...reference, previewTruncated: true });
-          continue;
-        }
-        bytes = Buffer.alloc(openedInfo.size);
-        let offset = 0;
-        while (offset < bytes.length) {
-          const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
-          if (bytesRead === 0) break;
-          offset += bytesRead;
-        }
-        bytes = bytes.subarray(0, offset);
-      } finally {
-        await handle.close();
-      }
-    } catch { continue; }
-    const binary = bytes.subarray(0, Math.min(bytes.length, 8_192)).includes(0);
-    verified.push({
-      ...reference,
-      preview: binary ? null : bytes.subarray(0, MAX_PREVIEW_BYTES).toString("utf8"),
-      previewTruncated: bytes.length > MAX_PREVIEW_BYTES,
-      contentDigest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-    });
+    // POSIX exposes an inode's current links, not where its bytes originated.
+    // Once an outside hard link is removed, an in-workspace link is
+    // indistinguishable from a file created inside the workspace. Keep the
+    // canonical, bounded reference metadata but do not retain bytes until a
+    // trusted workspace snapshot/manifest can prove file provenance.
+    verified.push(reference);
   }
   return verified;
 }
