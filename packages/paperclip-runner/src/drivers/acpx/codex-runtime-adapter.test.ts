@@ -176,6 +176,42 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("aggregates asynchronous provider signal errors after a failed handshake", async () => {
+    const child = failingSignalChild();
+    const command = fakeCommand();
+    vi.mocked(command.spawn).mockReturnValue(child.child);
+    const handshakeError = new Error("ACP handshake rejected");
+    const runtime = fakeRuntime();
+
+    const result = openCodexAcpxRuntime(openOptions(command), {
+      createRegistry: () => registry(),
+      createStore: () => store(),
+      createRuntime: (options) => {
+        vi.mocked(runtime.ensureSession).mockImplementation(async () => {
+          options.spawnAgent?.({
+            command: "ignored",
+            args: ["--stdio"],
+            options: {},
+          });
+          throw handshakeError;
+        });
+        return runtime;
+      },
+    });
+
+    await expect(result).rejects.toMatchObject({
+      errors: [
+        handshakeError,
+        ...child.errors,
+        expect.objectContaining({
+          message: "ACPX provider did not exit after SIGKILL",
+        }),
+      ],
+    });
+    expect(child.child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(child.child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
   it("closes a recovered session when its handshake rejects before another save", async () => {
     const runtime = fakeRuntime();
     const recoveredStore = store();
@@ -327,6 +363,40 @@ describe("Codex ACPX runtime adapter", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("rejects close with asynchronous provider signal errors", async () => {
+    const runtime = fakeRuntime();
+    const command = fakeCommand();
+    const child = failingSignalChild();
+    let runtimeOptions: AcpRuntimeOptions | undefined;
+    vi.mocked(command.spawn).mockReturnValue(child.child);
+    const port = await openCodexAcpxRuntime(openOptions(command), {
+      createRegistry: () => registry(),
+      createStore: () => store(),
+      createRuntime: (options) => {
+        runtimeOptions = options;
+        return runtime;
+      },
+    });
+    runtimeOptions?.spawnAgent?.({
+      command: "ignored",
+      args: ["--stdio"],
+      options: {},
+    });
+
+    await expect(port.close({ reason: "test complete" })).rejects.toMatchObject(
+      {
+        errors: [
+          ...child.errors,
+          expect.objectContaining({
+            message: "ACPX provider did not exit after SIGKILL",
+          }),
+        ],
+      },
+    );
+    expect(child.child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(child.child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
   it("rejects non-Codex profiles before constructing ACPX", async () => {
     const createRuntime = vi.fn();
     await expect(
@@ -411,6 +481,27 @@ function fakeChild(): ChildProcess {
     return true;
   });
   return child;
+}
+
+function failingSignalChild(): {
+  child: ChildProcess;
+  errors: [Error, Error];
+} {
+  const child = new EventEmitter() as ChildProcess;
+  const errors: [Error, Error] = [
+    new Error("SIGTERM delivery failed"),
+    new Error("SIGKILL delivery failed"),
+  ];
+  Object.defineProperties(child, {
+    exitCode: { value: null, writable: true },
+    signalCode: { value: null, writable: true },
+  });
+  child.kill = vi.fn((signal) => {
+    const error = signal === "SIGTERM" ? errors[0] : errors[1];
+    queueMicrotask(() => child.emit("error", error));
+    return true;
+  });
+  return { child, errors };
 }
 
 function registry(): AcpAgentRegistry {

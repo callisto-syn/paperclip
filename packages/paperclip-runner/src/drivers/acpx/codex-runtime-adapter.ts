@@ -274,13 +274,26 @@ async function closeRuntimeWithin(
 }
 
 class SpawnedChildSet {
-  readonly #children = new Set<ChildProcess>();
+  readonly #children = new Set<{
+    child: ChildProcess;
+    errors: unknown[];
+  }>();
 
   add(child: ChildProcess): ChildProcess {
-    this.#children.add(child);
-    const forget = () => this.#children.delete(child);
+    const tracked = { child, errors: [] as unknown[] };
+    this.#children.add(tracked);
+    const onError = (error: unknown) => tracked.errors.push(error);
+    const forget = () => this.#children.delete(tracked);
+    const forgetAndDetach = () => {
+      forget();
+      child.off("error", onError);
+    };
+    // ChildProcess reports some spawn and signal-delivery failures through an
+    // asynchronous `error` event. Observe those for the child's whole tracked
+    // lifetime so cleanup can report them instead of crashing runnerd.
+    child.on("error", onError);
     child.once("exit", forget);
-    child.once("close", forget);
+    child.once("close", forgetAndDetach);
     return child;
   }
 
@@ -288,21 +301,35 @@ class SpawnedChildSet {
     const errors: unknown[] = [];
     const children = [...this.#children];
     await Promise.all(
-      children.map(async (child) => {
-        if (!running(child)) return;
-        try {
-          child.kill("SIGTERM");
-        } catch (error) {
-          errors.push(error);
+      children.map(async (tracked) => {
+        const { child } = tracked;
+        if (running(child)) {
+          const terminateOutcome = await signalAndWaitForExit(
+            child,
+            "SIGTERM",
+            2_000,
+          );
+          if (terminateOutcome.error !== undefined) {
+            pushUnique(errors, terminateOutcome.error);
+          }
+          if (!terminateOutcome.exited && running(child)) {
+            const killOutcome = await signalAndWaitForExit(
+              child,
+              "SIGKILL",
+              2_000,
+            );
+            if (killOutcome.error !== undefined) {
+              pushUnique(errors, killOutcome.error);
+            }
+            if (!killOutcome.exited && running(child)) {
+              errors.push(
+                new Error("ACPX provider did not exit after SIGKILL"),
+              );
+            }
+          }
         }
-        if (await waitForExit(child, 2_000)) return;
-        try {
-          child.kill("SIGKILL");
-        } catch (error) {
-          errors.push(error);
-        }
-        if (!(await waitForExit(child, 2_000))) {
-          errors.push(new Error("ACPX provider did not exit after SIGKILL"));
+        for (const error of tracked.errors) {
+          pushUnique(errors, error);
         }
       }),
     );
@@ -314,28 +341,45 @@ function running(child: ChildProcess): boolean {
   return child.exitCode === null && child.signalCode === null;
 }
 
-async function waitForExit(
+async function signalAndWaitForExit(
   child: ChildProcess,
+  signal: NodeJS.Signals,
   timeoutMs: number,
-): Promise<boolean> {
-  if (!running(child)) return true;
-  return await new Promise<boolean>((resolve) => {
+): Promise<{ exited: boolean; error?: unknown }> {
+  if (!running(child)) return { exited: true };
+  return await new Promise<{ exited: boolean; error?: unknown }>((resolve) => {
     let settled = false;
-    const finish = (exited: boolean) => {
+    const finish = (outcome: { exited: boolean; error?: unknown }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       child.off("exit", onExit);
       child.off("close", onExit);
-      resolve(exited);
+      child.off("error", onError);
+      resolve(outcome);
     };
-    const onExit = () => finish(true);
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    const onExit = () => finish({ exited: true });
+    const onError = (error: unknown) => finish({ exited: false, error });
+    const timer = setTimeout(() => finish({ exited: false }), timeoutMs);
     timer.unref();
     child.once("exit", onExit);
     child.once("close", onExit);
-    if (!running(child)) finish(true);
+    child.once("error", onError);
+    if (!running(child)) {
+      finish({ exited: true });
+      return;
+    }
+    try {
+      child.kill(signal);
+      if (!running(child)) finish({ exited: true });
+    } catch (error) {
+      finish({ exited: false, error });
+    }
   });
+}
+
+function pushUnique(errors: unknown[], error: unknown): void {
+  if (!errors.includes(error)) errors.push(error);
 }
 
 function requireIdentity(handle: AcpRuntimeHandle): AcpxRuntimePortIdentity {
