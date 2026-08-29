@@ -825,18 +825,35 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         approval.status = command.decision;
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();
+        const wakeTargets: Array<{ actorId: string; taskId: string }> = [];
         for (const linkedTaskId of approval.taskIds) {
           const linkedTask = this.#task(linkedTaskId);
           this.#assertCompany(task.companyId, linkedTask.companyId);
-          // A wake is an executable handoff. Prefer the task assignee because
-          // openFixtureRun deliberately rejects a different actor for an
-          // assigned task; use the requester only for an unassigned task.
-          const wakeActorId =
-            linkedTask.assigneeActorId ?? approval.requestedByActorId;
-          if (wakeActorId === null) continue;
+          if (linkedTask.assigneeActorId !== null) {
+            wakeTargets.push({
+              actorId: linkedTask.assigneeActorId,
+              taskId: linkedTask.id,
+            });
+          }
+        }
+        // Resolution is both a task handoff and a reply to the requesting
+        // actor. A shared approval therefore wakes each executable assignee
+        // and the requester once on the approval's canonical linked task.
+        const requesterTaskId = approval.taskIds[0];
+        if (approval.requestedByActorId !== null && requesterTaskId !== undefined) {
+          wakeTargets.push({
+            actorId: approval.requestedByActorId,
+            taskId: requesterTaskId,
+          });
+        }
+        const scheduledTargets = new Set<string>();
+        for (const target of wakeTargets) {
+          const targetKey = `${target.actorId}\u0000${target.taskId}`;
+          if (scheduledTargets.has(targetKey)) continue;
+          scheduledTargets.add(targetKey);
           const wakeId = this.#scheduleWake(
-            wakeActorId,
-            linkedTask.id,
+            target.actorId,
+            target.taskId,
             "approval_resolved",
             { approvalId: approval.id, decision: command.decision },
             0,
