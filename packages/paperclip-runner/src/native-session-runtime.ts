@@ -10,6 +10,7 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
+const GOVERNED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -53,9 +54,9 @@ export interface ExecuteNativeSessionOptions {
     turnId: string | null;
     event: PrpEvent;
     /**
-     * Resolution must settle when this signal aborts. The runtime joins the
-     * resolver before closing the session, so even a non-cooperative resolver
-     * cannot mutate control-plane state after teardown.
+     * Resolution must settle when this signal aborts. The runtime grants a
+     * bounded settlement window before closing the provider session; callers
+     * must treat the aborted signal as revocation of mutation authority.
      */
     signal: AbortSignal;
   }) => Promise<PrpStructuredRunResult | null>;
@@ -108,6 +109,20 @@ async function settleBeforeAbort<T>(
   } finally {
     inFlight.delete(pending);
   }
+}
+
+async function waitForSettlement(
+  pending: Promise<unknown>,
+  graceMs: number,
+): Promise<void> {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    pending.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => {
+      graceTimer = setTimeout(resolve, graceMs);
+    }),
+  ]);
+  if (graceTimer !== undefined) clearTimeout(graceTimer);
 }
 
 async function consumeTurn(
@@ -249,19 +264,24 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
-    // A governed resolver or cancellation may ignore abort. Join the exact
-    // operation before teardown so it cannot publish stale control-plane or
-    // provider state after close. Cooperative implementations settle promptly.
+    // A governed resolver or cancellation is required to observe abort, but an
+    // embedding callback must not be able to postpone provider teardown
+    // indefinitely. Give cooperative work a bounded window, retain rejection
+    // observation for late settlement, and then proceed to the required close.
     if (governedOperations.size > 0) {
-      await Promise.allSettled([...governedOperations]);
+      const governedSettlement = Promise.allSettled([...governedOperations]);
+      void governedSettlement;
+      await waitForSettlement(
+        governedSettlement,
+        GOVERNED_OPERATION_SETTLEMENT_GRACE_MS,
+      );
     }
     if (!governedCancellationStarted) {
       await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
     }
-    // `close` is the required termination boundary. Unlike optional interrupt
-    // and cancel support, it must release a pending event read before it
-    // resolves, which makes the teardown waits below bounded by the backend.
-    await session.close({ reason: "Native session event consumption failed." }).catch(() => undefined);
+    // The outer execution owner performs the required close after this bounded
+    // consumer cleanup returns. Keeping close at that single ownership boundary
+    // avoids duplicate provider teardown while still terminating every failure.
     throw error;
   } finally {
     stopConsumer = true;
@@ -275,8 +295,19 @@ async function consumeTurn(
     // without committing when its signal is aborted. Join both promises so a
     // failed execution cannot be followed by a late durable write or provider
     // teardown.
-    await iteratorTeardown;
-    await consumer.catch(() => undefined);
+    const teardownSettlement = Promise.allSettled([
+      iteratorTeardown,
+      consumer,
+    ]);
+    if (appendAbort.signal.aborted) {
+      void teardownSettlement;
+      await waitForSettlement(
+        teardownSettlement,
+        GOVERNED_OPERATION_SETTLEMENT_GRACE_MS,
+      );
+    } else {
+      await teardownSettlement;
+    }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
@@ -345,10 +376,8 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
       || persistedSession.identity.companyId !== input.binding.companyId
       || persistedSession.identity.issueId !== input.binding.issueId
       || persistedSession.identity.agentId !== input.binding.agentId
-      || (
-        input.session.normalizedSessionId !== null
-        && persistedSession.identity.sessionId !== input.session.normalizedSessionId
-      )
+      || input.session.normalizedSessionId === null
+      || persistedSession.identity.sessionId !== input.session.normalizedSessionId
     )
   ) throw new Error("native_session_checkpoint_binding_mismatch");
   const normalizedSessionId = persistedSession?.identity.sessionId

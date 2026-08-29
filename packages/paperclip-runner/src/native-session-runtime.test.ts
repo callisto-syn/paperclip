@@ -536,7 +536,7 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it("joins an abort-ignoring governed-wait resolver before closing", async () => {
+  it("bounds an abort-ignoring governed-wait resolver before closing", async () => {
     let markResolverStarted = () => {};
     const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve; });
     let releaseResolver = () => {};
@@ -606,16 +606,16 @@ describe("executeNativeSession recovery", () => {
       },
     });
     await resolverStarted;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(resolverSignal?.aborted).toBe(true);
-    expect(close).not.toHaveBeenCalled();
-    releaseResolver();
     await expect(execution).rejects.toThrow("native session timed out");
+    expect(resolverSignal?.aborted).toBe(true);
     expect(close).toHaveBeenCalled();
-    expect(lifecycle.indexOf("resolver-settled")).toBeLessThan(lifecycle.indexOf("closed"));
+    expect(lifecycle).toEqual(["closed"]);
+    releaseResolver();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(lifecycle).toEqual(["closed", "resolver-settled"]);
   });
 
-  it("joins an abort-ignoring governed-wait cancellation before closing", async () => {
+  it("bounds an abort-ignoring governed-wait cancellation before closing", async () => {
     let markCancelStarted = () => {};
     const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
     let releaseCancel = () => {};
@@ -682,14 +682,14 @@ describe("executeNativeSession recovery", () => {
       resolveGovernedWait: async () => yieldedResult,
     });
     await cancelStarted;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(close).not.toHaveBeenCalled();
-    releaseCancel();
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalled();
     expect(close).toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
-    expect(lifecycle.indexOf("cancel-settled")).toBeLessThan(lifecycle.indexOf("closed"));
+    expect(lifecycle).toEqual(["closed"]);
+    releaseCancel();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(lifecycle).toEqual(["closed", "cancel-settled"]);
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {
@@ -731,6 +731,48 @@ describe("executeNativeSession recovery", () => {
     })).rejects.toThrow("native_session_checkpoint_binding_mismatch");
     expect(openRun).not.toHaveBeenCalled();
     expect(checkpointSession).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects checkpoint adoption when the requested session id is absent", async () => {
+    const openRun = vi.fn(async () => undefined);
+    const openSession = vi.fn();
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      openSession,
+    };
+    const port: ControlPlanePort = {
+      openRun,
+      async loadSessionCheckpoint() {
+        return {
+          backendKind: "mock",
+          sessionId: "driver-other-session",
+          identity: { ...identity, sessionId: "other-session" },
+        };
+      },
+      async appendEvent() { throw new Error("unexpected event"); },
+      async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; },
+      async completeRun() {},
+    };
+
+    await expect(executeNativeSession({
+      input: {
+        ...input,
+        session: { ...input.session, normalizedSessionId: null },
+      },
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+    })).rejects.toThrow("native_session_checkpoint_binding_mismatch");
+    expect(openRun).not.toHaveBeenCalled();
     expect(openSession).not.toHaveBeenCalled();
   });
 
