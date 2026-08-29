@@ -331,6 +331,40 @@ describe("ACPX runtime host", () => {
     expect(fixture.commandClose).toHaveBeenCalledOnce();
   });
 
+  it("keeps invoking the adapter until an older close outcome is reconciled", async () => {
+    const fixture = await hostFixture();
+    const runtime = runtimePort({
+      onClose: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("runtime close timed out"))
+        .mockRejectedValueOnce(new Error("older close attempt remains pending"))
+        .mockRejectedValueOnce(new Error("older close attempt failed"))
+        .mockResolvedValueOnce(undefined),
+    });
+    const host = await AcpxRuntimeHost.open(
+      {
+        ...fixture.options,
+        agent: "codex",
+        model: "gpt-5.6-sol",
+        permissionMode: "approve-all",
+        environment: { PAPERCLIP_ACPX_CODEX_AUTH_JSON_SECRET: "{}" },
+      },
+      fixture.dependencies({ openRuntime: async () => runtime }),
+    );
+
+    await expect(host.close({ reason: "first close" })).rejects.toThrow(
+      /cleanup failed/,
+    );
+    await expect(
+      host.close({ reason: "fresh attempt", retryPending: true }),
+    ).rejects.toThrow(/cleanup failed/);
+    await expect(host.close({ reason: "reconcile older attempt" })).rejects.toThrow(
+      /cleanup failed/,
+    );
+    await expect(host.close({ reason: "ownership released" })).resolves.toBeUndefined();
+    expect(runtime.close).toHaveBeenCalledTimes(4);
+  });
+
   it("admits one bounded turn and cancels it before shutdown", async () => {
     const fixture = await hostFixture();
     const turn = runtimeTurn();
