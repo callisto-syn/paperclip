@@ -276,6 +276,25 @@ fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
 }
 
 #[test]
+fn fails_closed_before_returning_a_malformed_reserved_result() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-invalid-reserved-block-terminal")).unwrap();
+    session
+        .start_turn("turn-1", "Please help", &std::env::temp_dir())
+        .unwrap();
+
+    let error = session
+        .poll_event(Duration::from_secs(1))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("failed the Paperclip result schema"),
+        "{error}"
+    );
+    assert!(session.shutdown("already closed").is_ok());
+}
+
+#[test]
 fn fails_closed_before_returning_an_unauthorized_tool_call() {
     let mut session = AcpxProviderSession::start(&config("turns-unauthorized-tool")).unwrap();
     session

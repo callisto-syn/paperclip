@@ -421,6 +421,7 @@ fn validate_reserved_terminal_result(
             "ACPX reserved semantic result collided with a pending tool call",
         ));
     }
+    validate_prp_run_result(&result.result)?;
     let disposition = result
         .result
         .get("reportedWorkDisposition")
@@ -428,13 +429,29 @@ fn validate_reserved_terminal_result(
     let disposition_matches = match result.operation_id.as_str() {
         PRP_BLOCK_TOOL_NAME => disposition == Some("blocked"),
         PRP_COMPLETION_TOOL_NAME => {
-            matches!(disposition, Some("done" | "needs_review" | "yielded"))
+            matches!(disposition, Some("done" | "needs_review"))
         }
         _ => false,
     };
     if !disposition_matches {
         return Err(LocalRunnerError::invalid(
             "ACPX reserved semantic result disposition does not match its operation",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prp_run_result(value: &Value) -> Result<(), LocalRunnerError> {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../../protocol/schemas/result.schema.json"
+    ))
+    .map_err(|_| LocalRunnerError::invalid("embedded Paperclip result schema is invalid"))?;
+    let validator = jsonschema::validator_for(&schema).map_err(|_| {
+        LocalRunnerError::invalid("embedded Paperclip result schema cannot compile")
+    })?;
+    if !validator.is_valid(value) {
+        return Err(LocalRunnerError::invalid(
+            "ACPX reserved semantic result failed the Paperclip result schema",
         ));
     }
     Ok(())

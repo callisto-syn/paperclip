@@ -92,6 +92,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-tool-error-result-terminal"
             | "turns-reserved-result-terminal"
             | "turns-reserved-block-terminal"
+            | "turns-invalid-reserved-block-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -183,10 +184,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if command == "turn.start"
                     && matches!(
                         mode,
-                        "turns-reserved-result-terminal" | "turns-reserved-block-terminal"
+                        "turns-reserved-result-terminal"
+                            | "turns-reserved-block-terminal"
+                            | "turns-invalid-reserved-block-terminal"
                     )
                 {
-                    let (operation_id, result) = if mode == "turns-reserved-block-terminal" {
+                    let (operation_id, result) = if matches!(
+                        mode,
+                        "turns-reserved-block-terminal" | "turns-invalid-reserved-block-terminal"
+                    ) {
                         (
                             "paperclip_block",
                             json!({
@@ -206,7 +212,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 "verification":[],
                                 "blocker":{
                                     "reasonCode":"external_input",
-                                    "owner":{},
+                                    "owner":if mode == "turns-invalid-reserved-block-terminal" {
+                                        json!({})
+                                    } else {
+                                        json!({"kind":"external","name":"External input"})
+                                    },
                                     "unblockAction":"Provide the required input.",
                                     "scope":"current_track",
                                 },
