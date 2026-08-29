@@ -298,8 +298,9 @@ impl AcpxProviderSession {
             Err(error) => return Err(self.fail_closed(error)),
         };
         let mut next_bridge = self.tool_bridge.clone();
-        for event in &events {
-            match event {
+        let mut reconciled_events = Vec::with_capacity(events.len());
+        for event in events {
+            match &event {
                 AcpxProviderStateEvent::ToolCall {
                     call_id,
                     operation_id,
@@ -314,18 +315,27 @@ impl AcpxProviderSession {
                     }
                 }
                 AcpxProviderStateEvent::TurnTerminal { .. } => {
-                    if let Err(error) = next_bridge.settle_turn("acpx_turn_settled") {
-                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                            "ACPX provider tool settlement failed: {error}"
-                        ))));
-                    }
+                    let settlements = match next_bridge.settle_turn("acpx_turn_settled") {
+                        Ok(settlements) => settlements,
+                        Err(error) => {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX provider tool settlement failed: {error}"
+                            ))));
+                        }
+                    };
+                    reconciled_events.extend(
+                        settlements
+                            .into_iter()
+                            .map(AcpxProviderStateEvent::ToolResult),
+                    );
                 }
                 _ => {}
             }
+            reconciled_events.push(event);
         }
         self.state = next_state;
         self.tool_bridge = next_bridge;
-        Ok(Some(events))
+        Ok(Some(reconciled_events))
     }
 
     pub fn shutdown(&mut self, reason: &str) -> Result<(), LocalRunnerError> {

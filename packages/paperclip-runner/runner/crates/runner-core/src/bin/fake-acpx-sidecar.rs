@@ -87,6 +87,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-wrong-cancel"
             | "turns-wrong-scope"
             | "turns-tool"
+            | "turns-tool-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -110,7 +111,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     next_sequence += 1;
                 }
                 if command == "turn.start"
-                    && matches!(mode, "turns-tool" | "turns-unauthorized-tool")
+                    && matches!(
+                        mode,
+                        "turns-tool" | "turns-tool-terminal" | "turns-unauthorized-tool"
+                    )
                 {
                     write_turn_event(
                         &mut stdout,
@@ -120,9 +124,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         turn_id,
                         json!({
                             "callId":"call-1",
-                            "operationId":if mode == "turns-tool" { "issues.read" } else { "issues.delete" },
+                            "operationId":if matches!(mode, "turns-tool" | "turns-tool-terminal") { "issues.read" } else { "issues.delete" },
                             "input":{"id":"issue-1"},
                         }),
+                    )?;
+                    next_sequence += 1;
+                }
+                if command == "turn.start" && mode == "turns-tool-terminal" {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.turn_terminal",
+                        "run-1",
+                        turn_id,
+                        json!({"status":"completed"}),
                     )?;
                     next_sequence += 1;
                 }

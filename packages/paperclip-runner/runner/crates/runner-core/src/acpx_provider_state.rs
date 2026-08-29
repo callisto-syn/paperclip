@@ -8,6 +8,7 @@ use crate::acpx_event_payload::{
 use crate::acpx_event_scope::AcpxEventScope;
 use crate::acpx_sidecar_transport::AcpxSidecarEvent;
 use crate::local_runner::LocalRunnerError;
+use crate::provider_bridge::ToolResult;
 use crate::provider_events::{normalize_acpx_runtime_event, NormalizedProviderEvent};
 
 const MAX_ASSISTANT_TEXT_BYTES: usize = 1024 * 1024;
@@ -38,6 +39,7 @@ pub enum AcpxProviderStateEvent {
         operation_id: String,
         input: Value,
     },
+    ToolResult(ToolResult),
     PermissionRequest {
         request_id: String,
         kind: String,
