@@ -120,16 +120,7 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
     assert_eq!(completed[0].payload["outputTruncated"], true);
     assert!(!completed[0].payload.to_string().contains("top-secret"));
 
-    for display_path in [
-        "src:main.rs",
-        "foo:bar/baz",
-        "src:/main.rs",
-        "a:/foo",
-        "A:b/file.txt",
-        r"folder\literal",
-        r"foo\..\bar",
-        "reports/100%/summary.txt",
-    ] {
+    for display_path in ["src/main.rs", "foo/bar-baz.txt", "reports/100%/summary.txt"] {
         let display = normalize(
             AcpxRuntimeEventKind::ToolCall,
             json!({
@@ -164,7 +155,10 @@ fn maps_tool_lifecycle_and_preserves_safe_display_paths() {
                 "toolCallId":"tool-unsafe-display",
                 "kind":"read",
                 "status":"completed",
-                "locations":[{"path":unsafe_path}]
+                "locations":[{
+                    "path":unsafe_path,
+                    "pathBoundary":"paperclip.workspace_relative_display.v1"
+                }]
             }),
         );
         assert_eq!(rejected[0].payload["target"], serde_json::Value::Null);

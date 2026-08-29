@@ -20,21 +20,23 @@ describe("ACPX sidecar locations", () => {
         pathBoundary: "paperclip.workspace_relative_display.v1",
       },
       {
-        path: "src:main.ts",
-        line: null,
-        pathBoundary: "paperclip.workspace_relative_display.v1",
-      },
-      {
-        path: String.raw`folder\literal`,
-        line: null,
-        pathBoundary: "paperclip.workspace_relative_display.v1",
-      },
-      {
         path: "reports/100%/summary.txt",
         line: null,
         pathBoundary: "paperclip.workspace_relative_display.v1",
       },
     ]);
+  });
+
+  it("rejects URI and foreign-host syntax before attaching the boundary", () => {
+    expect(safeAcpxLocations([
+      { path: String.raw`C:\Users\alice\secret.txt` },
+      { path: String.raw`\\server\share\secret.txt` },
+      { path: String.raw`https:\host\secret` },
+      { path: "https://host/secret" },
+      { path: "file:secret.txt" },
+      { path: "src:/main.ts" },
+      { path: String.raw`foo\..\secret.txt` },
+    ], "/workspace/project")).toEqual([]);
   });
 
   it("omits every location until the session working directory is bound", () => {
