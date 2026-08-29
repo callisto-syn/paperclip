@@ -36,7 +36,7 @@ describe("harness-driver conformance V1", () => {
     });
   });
 
-  it("recovers an active interrupt-intended turn without overwriting its outcome", async () => {
+  it("settles an actively recovered turn when event consumption resumes", async () => {
     const driver = new DeterministicHarnessDriver();
     const session = await driver.openSession({
       runId: "run_active_recovery",
@@ -66,10 +66,6 @@ describe("harness-driver conformance V1", () => {
       for await (const event of recovered.events()) events.push(event);
       return events;
     })();
-    await recovered.interrupt?.({
-      turnId,
-      reason: "resume_preserves_pending_interrupt",
-    });
 
     const events = await recoveredEventsPromise;
     expect(events.map((event) => [event.sourceSeq, event.eventType])).toEqual([
@@ -80,6 +76,9 @@ describe("harness-driver conformance V1", () => {
       activeTurnId: null,
       semanticResult: null,
       lastSourceSequence: 4,
+    });
+    expect(events[0]?.payload).toEqual({
+      reason: "deterministic_active_turn_recovered_without_live_producer",
     });
     await recovered.close({ reason: "recovered_complete" });
     await firstRecovery.session!.close({ reason: "first_recovery_complete" });

@@ -136,6 +136,7 @@ class DeterministicHarnessSession implements HarnessSession {
   #turnId: string | null = null;
   #closed = false;
   #active = false;
+  #recoveredActiveTurn = false;
   #nextSourceSeq = 1;
   readonly #eventWaiters = new Set<() => void>();
 
@@ -149,6 +150,7 @@ class DeterministicHarnessSession implements HarnessSession {
     this.#turnId = snapshot?.activeTurnId ?? snapshot?.semanticResult?.turnId ?? null;
     this.#semanticResult = snapshot?.semanticResult?.result ?? null;
     this.#active = snapshot?.activeTurnId !== null && snapshot?.activeTurnId !== undefined;
+    this.#recoveredActiveTurn = this.#active;
     this.#nextSourceSeq = (snapshot?.lastSourceSequence ?? 0) + 1;
   }
 
@@ -161,6 +163,21 @@ class DeterministicHarnessSession implements HarnessSession {
   }
 
   async *events(): AsyncIterable<PrpEvent> {
+    if (this.#recoveredActiveTurn && this.#active && this.#turnId !== null) {
+      // The deterministic fake has no provider process that can continue an
+      // in-flight turn after reconstruction. Produce one conservative terminal
+      // outcome when consumption resumes so the native loop cannot wait until
+      // its global timeout. An explicit interrupt issued before consumption
+      // still wins and supplies its own reason.
+      this.#recoveredActiveTurn = false;
+      this.#appendEvents(
+        this.#event("turn.interrupted", {
+          reason: "deterministic_active_turn_recovered_without_live_producer",
+        }),
+        this.#event("run.terminal", cancelledTerminal(), { turn: false }),
+      );
+      this.#active = false;
+    }
     let index = 0;
     while (true) {
       while (index < this.#events.length) {
