@@ -163,6 +163,13 @@ test("the ACPX question fixture enforces its provider-native contract", async ()
   ];
   assert.doesNotThrow(() => assertAcpxQuestionFixture(normalizedRequired));
 
+  const manyUnknownRequired = structuredClone(canonical);
+  manyUnknownRequired.nativeRequest.params.requestedSchema.required = [
+    ...Array.from({ length: 80 }, (_, index) => `unknown-${index}`),
+    "environment",
+  ];
+  assert.doesNotThrow(() => assertAcpxQuestionFixture(manyUnknownRequired));
+
   const divergentResponse = structuredClone(canonical);
   divergentResponse.nativeResponse.content.environment = "production";
   assert.throws(

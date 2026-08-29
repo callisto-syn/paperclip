@@ -360,9 +360,6 @@ export function assertAcpxQuestionFixture(fixture) {
     throw contractError("invalid_acpx_question_fixture", "native form property count");
   }
   const required = normalizedAcpxRequired(requestedSchema);
-  if (required.size > 64) {
-    throw contractError("invalid_acpx_question_fixture", "native required properties");
-  }
   for (const [name, property] of properties) {
     assertAcpxProperty(name, property);
   }
@@ -436,11 +433,15 @@ function projectAcpxFixture(params, canonicalResponse) {
 }
 
 function normalizedAcpxRequired(schema) {
+  const propertyNames = new Set(
+    isPlainRecord(schema.properties) ? Object.keys(schema.properties) : [],
+  );
   return new Set(
     Array.isArray(schema.required)
       ? schema.required
-          .slice(0, 65)
-          .filter((value) => typeof value === "string")
+          .filter(
+            (value) => typeof value === "string" && propertyNames.has(value),
+          )
       : []
   );
 }
