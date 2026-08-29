@@ -90,6 +90,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-tool-terminal"
             | "turns-tool-result-terminal"
             | "turns-tool-error-result-terminal"
+            | "turns-reserved-result-terminal"
+            | "turns-reserved-block-terminal"
             | "turns-unauthorized-tool" => {
                 write_json(&mut stdout, &bootstrap_success(id, command, &request, mode))?;
                 let params = request.get("params").unwrap_or(&Value::Null);
@@ -168,6 +170,85 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     next_sequence += 1;
                 }
                 if command == "turn.start" && mode == "turns-tool-terminal" {
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.turn_terminal",
+                        "run-1",
+                        turn_id,
+                        json!({"status":"completed"}),
+                    )?;
+                    next_sequence += 1;
+                }
+                if command == "turn.start"
+                    && matches!(
+                        mode,
+                        "turns-reserved-result-terminal" | "turns-reserved-block-terminal"
+                    )
+                {
+                    let (operation_id, result) = if mode == "turns-reserved-block-terminal" {
+                        (
+                            "paperclip_block",
+                            json!({
+                                "schema":"paperclip.run_result.v1",
+                                "reportedWorkDisposition":"blocked",
+                                "summary":"Reserved blocker accepted.",
+                                "completionClaim":{
+                                    "contractRevision":"acpx-provider-turns-v1",
+                                    "objectiveSatisfied":false,
+                                    "criteria":[],
+                                    "remainingWork":[{
+                                        "description":"Wait for external input.",
+                                        "blocksCompletion":true,
+                                    }],
+                                },
+                                "evidence":[],
+                                "verification":[],
+                                "blocker":{
+                                    "reasonCode":"external_input",
+                                    "owner":{},
+                                    "unblockAction":"Provide the required input.",
+                                    "scope":"current_track",
+                                },
+                                "attentionRequests":[],
+                                "artifacts":[],
+                            }),
+                        )
+                    } else {
+                        (
+                            "paperclip_finish",
+                            json!({
+                                "schema":"paperclip.run_result.v1",
+                                "reportedWorkDisposition":"done",
+                                "summary":"Reserved completion accepted.",
+                                "completionClaim":{
+                                    "contractRevision":"acpx-provider-turns-v1",
+                                    "objectiveSatisfied":true,
+                                    "criteria":[],
+                                    "remainingWork":[],
+                                },
+                                "evidence":[],
+                                "verification":[],
+                                "attentionRequests":[],
+                                "artifacts":[],
+                            }),
+                        )
+                    };
+                    write_turn_event(
+                        &mut stdout,
+                        next_sequence,
+                        "runtime.event",
+                        "run-1",
+                        turn_id,
+                        json!({
+                            "type":"semantic_result",
+                            "callId":"call-finish",
+                            "operationId":operation_id,
+                            "ok":true,
+                            "result":result,
+                        }),
+                    )?;
+                    next_sequence += 1;
                     write_turn_event(
                         &mut stdout,
                         next_sequence,

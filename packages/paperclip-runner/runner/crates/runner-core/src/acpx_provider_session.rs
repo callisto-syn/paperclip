@@ -16,6 +16,8 @@ const MAX_ID_CHARS: usize = 240;
 const MAX_MODEL_CHARS: usize = 240;
 const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 1024 * 1024;
 const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const PRP_COMPLETION_TOOL_NAME: &str = "paperclip_finish";
+const PRP_BLOCK_TOOL_NAME: &str = "paperclip_block";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -315,24 +317,30 @@ impl AcpxProviderSession {
                     }
                 }
                 AcpxProviderStateEvent::SemanticResult(result) => {
-                    if let Err(error) =
-                        next_bridge.apply_result(crate::provider_bridge::ToolResult {
-                            call_id: result.call_id.clone(),
-                            operation_id: result.operation_id.clone(),
-                            result: result.result.clone(),
-                            is_error: !result.ok,
-                        })
-                    {
-                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                            "ACPX provider tool result reconciliation failed: {error}"
-                        ))));
-                    }
-                    if let Err(error) =
-                        next_state.complete_tool(&result.call_id, &result.operation_id)
-                    {
-                        return Err(self.fail_closed(LocalRunnerError::invalid(format!(
-                            "ACPX provider tool completion reconciliation failed: {error}"
-                        ))));
+                    if is_reserved_terminal_result(result) {
+                        if let Err(error) = validate_reserved_terminal_result(&next_state, result) {
+                            return Err(self.fail_closed(error));
+                        }
+                    } else {
+                        if let Err(error) =
+                            next_bridge.apply_result(crate::provider_bridge::ToolResult {
+                                call_id: result.call_id.clone(),
+                                operation_id: result.operation_id.clone(),
+                                result: result.result.clone(),
+                                is_error: !result.ok,
+                            })
+                        {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX provider tool result reconciliation failed: {error}"
+                            ))));
+                        }
+                        if let Err(error) =
+                            next_state.complete_tool(&result.call_id, &result.operation_id)
+                        {
+                            return Err(self.fail_closed(LocalRunnerError::invalid(format!(
+                                "ACPX provider tool completion reconciliation failed: {error}"
+                            ))));
+                        }
                     }
                 }
                 AcpxProviderStateEvent::TurnTerminal { .. } => {
@@ -390,6 +398,46 @@ impl AcpxProviderSession {
         self.closed = true;
         with_cleanup_error(error, self.transport.shutdown())
     }
+}
+
+fn is_reserved_terminal_result(result: &crate::acpx_provider_state::AcpxSemanticResult) -> bool {
+    matches!(
+        result.operation_id.as_str(),
+        PRP_COMPLETION_TOOL_NAME | PRP_BLOCK_TOOL_NAME
+    )
+}
+
+fn validate_reserved_terminal_result(
+    state: &AcpxProviderState,
+    result: &crate::acpx_provider_state::AcpxSemanticResult,
+) -> Result<(), LocalRunnerError> {
+    if !result.ok {
+        return Err(LocalRunnerError::invalid(
+            "ACPX reserved semantic result reported a failed outcome",
+        ));
+    }
+    if state.pending_tool(&result.call_id).is_some() {
+        return Err(LocalRunnerError::invalid(
+            "ACPX reserved semantic result collided with a pending tool call",
+        ));
+    }
+    let disposition = result
+        .result
+        .get("reportedWorkDisposition")
+        .and_then(Value::as_str);
+    let disposition_matches = match result.operation_id.as_str() {
+        PRP_BLOCK_TOOL_NAME => disposition == Some("blocked"),
+        PRP_COMPLETION_TOOL_NAME => {
+            matches!(disposition, Some("done" | "needs_review" | "yielded"))
+        }
+        _ => false,
+    };
+    if !disposition_matches {
+        return Err(LocalRunnerError::invalid(
+            "ACPX reserved semantic result disposition does not match its operation",
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for AcpxProviderSession {

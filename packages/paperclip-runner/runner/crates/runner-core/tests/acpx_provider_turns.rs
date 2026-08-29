@@ -241,6 +241,41 @@ fn failed_semantic_results_preserve_error_status_and_release_pending_capacity() 
 }
 
 #[test]
+fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
+    for (mode, operation_id, disposition) in [
+        ("turns-reserved-result-terminal", "paperclip_finish", "done"),
+        (
+            "turns-reserved-block-terminal",
+            "paperclip_block",
+            "blocked",
+        ),
+    ] {
+        let mut session = AcpxProviderSession::start(&config(mode)).unwrap();
+        session
+            .start_turn("turn-1", "Please help", &std::env::temp_dir())
+            .unwrap();
+
+        let result = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(matches!(
+            &result[0],
+            AcpxProviderStateEvent::SemanticResult(result)
+                if result.call_id == "call-finish"
+                    && result.operation_id == operation_id
+                    && result.ok
+                    && result.result["reportedWorkDisposition"] == disposition
+        ));
+        assert!(session.state().pending_tool("call-finish").is_none());
+
+        let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(matches!(
+            terminal.last().unwrap(),
+            AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
+        ));
+        session.shutdown("test complete").unwrap();
+    }
+}
+
+#[test]
 fn fails_closed_before_returning_an_unauthorized_tool_call() {
     let mut session = AcpxProviderSession::start(&config("turns-unauthorized-tool")).unwrap();
     session
