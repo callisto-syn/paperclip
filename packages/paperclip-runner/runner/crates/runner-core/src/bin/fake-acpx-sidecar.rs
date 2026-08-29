@@ -91,6 +91,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             | "turns-tool-result-terminal"
             | "turns-tool-error-result-terminal"
             | "turns-reserved-result-terminal"
+            | "turns-reserved-yielded-terminal"
             | "turns-reserved-block-terminal"
             | "turns-invalid-reserved-block-terminal"
             | "turns-unauthorized-tool" => {
@@ -185,6 +186,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     && matches!(
                         mode,
                         "turns-reserved-result-terminal"
+                            | "turns-reserved-yielded-terminal"
                             | "turns-reserved-block-terminal"
                             | "turns-invalid-reserved-block-terminal"
                     )
@@ -219,6 +221,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     "unblockAction":"Provide the required input.",
                                     "scope":"current_track",
+                                },
+                                "attentionRequests":[],
+                                "artifacts":[],
+                            }),
+                        )
+                    } else if mode == "turns-reserved-yielded-terminal" {
+                        (
+                            "paperclip_finish",
+                            json!({
+                                "schema":"paperclip.run_result.v1",
+                                "reportedWorkDisposition":"yielded",
+                                "summary":"Reserved continuation accepted.",
+                                "completionClaim":{
+                                    "contractRevision":"acpx-provider-turns-v1",
+                                    "objectiveSatisfied":false,
+                                    "criteria":[],
+                                    "remainingWork":[],
+                                },
+                                "evidence":[],
+                                "verification":[],
+                                "continuation":{
+                                    "kind":"same_agent",
+                                    "summary":"Continue the current run.",
+                                    "idempotencyKey":"continuation-1",
                                 },
                                 "attentionRequests":[],
                                 "artifacts":[],

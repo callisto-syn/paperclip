@@ -429,7 +429,7 @@ fn validate_reserved_terminal_result(
     let disposition_matches = match result.operation_id.as_str() {
         PRP_BLOCK_TOOL_NAME => disposition == Some("blocked"),
         PRP_COMPLETION_TOOL_NAME => {
-            matches!(disposition, Some("done" | "needs_review"))
+            matches!(disposition, Some("done" | "needs_review" | "yielded"))
         }
         _ => false,
     };

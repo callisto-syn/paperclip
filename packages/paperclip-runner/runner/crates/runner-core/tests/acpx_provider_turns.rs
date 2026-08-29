@@ -245,6 +245,11 @@ fn reserved_terminal_results_do_not_require_dynamic_tool_state() {
     for (mode, operation_id, disposition) in [
         ("turns-reserved-result-terminal", "paperclip_finish", "done"),
         (
+            "turns-reserved-yielded-terminal",
+            "paperclip_finish",
+            "yielded",
+        ),
+        (
             "turns-reserved-block-terminal",
             "paperclip_block",
             "blocked",
