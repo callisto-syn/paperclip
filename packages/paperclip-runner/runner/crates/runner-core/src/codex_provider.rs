@@ -314,18 +314,24 @@ impl CodexProvider {
         process_generation: Option<u64>,
         provider_turn_id: Option<&str>,
     ) {
+        let completed_turn_process_generation = process_generation.unwrap_or(0);
+        let resumed_process_is_independent =
+            completed_turn_process_generation != self.process_generation;
         self.completed_turn_authority = authoritative.then(|| CompletedTurnAuthority {
             // Legacy state did not record the generation. Generation zero is
             // deliberately older than every supervised process generation.
-            process_generation: process_generation.unwrap_or(0),
+            process_generation: completed_turn_process_generation,
             provider_turn_id: provider_turn_id
                 .unwrap_or("durable-completed-turn")
                 .to_owned(),
-            observed_idle: false,
+            // A restored provider has already answered the resume-time
+            // thread/read probe before durable completion authority is
+            // attached. Treat that successful probe as proof that this new
+            // generation is independently idle; a later exit is its own
+            // session failure rather than part of the prior turn terminal.
+            observed_idle: resumed_process_is_independent,
         });
-        // A restored completed turn may not be failed again merely because
-        // the fresh reconciliation process exits before any new turn begins.
-        self.expected_shutdown = authoritative;
+        self.expected_shutdown = authoritative && !resumed_process_is_independent;
     }
 
     pub(crate) fn completed_turn_authority(&self) -> Option<(u64, &str)> {
@@ -446,9 +452,7 @@ impl CodexProvider {
                         .completed_turn_authority
                         .as_ref()
                         .is_some_and(|authority| {
-                            self.active_provider_turn_id.is_none()
-                                && (authority.process_generation != self.process_generation
-                                    || !authority.observed_idle)
+                            self.active_provider_turn_id.is_none() && !authority.observed_idle
                         });
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
