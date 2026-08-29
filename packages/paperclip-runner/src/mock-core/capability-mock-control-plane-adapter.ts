@@ -397,7 +397,6 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
       );
     }
     const run = this.#run(envelope.runId);
-    this.#assertRunWritable(run);
     const inputCanonical = canonicalJson(envelope.command);
     const scope = `${run.id}:semantic-command`;
     const existing = this.#state.idempotency.find(
@@ -419,6 +418,11 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
         stateRevision: this.#state.revision,
       });
     }
+    // A committed command may itself make the run non-writable (for example,
+    // by reaching a hard budget limit). Resolve exact idempotent replays before
+    // enforcing current run writability so a lost acknowledgement remains
+    // recoverable without granting authority for a new command.
+    this.#assertRunWritable(run);
     if (
       envelope.expectedRevision !== undefined &&
       envelope.expectedRevision !== this.#state.revision
@@ -848,7 +852,12 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             };
           }
         }
-        if (requester !== null && requesterTarget === null) {
+        if (
+          requester !== null &&
+          requester.status === "active" &&
+          requesterBudgetAvailable &&
+          requesterTarget === null
+        ) {
           // Persist an unowned continuation task rather than dropping the
           // requester notification or making the governance decision depend
           // on today's checkout/budget state. The actor can consume this wake

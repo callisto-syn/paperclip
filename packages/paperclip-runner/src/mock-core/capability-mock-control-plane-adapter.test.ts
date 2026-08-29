@@ -553,6 +553,50 @@ describe("CapabilityMockControlPlaneAdapter", () => {
     ).rejects.toMatchObject({ code: "budget_hard_stop" });
   });
 
+  it("replays a lost acknowledgement after the committed command stops its run", async () => {
+    const adapter = seeded({
+      budgets: [
+        {
+          id: "budget-company-1",
+          scope: "company",
+          scopeId: "company-1",
+          limitCents: 100,
+          spentCents: 90,
+          hardStop: true,
+        },
+        {
+          id: "budget-actor-1",
+          scope: "actor",
+          scopeId: "actor-1",
+          limitCents: 100,
+          spentCents: 90,
+          hardStop: true,
+        },
+      ],
+      faults: [{
+        id: "lost-budget-ack",
+        operation: "apply_command",
+        commandKind: "record_budget_usage",
+        effect: "lost_ack",
+        remaining: 1,
+      }],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun({ ...OPEN, capabilities: ["control_plane:budget"] });
+    const envelope = {
+      runId: "run-1",
+      idempotencyKey: "budget-stop-retry",
+      command: { kind: "record_budget_usage" as const, cents: 10 },
+    };
+
+    await expect(adapter.applyCommand(envelope)).rejects.toMatchObject({ retryable: true });
+    await expect(adapter.applyCommand(envelope)).resolves.toMatchObject({
+      disposition: "duplicate",
+    });
+    expect(adapter.snapshot().budgets.map((budget) => budget.spentCents)).toEqual([100, 100]);
+    expect(adapter.snapshot().runs[0]?.status).toBe("budget_stopped");
+  });
+
   it("returns typed denials when a command claim is missing", async () => {
     const adapter = seeded();
     await adapter.start();
@@ -942,6 +986,62 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       actor: { id: "actor-2" },
       activeTask: { id: "task-2", checkoutRunId: "run-requester-wake" },
     });
+  });
+
+  it("does not schedule approval recovery for an inactive requester", async () => {
+    const adapter = seeded({
+      actors: [
+        {
+          id: "actor-1",
+          companyId: "company-1",
+          name: "Mock Approver",
+          role: "approver",
+          status: "active",
+          budgetId: "budget-actor-1",
+          capabilityGrants: [],
+        },
+        {
+          id: "actor-2",
+          companyId: "company-1",
+          name: "Paused Requester",
+          role: "engineer",
+          status: "paused",
+          budgetId: "budget-actor-2",
+          capabilityGrants: [],
+        },
+      ],
+      approvals: [{
+        id: "approval-paused-requester",
+        companyId: "company-1",
+        taskIds: ["task-1"],
+        type: "request_board_approval",
+        status: "pending",
+        requestedByActorId: "actor-2",
+        payload: {},
+        decisionNote: null,
+        comments: [],
+        createdAt: "2026-08-09T00:00:00.000Z",
+        decidedAt: null,
+      }],
+    });
+    await adapter.start();
+    await adapter.openFixtureRun({
+      ...OPEN,
+      capabilities: ["governance:approvals:decide"],
+    });
+
+    await expect(adapter.applyCommand({
+      runId: "run-1",
+      idempotencyKey: "paused-requester-decision",
+      command: {
+        kind: "decide_approval",
+        approvalId: "approval-paused-requester",
+        decision: "approved",
+        note: "Record the decision without an unusable continuation.",
+      },
+    })).resolves.toMatchObject({ disposition: "applied", scheduledWakeIds: [] });
+    expect(adapter.snapshot().tasks).toHaveLength(1);
+    expect(adapter.snapshot().wakes).toEqual([]);
   });
 
   it("rejects fixture wake references outside the company actor scope", () => {
