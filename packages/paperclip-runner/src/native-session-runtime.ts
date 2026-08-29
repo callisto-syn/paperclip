@@ -10,6 +10,7 @@ import { parsePaperclipQuestionSet } from "./contracts/question-set.js";
 
 export const DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS = 120_000;
 const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
+const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 
 export interface ExecuteNativeSessionOptions {
   input: NativeExecutionInput;
@@ -91,6 +92,19 @@ async function attemptOptionalSessionCancellation(session: NativeSession, reason
   if (graceTimer !== undefined) clearTimeout(graceTimer);
 }
 
+async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const settled = await Promise.race([
+    operation.then(() => true),
+    new Promise<false>((resolve) => {
+      graceTimer = setTimeout(() => resolve(false), timeoutMs);
+      graceTimer.unref?.();
+    }),
+  ]);
+  if (graceTimer !== undefined) clearTimeout(graceTimer);
+  return settled;
+}
+
 async function settleBeforeAbort<T>(
   operation: () => Promise<T>,
   signal: AbortSignal,
@@ -116,6 +130,7 @@ async function consumeTurn(
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
   closeFailedSession: () => Promise<void>,
+  retainFailedCleanup: (cleanup: Promise<void>, ownsSessionClose: boolean) => void,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
   externalSignal?: AbortSignal,
 ) {
@@ -123,6 +138,7 @@ async function consumeTurn(
   const appendAbort = new AbortController();
   const governedOperations = new Set<Promise<unknown>>();
   let governedCancellationStarted = false;
+  let deferredGovernedSettlement: Promise<unknown> | null = null;
   const inputTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const eventIterator = session.events()[Symbol.asyncIterator]();
   let stopConsumer = false;
@@ -250,14 +266,15 @@ async function consumeTurn(
   } catch (error) {
     stopConsumer = true;
     appendAbort.abort(error);
-    // Governed callbacks carry control-plane mutation authority. Once aborted,
-    // fail closed by joining them before provider teardown; closing first would
-    // let an abort-ignoring callback publish stale state into a closed session.
-    // The callback contract requires abort settlement, so a broken embedder is
-    // quarantined here rather than allowed to escape cleanup ownership.
+    // Governed callbacks carry control-plane mutation authority. Give them a
+    // bounded cooperative-cancellation window. If an embedder ignores abort,
+    // transfer ownership to an observed cleanup chain instead of either
+    // defeating the execution timeout or closing underneath a live mutation.
     if (governedOperations.size > 0) {
       const governedSettlement = Promise.allSettled([...governedOperations]);
-      await governedSettlement;
+      if (!(await settlesWithin(governedSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+        deferredGovernedSettlement = governedSettlement;
+      }
     }
     if (!governedCancellationStarted) {
       await attemptOptionalSessionCancellation(session, "Native session event consumption failed.");
@@ -279,8 +296,22 @@ async function consumeTurn(
       iteratorTeardown,
       consumer,
     ]);
-    if (appendAbort.signal.aborted) await closeFailedSession();
-    await teardownSettlement;
+    if (appendAbort.signal.aborted) {
+      if (deferredGovernedSettlement !== null) {
+        retainFailedCleanup((async () => {
+          await deferredGovernedSettlement;
+          await closeFailedSession();
+          await teardownSettlement;
+        })(), true);
+      } else {
+        await closeFailedSession();
+        if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
+          retainFailedCleanup(teardownSettlement.then(() => undefined), false);
+        }
+      }
+    } else {
+      await teardownSettlement;
+    }
     if (timer !== undefined) clearTimeout(timer);
     removeExternalAbort();
     for (const inputTimer of inputTimers.values()) clearTimeout(inputTimer);
@@ -447,6 +478,14 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return sessionClosePromise;
   };
   let executionSucceeded = false;
+  let failedCleanupOwnsSessionClose = false;
+  const retainFailedCleanup = (cleanup: Promise<void>, ownsSessionClose: boolean) => {
+    failedCleanupOwnsSessionClose ||= ownsSessionClose;
+    // Retain and observe cleanup after the caller-facing execution settles.
+    // The chain itself owns ordering; observing it prevents a late rejection
+    // from becoming process-fatal without granting it mutation authority.
+    void cleanup.catch(() => undefined);
+  };
   try {
     const checkpoint = async () => {
       const snapshot = await session.snapshot();
@@ -489,6 +528,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         options.timeoutMs ?? 900_000,
         options.runtimeInputLiveWindowMs ?? DEFAULT_NATIVE_RUNTIME_INPUT_LIVE_WINDOW_MS,
         closeSession,
+        retainFailedCleanup,
         options.resolveGovernedWait,
         consumptionAbort.signal,
       );
@@ -669,7 +709,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if (!options.keepSessionOpen || !executionSucceeded) {
+    if ((!options.keepSessionOpen || !executionSucceeded) && !failedCleanupOwnsSessionClose) {
       await closeSession();
     }
   }

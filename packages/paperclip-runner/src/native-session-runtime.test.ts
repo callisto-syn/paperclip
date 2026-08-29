@@ -606,11 +606,11 @@ describe("executeNativeSession recovery", () => {
       },
     });
     await resolverStarted;
-    await new Promise<void>((resolve) => setTimeout(resolve, 125));
+    await expect(execution).rejects.toThrow("native session timed out");
     expect(resolverSignal?.aborted).toBe(true);
     expect(close).not.toHaveBeenCalled();
     releaseResolver();
-    await expect(execution).rejects.toThrow("native session timed out");
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
     expect(close).toHaveBeenCalled();
     expect(lifecycle).toEqual(["resolver-settled", "closed"]);
   });
@@ -682,12 +682,12 @@ describe("executeNativeSession recovery", () => {
       resolveGovernedWait: async () => yieldedResult,
     });
     await cancelStarted;
-    await new Promise<void>((resolve) => setTimeout(resolve, 125));
+    await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
     releaseCancel();
-    await expect(execution).rejects.toThrow("native session timed out");
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
     expect(close).toHaveBeenCalled();
     expect(lifecycle).toEqual(["cancel-settled", "closed"]);
   });
