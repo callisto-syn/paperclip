@@ -511,7 +511,10 @@ function snapshotBootstrap(format: AcpxCommandFormat): string {
     "const current = fs.lstatSync(commandDirectory, { bigint: true });",
     'if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== pinnedDirectory.dev || current.ino !== pinnedDirectory.ino) throw new Error("ACPX provider executable directory identity changed after verification");',
     "};",
-    "assertPinnedDirectory();",
+    // Linux can address the inherited directory descriptor directly. Other
+    // POSIX fdesc filesystems cannot be traversed, so fail closed if their
+    // retained lexical path no longer names the pinned directory inode.
+    'if (process.platform !== "linux") assertPinnedDirectory();',
     `const directory = process.platform === "linux" ? "/proc/self/fd/${COMMAND_DIRECTORY_FD}" : commandDirectory;`,
     "const directoryUrl = pathToFileURL(`${directory}/`).href;",
     "const target = new URL(commandName, directoryUrl).href;",
