@@ -16,10 +16,15 @@ const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
 const QUARANTINED_SESSION_CLOSE_RETRY_MS = 60_000;
-// A bounded backend close can include a two-second protocol deadline plus
-// two-second TERM and KILL verification windows. Admission observes that exact
-// owner with one second of scheduling margin before failing closed.
-const QUARANTINED_SESSION_ADMISSION_GRACE_MS = 7_000;
+// Admission can inherit the complete three-attempt recovery already owned by
+// the quarantine. Keep the wait finite while covering every bounded close
+// attempt and the two production retry delays instead of timing out midway.
+const QUARANTINED_SESSION_CLOSE_ATTEMPT_BOUND_MS = 7_000;
+const QUARANTINED_SESSION_ADMISSION_GRACE_MS =
+  MAX_QUARANTINED_SESSION_CLOSE_RETRIES *
+    QUARANTINED_SESSION_CLOSE_ATTEMPT_BOUND_MS +
+  (MAX_QUARANTINED_SESSION_CLOSE_RETRIES - 1) *
+    FAILED_SESSION_CLOSE_RETRY_MS;
 
 interface QuarantinedSessionCleanup {
   session: NativeSession;

@@ -177,7 +177,25 @@ describe("executeNativeSession recovery", () => {
   it("preserves durable success while quarantined cleanup stays bounded", async () => {
     vi.useFakeTimers();
     try {
-      const close = vi.fn().mockRejectedValue(new Error("persistent close failure"));
+      let executionCloseCount = 0;
+      let quarantineAttempt = 0;
+      const close = vi.fn(({ reason }: { reason: string }) => {
+        if (reason === "native session quarantined cleanup recovery") {
+          quarantineAttempt += 1;
+          const attempt = quarantineAttempt;
+          return new Promise<void>((resolve, reject) => {
+            setTimeout(() => {
+              if (attempt < 3) reject(new Error("transient quarantine failure"));
+              else resolve();
+            }, 6_500);
+          });
+        }
+        if (reason === "native session execution complete") {
+          executionCloseCount += 1;
+          if (executionCloseCount > 1) return Promise.resolve();
+        }
+        return Promise.reject(new Error("persistent close failure"));
+      });
       const session: NativeSession = {
         identity: () => identity,
         async capabilities() {
@@ -233,36 +251,25 @@ describe("executeNativeSession recovery", () => {
 
       await expect(execute()).resolves.toMatchObject({ result });
       expect(close).toHaveBeenCalledOnce();
-      await vi.advanceTimersByTimeAsync(6_000);
-      expect(close).toHaveBeenCalledTimes(7);
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(close).toHaveBeenCalledTimes(7);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(close).toHaveBeenCalledTimes(5);
 
-      close.mockImplementation(({ reason }: { reason: string }) =>
-        reason === "native session scheduled quarantined cleanup recovery"
-          ? new Promise<void>((resolve) => setTimeout(resolve, 6_500))
-          : Promise.resolve()
-      );
-      // Admit while the scheduled recovery owns a slow close. The close gets
-      // the complete seven-second admission grace rather than losing one
-      // second to the retry delay.
-      await vi.advanceTimersToNextTimerAsync();
+      // Admission inherits the already-running three-attempt recovery and
+      // waits through its bounded attempts instead of timing out after one.
       const recoveredExecution = execute();
-      await vi.advanceTimersByTimeAsync(6_499);
-      expect(close).toHaveBeenCalledTimes(8);
-      expect(close.mock.calls[7]?.[0]).toEqual({
-        reason: "native session scheduled quarantined cleanup recovery",
-      });
       let admissionSettled = false;
       void recoveredExecution.then(
         () => { admissionSettled = true; },
         () => { admissionSettled = true; },
       );
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(admissionSettled).toBe(false);
       expect(openSession).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledTimes(7);
+      await vi.advanceTimersByTimeAsync(2_000);
       await expect(recoveredExecution).resolves.toMatchObject({ result });
-      expect(close).toHaveBeenCalledTimes(9);
+      expect(quarantineAttempt).toBe(3);
+      expect(close).toHaveBeenCalledTimes(8);
       expect(openSession).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -338,7 +345,7 @@ describe("executeNativeSession recovery", () => {
       const blockedResult = expect(blockedAdmission).rejects.toThrow(
         "prior session cleanup exceeded the admission grace",
       );
-      await vi.advanceTimersByTimeAsync(7_100);
+      await vi.advanceTimersByTimeAsync(23_100);
       await blockedResult;
       expect(openSession).toHaveBeenCalledOnce();
 

@@ -56,12 +56,19 @@ const CLOSE_TURN_SETTLEMENT_TIMEOUT_MS = 2_000;
 const MAX_AUTONOMOUS_HOST_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_HOST_CLOSE_RETRIES = 3;
 const QUARANTINED_HOST_CLOSE_RETRY_MS = 60_000;
+const MAX_QUARANTINED_HOST_ATTEMPT_RETRY_DELAY_MS = 1_000;
 // Host shutdown first bounds active-turn cancellation and then performs the
-// adapter's bounded protocol/TERM/KILL cleanup. Preserve one additional second
-// for scheduling so admission does not reject that complete valid sequence.
-const QUARANTINED_HOST_ADMISSION_GRACE_MS =
+// adapter's bounded protocol/TERM/KILL cleanup. Admission can inherit an
+// already-running three-attempt recovery, so cover every attempt and bounded
+// inter-attempt delay, plus one second of scheduling margin.
+const QUARANTINED_HOST_CLOSE_ATTEMPT_BOUND_MS =
   ACPX_TURN_CANCELLATION_SHUTDOWN_BOUND_MS +
-  DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS +
+  DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS;
+const QUARANTINED_HOST_ADMISSION_GRACE_MS =
+  MAX_QUARANTINED_HOST_CLOSE_RETRIES *
+    QUARANTINED_HOST_CLOSE_ATTEMPT_BOUND_MS +
+  (MAX_QUARANTINED_HOST_CLOSE_RETRIES - 1) *
+    MAX_QUARANTINED_HOST_ATTEMPT_RETRY_DELAY_MS +
   1_000;
 
 export interface CodexAcpxDynamicToolCall {
@@ -284,7 +291,13 @@ export class CodexAcpxDriver implements HarnessDriver {
         // attempts wait, preserving sequential bounded retry behavior.
         if (attemptCount > 0) {
           await waitForCleanupRetry(
-            Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
+            Math.max(
+              1,
+              Math.min(
+                MAX_QUARANTINED_HOST_ATTEMPT_RETRY_DELAY_MS,
+                this.#closeSettlementTimeoutMs,
+              ),
+            ),
           );
         }
         const attempt = Promise.resolve().then(() => cleanup.host.close({

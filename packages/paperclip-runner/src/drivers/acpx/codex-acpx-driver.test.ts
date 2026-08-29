@@ -370,6 +370,59 @@ describe("Codex ACPX harness driver", () => {
     }
   });
 
+  it("lets admission observe a complete bounded multi-attempt recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
+      let quarantineAttempt = 0;
+      fixture.host.close.mockImplementation(({ reason }) => {
+        if (!reason.includes("quarantined cleanup recovery")) {
+          return Promise.reject(new Error("persistent cleanup failure"));
+        }
+        quarantineAttempt += 1;
+        const attempt = quarantineAttempt;
+        return new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            if (attempt < 3) reject(new Error("transient quarantine failure"));
+            else resolve();
+          }, 8_000);
+        });
+      });
+      const session = await fixture.driver.openSession({
+        runId: "run-multi-attempt-recovery",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+
+      const closing = expect(
+        session.close({ reason: "runtime close persistently failed" }),
+      ).rejects.toThrow("persistent cleanup failure");
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      await vi.advanceTimersByTimeAsync(4);
+      expect(fixture.host.close).toHaveBeenCalledTimes(5);
+
+      let admissionSettled = false;
+      const admission = fixture.driver.openSession({
+        runId: "run-after-multi-attempt-recovery",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      void admission.then(
+        () => { admissionSettled = true; },
+        () => { admissionSettled = true; },
+      );
+      await vi.advanceTimersByTimeAsync(23_000);
+      expect(admissionSettled).toBe(false);
+      expect(fixture.host.close).toHaveBeenCalledTimes(7);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(admission).resolves.toBeDefined();
+      expect(quarantineAttempt).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails admission within a finite grace when quarantined cleanup never settles", async () => {
     vi.useFakeTimers();
     try {
@@ -397,7 +450,7 @@ describe("Codex ACPX harness driver", () => {
         workingDirectory: "/workspace",
       });
       void admission.finally(() => { admissionSettled = true; }).catch(() => undefined);
-      await vi.advanceTimersByTimeAsync(8_999);
+      await vi.advanceTimersByTimeAsync(26_999);
       expect(admissionSettled).toBe(false);
       await vi.advanceTimersByTimeAsync(2);
       await expect(admission).rejects.toThrow("exceeded the admission grace");
