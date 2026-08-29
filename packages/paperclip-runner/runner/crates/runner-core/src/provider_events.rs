@@ -680,22 +680,20 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         raw_path
     };
     if path.is_empty()
-        || windows_normalized_path.starts_with('/')
-        || is_absolute_windows_drive_path(&windows_normalized_path)
+        || path.starts_with('/')
+        || (cfg!(windows) && is_absolute_windows_drive_path(&windows_normalized_path))
         // ACPX providers execute on the runner host. On POSIX, a leading
         // single-letter colon component is a valid relative filename, not a
         // Windows drive selector. Interpret that ambiguous spelling as a
         // drive-relative path only when the runner itself is on Windows.
         || (cfg!(windows) && has_drive_relative_prefix(&windows_normalized_path))
         || (cfg!(windows) && raw_path.contains(':'))
-        || windows_normalized_path
-            .split('/')
-            .any(|segment| segment == "..")
+        || path.split('/').any(|segment| segment == "..")
         || has_unsafe_uri_spelling(raw_path)
     {
         Value::Null
     } else {
-        let display_path = if !cfg!(windows) && has_ambiguous_single_slash_prefix(raw_path) {
+        let display_path = if !cfg!(windows) && has_ambiguous_scheme_prefix(raw_path) {
             // A leading `./` preserves the exact POSIX-relative target while
             // preventing consumers from interpreting an extensible prefix
             // such as `custom:/...` as a URI scheme.
@@ -745,13 +743,15 @@ fn has_unsafe_uri_spelling(path: &str) -> bool {
     })
 }
 
-fn has_ambiguous_single_slash_prefix(path: &str) -> bool {
+fn has_ambiguous_scheme_prefix(path: &str) -> bool {
     path.split_once(':').is_some_and(|(prefix, suffix)| {
         prefix.len() > 1
-            && prefix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-            && prefix.as_bytes()[0].is_ascii_alphabetic()
-            && suffix.starts_with('/')
-            && !suffix.starts_with("//")
+            && prefix.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+            })
+            && ((suffix.starts_with('/') && !suffix.starts_with("//"))
+                || (suffix.starts_with('\\') && !suffix.starts_with("\\\\")))
             && !is_known_uri_scheme(prefix)
     })
 }
@@ -784,15 +784,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_absolute_windows_paths_on_every_host_platform() {
-        assert_eq!(
-            safe_acpx_location(Some(&json!({"path": "C:\\Users\\alice\\file.txt"}))),
-            Value::Null,
-        );
-        assert_eq!(
-            safe_acpx_location(Some(&json!({"path": "\\\\server\\share\\file.txt"}))),
-            Value::Null,
-        );
+    fn classifies_windows_paths_for_the_runner_platform() {
+        for location in [r"C:\Users\alice\file.txt", r"\\server\share\file.txt"] {
+            let normalized = safe_acpx_location(Some(&json!({"path": location})));
+            if cfg!(windows) {
+                assert_eq!(normalized, Value::Null);
+            } else {
+                assert_eq!(normalized, Value::String(location.to_owned()));
+            }
+        }
     }
 
     #[test]
@@ -826,7 +826,25 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(normalized, Value::Null);
         } else {
-            assert_eq!(normalized, Value::String(r"foo:\bar".to_owned()));
+            assert_eq!(normalized, Value::String(r"./foo:\bar".to_owned()));
+        }
+    }
+
+    #[test]
+    fn preserves_posix_literal_backslash_components_without_uri_ambiguity() {
+        for location in [r"foo\..\bar", r"\rooted\name"] {
+            let normalized = safe_acpx_location(Some(&json!({"path": location})));
+            if cfg!(windows) {
+                assert_eq!(normalized, Value::Null);
+            } else {
+                assert_eq!(normalized, Value::String(location.to_owned()));
+            }
+        }
+        let custom = safe_acpx_location(Some(&json!({"path": r"custom:\host\path"})));
+        if cfg!(windows) {
+            assert_eq!(custom, Value::Null);
+        } else {
+            assert_eq!(custom, Value::String(r"./custom:\host\path".to_owned()));
         }
     }
 

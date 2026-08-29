@@ -129,11 +129,14 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
                 "locations":[{"path":unsafe_path}]
             }),
         );
-        assert_eq!(
-            backslash_escape[0].payload["target"],
-            serde_json::Value::Null,
-            "unsafe provider path should be rejected: {unsafe_path}"
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                backslash_escape[0].payload["target"],
+                serde_json::Value::Null
+            );
+        } else {
+            assert_eq!(backslash_escape[0].payload["target"], unsafe_path);
+        }
     }
 
     let windows_absolute = normalize(
@@ -147,10 +150,17 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"C:\\Users\\alice\\repo\\src\\main.rs"}]
         }),
     );
-    assert_eq!(
-        windows_absolute[0].payload["target"],
-        serde_json::Value::Null
-    );
+    if cfg!(windows) {
+        assert_eq!(
+            windows_absolute[0].payload["target"],
+            serde_json::Value::Null
+        );
+    } else {
+        assert_eq!(
+            windows_absolute[0].payload["target"],
+            r"C:\Users\alice\repo\src\main.rs"
+        );
+    }
 
     let windows_unc = normalize(
         AcpxRuntimeEventKind::ToolCall,
@@ -163,7 +173,14 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             "locations":[{"path":"\\\\server\\share\\repo\\src\\main.rs"}]
         }),
     );
-    assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
+    if cfg!(windows) {
+        assert_eq!(windows_unc[0].payload["target"], serde_json::Value::Null);
+    } else {
+        assert_eq!(
+            windows_unc[0].payload["target"],
+            r"\\server\share\repo\src\main.rs"
+        );
+    }
 
     let windows_drive_relative = normalize(
         AcpxRuntimeEventKind::ToolCall,
@@ -278,7 +295,30 @@ fn maps_tool_lifecycle_and_rejects_unsafe_display_paths() {
             serde_json::Value::Null
         );
     } else {
-        assert_eq!(posix_colon_backslash[0].payload["target"], r"foo:\bar");
+        assert_eq!(posix_colon_backslash[0].payload["target"], r"./foo:\bar");
+    }
+
+    let custom_backslash_scheme = normalize(
+        AcpxRuntimeEventKind::ToolCall,
+        json!({
+            "type":"tool_call",
+            "tag":"tool_call_update",
+            "toolCallId":"tool-custom-backslash",
+            "kind":"read",
+            "status":"completed",
+            "locations":[{"path":r"custom:\host\path"}]
+        }),
+    );
+    if cfg!(windows) {
+        assert_eq!(
+            custom_backslash_scheme[0].payload["target"],
+            serde_json::Value::Null
+        );
+    } else {
+        assert_eq!(
+            custom_backslash_scheme[0].payload["target"],
+            r"./custom:\host\path"
+        );
     }
 }
 
