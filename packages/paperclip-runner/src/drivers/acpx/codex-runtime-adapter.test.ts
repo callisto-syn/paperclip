@@ -908,6 +908,8 @@ describe("Codex ACPX runtime adapter", () => {
       options: {},
     })).toThrow("provider spawned after cleanup was sealed");
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(retainCleanup).toHaveBeenCalledTimes(2);
+    await retainCleanup.mock.calls[1]?.[0];
     resolveHandshake?.(HANDLE);
 
     await retainedCleanup;
@@ -922,6 +924,8 @@ describe("Codex ACPX runtime adapter", () => {
       options: {},
     })).toThrow("provider spawned after cleanup was sealed");
     expect(postCleanupChild.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(retainCleanup).toHaveBeenCalledTimes(3);
+    await retainCleanup.mock.calls[2]?.[0];
   });
 
   it("rejects non-Codex profiles before constructing ACPX", async () => {

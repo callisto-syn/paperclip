@@ -1075,7 +1075,10 @@ function retainActiveHostCleanup(
 }
 
 function retainFailedAdmissionCleanup(cleanup: Promise<void>): void {
-  const retained = cleanup.catch(() => undefined);
+  const prior = failedAdmissionCleanup;
+  const retained = Promise.allSettled(
+    prior ? [prior, cleanup] : [cleanup],
+  ).then(() => undefined);
   failedAdmissionCleanup = retained;
   void retained.finally(() => {
     if (failedAdmissionCleanup === retained) failedAdmissionCleanup = null;

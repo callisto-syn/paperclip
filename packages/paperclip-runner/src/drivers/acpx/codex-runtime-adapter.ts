@@ -87,7 +87,7 @@ export async function openCodexAcpxRuntime(
   const createRuntime = dependencies.createRuntime ?? createAcpRuntime;
   const runtimeCloseTimeoutMs =
     dependencies.runtimeCloseTimeoutMs ?? DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS;
-  const children = new SpawnedChildSet();
+  const children = new SpawnedChildSet(dependencies.retainCleanup);
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
   const rememberHandshakeHandle = (record: AcpSessionRecord): void => {
@@ -531,18 +531,34 @@ class SpawnedChildSet {
   #terminating = false;
   #sealed = false;
 
+  constructor(
+    private readonly retainCleanup?: (cleanup: Promise<void>) => void,
+  ) {}
+
   add(child: ChildProcess): ChildProcess {
+    this.#track(child);
     if (this.#sealed) {
       // Once the stable-empty cleanup point is sealed, ACPX no longer has
-      // authority to create provider work. Kill a violating late child before
-      // returning control to the runtime and reject the spawn itself.
-      try {
-        if (running(child)) child.kill("SIGKILL");
-      } finally {
-        closeUnresponsiveChildStreams(child);
-      }
+      // authority to create provider work. Retain an immediate-kill attempt
+      // through exit verification before rejecting the spawn itself.
+      const termination = this.#startTermination(child, true);
+      const cleanup = termination.then((errors) => {
+        if (errors.length > 0) {
+          throw new AggregateError(
+            errors,
+            "ACPX post-seal provider cleanup failed",
+          );
+        }
+      });
+      this.retainCleanup?.(cleanup);
+      void cleanup.catch(() => undefined);
       throw new Error("ACPX provider spawned after cleanup was sealed");
     }
+    if (this.#terminating) this.#startTermination(child);
+    return child;
+  }
+
+  #track(child: ChildProcess): void {
     this.#children.add(child);
     const onError = (error: unknown) => this.#errors.add(error);
     const forget = () => this.#children.delete(child);
@@ -556,8 +572,6 @@ class SpawnedChildSet {
     child.on("error", onError);
     child.once("exit", forget);
     child.once("close", forgetAndDetach);
-    if (this.#terminating) this.#startTermination(child);
-    return child;
   }
 
   async terminate(): Promise<unknown[]> {
@@ -584,10 +598,16 @@ class SpawnedChildSet {
     return errors;
   }
 
-  #startTermination(child: ChildProcess): Promise<unknown[]> {
+  #startTermination(
+    child: ChildProcess,
+    immediateKill = false,
+  ): Promise<unknown[]> {
     const existing = this.#terminations.get(child);
     if (existing) return existing;
-    const termination = terminateChild(child).catch((error: unknown) => [error]);
+    const termination = (immediateKill
+      ? terminatePostSealChild(child)
+      : terminateChild(child)
+    ).catch((error: unknown) => [error]);
     this.#terminations.set(child, termination);
     termination.then(() => {
       if (this.#terminations.get(child) === termination) {
@@ -596,6 +616,24 @@ class SpawnedChildSet {
     });
     return termination;
   }
+}
+
+async function terminatePostSealChild(child: ChildProcess): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  if (!running(child)) return errors;
+  const killOutcome = await signalAndWaitForExit(
+    child,
+    "SIGKILL",
+    PROVIDER_KILL_EXIT_TIMEOUT_MS,
+  );
+  if (killOutcome.error !== undefined) {
+    pushUnique(errors, killOutcome.error);
+  }
+  if (!killOutcome.exited && running(child)) {
+    errors.push(new Error("ACPX post-seal provider did not exit after SIGKILL"));
+    errors.push(...closeUnresponsiveChildStreams(child));
+  }
+  return errors;
 }
 
 async function terminateChild(child: ChildProcess): Promise<unknown[]> {
