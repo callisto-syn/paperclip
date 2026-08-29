@@ -84,6 +84,16 @@ describe("harness-driver conformance V1", () => {
     expect(events[1]?.payload).toEqual({
       reason: "deterministic_active_turn_recovered_without_live_producer",
     });
+    await expect(recovered.transcript?.()).resolves.toMatchObject({
+      schema: "paperclip-runner/harness-transcript/v1",
+      complete: false,
+      eventCount: 3,
+      events: events.map((event) => expect.objectContaining({
+        sourceSeq: event.sourceSeq,
+        eventType: event.eventType,
+      })),
+      omissionReason: "pre_recovery_events_not_reconstructed",
+    });
     await recovered.close({ reason: "recovered_complete" });
     await firstRecovery.session!.close({ reason: "first_recovery_complete" });
     await session.close({ reason: "original_complete", force: true });

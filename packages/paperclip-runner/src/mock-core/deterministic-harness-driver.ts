@@ -138,6 +138,7 @@ class DeterministicHarnessSession implements HarnessSession {
   #active = false;
   #recoveredActiveTurn = false;
   #nextSourceSeq = 1;
+  readonly #transcriptOmissionReason: string | null;
   readonly #eventWaiters = new Set<() => void>();
 
   constructor(
@@ -152,6 +153,9 @@ class DeterministicHarnessSession implements HarnessSession {
     this.#active = snapshot?.activeTurnId !== null && snapshot?.activeTurnId !== undefined;
     this.#recoveredActiveTurn = this.#active;
     this.#nextSourceSeq = (snapshot?.lastSourceSequence ?? 0) + 1;
+    this.#transcriptOmissionReason = snapshot === undefined
+      ? null
+      : "pre_recovery_events_not_reconstructed";
   }
 
   ids() {
@@ -326,10 +330,10 @@ class DeterministicHarnessSession implements HarnessSession {
   async transcript(): Promise<HarnessTranscriptSnapshot> {
     return {
       schema: "paperclip-runner/harness-transcript/v1",
-      complete: true,
+      complete: this.#transcriptOmissionReason === null,
       eventCount: this.#events.length,
       events: structuredClone(this.#events),
-      omissionReason: null,
+      omissionReason: this.#transcriptOmissionReason,
     };
   }
 
