@@ -8,6 +8,8 @@ describe("ACPX sidecar locations", () => {
       { path: "src/main.ts", line: 4 },
       { path: "src:main.ts" },
       { path: String.raw`folder\literal` },
+      { path: "a:/foo" },
+      { path: String.raw`foo\..\bar` },
       { path: "reports/100%/summary.txt" },
       { path: "../outside.txt" },
       { path: "/etc/passwd" },
@@ -17,6 +19,26 @@ describe("ACPX sidecar locations", () => {
       {
         path: "src/main.ts",
         line: 4,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: "src:main.ts",
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: String.raw`folder\literal`,
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: "a:/foo",
+        line: null,
+        pathBoundary: "paperclip.workspace_relative_display.v1",
+      },
+      {
+        path: String.raw`foo\..\bar`,
+        line: null,
         pathBoundary: "paperclip.workspace_relative_display.v1",
       },
       {
@@ -34,8 +56,7 @@ describe("ACPX sidecar locations", () => {
       { path: String.raw`https:\host\secret` },
       { path: "https://host/secret" },
       { path: "file:secret.txt" },
-      { path: "src:/main.ts" },
-      { path: String.raw`foo\..\secret.txt` },
+      { path: "s3:bucket/key" },
     ], "/workspace/project")).toEqual([]);
   });
 

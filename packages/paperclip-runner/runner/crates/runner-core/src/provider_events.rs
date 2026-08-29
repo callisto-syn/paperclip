@@ -683,8 +683,9 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
         .unwrap_or_default();
     if raw_path.is_empty()
         || raw_path.starts_with('/')
-        || raw_path.contains('\\')
-        || has_uri_scheme_prefix(raw_path)
+        || raw_path.starts_with('\\')
+        || has_windows_drive_backslash_prefix(raw_path)
+        || has_provider_uri_scheme_prefix(raw_path)
         || raw_path.contains('\0')
         || raw_path.split('/').any(|segment| segment == "..")
     {
@@ -694,15 +695,32 @@ fn safe_acpx_location(value: Option<&Value>) -> Value {
     }
 }
 
-fn has_uri_scheme_prefix(value: &str) -> bool {
+fn has_windows_drive_backslash_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
+fn has_provider_uri_scheme_prefix(value: &str) -> bool {
     let Some((scheme, _rest)) = value.split_once(':') else {
         return false;
     };
-    let mut chars = scheme.chars();
-    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic())
-        && chars.all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
-        })
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "data"
+            | "file"
+            | "ftp"
+            | "ftps"
+            | "git"
+            | "gs"
+            | "http"
+            | "https"
+            | "mailto"
+            | "s3"
+            | "sftp"
+            | "ssh"
+            | "ws"
+            | "wss"
+    )
 }
 
 #[cfg(test)]
@@ -750,8 +768,17 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unambiguous_relative_display_characters() {
-        for location in ["src/main.rs", "foo/bar-baz.txt", "reports/100%/summary.txt"] {
+    fn preserves_valid_posix_display_characters() {
+        for location in [
+            "src:main.rs",
+            "foo:bar/baz",
+            "src:/main.rs",
+            "a:/foo",
+            "A:b/file.txt",
+            r"folder\literal",
+            r"foo\..\bar",
+            "reports/100%/summary.txt",
+        ] {
             assert_eq!(
                 safe_acpx_location(Some(&json!({
                     "path": location,

@@ -2,7 +2,9 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export const ACPX_WORKSPACE_RELATIVE_DISPLAY_BOUNDARY =
   "paperclip.workspace_relative_display.v1";
-const URI_SCHEME_PREFIX = /^[A-Za-z][A-Za-z0-9+.-]*:/u;
+const PROVIDER_URI_SCHEME_PREFIX =
+  /^(?:data|file|ftp|ftps|git|gs|http|https|mailto|s3|sftp|ssh|ws|wss):/iu;
+const WINDOWS_DRIVE_BACKSLASH_PREFIX = /^[A-Za-z]:\\/u;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -12,10 +14,10 @@ function record(value: unknown): Record<string, unknown> {
 
 /**
  * Converts provider paths to workspace-relative display targets using the
- * sidecar host's path semantics. URI schemes and foreign-host separators fail
- * closed before host-native resolution so a POSIX sidecar cannot attest a
- * Windows path or provider URI as a relative filename. Consumers must treat
- * the result as display data, never as authorization to access a file.
+ * sidecar host's path semantics. Provider URI schemes, UNC/rooted backslash
+ * paths, and drive-plus-backslash paths fail closed before host-native
+ * resolution. Other colons and backslashes remain valid POSIX filename data.
+ * Consumers must treat the result as display data, never as authorization.
  */
 export function safeAcpxLocations(
   locations: readonly unknown[] | null | undefined,
@@ -29,8 +31,9 @@ export function safeAcpxLocations(
     if (
       !rawPath
       || rawPath.includes("\0")
-      || rawPath.includes("\\")
-      || URI_SCHEME_PREFIX.test(rawPath)
+      || rawPath.startsWith("\\")
+      || WINDOWS_DRIVE_BACKSLASH_PREFIX.test(rawPath)
+      || PROVIDER_URI_SCHEME_PREFIX.test(rawPath)
     ) return [];
     const absolute = isAbsolute(rawPath)
       ? resolve(rawPath)
