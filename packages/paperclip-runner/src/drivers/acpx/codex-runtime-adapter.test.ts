@@ -132,15 +132,14 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("terminates providers at the deadline while retaining protocol cleanup", async () => {
+  it("retries protocol cleanup after a retained attempt never settles", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
-      let resolveRuntimeClose!: () => void;
-      const runtimeClose = new Promise<void>((resolve) => {
-        resolveRuntimeClose = resolve;
-      });
-      vi.mocked(runtime.close).mockReturnValue(runtimeClose);
+      const runtimeClose = new Promise<void>(() => {});
+      vi.mocked(runtime.close)
+        .mockReturnValueOnce(runtimeClose)
+        .mockResolvedValueOnce(undefined);
       const child = fakeChild();
       const command = fakeCommand();
       vi.mocked(command.spawn).mockReturnValue(child);
@@ -168,21 +167,23 @@ describe("Codex ACPX runtime adapter", () => {
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
       await firstClose;
 
-      // The provider is terminally bounded, but the exact protocol cleanup
-      // remains authoritative. Once that retained attempt succeeds, a later
-      // close observes its outcome without starting a replacement attempt.
+      // The first exact cleanup remains owned, but it cannot become the retry
+      // barrier after its bounded observation and provider termination finish.
       expect(runtime.close).toHaveBeenCalledOnce();
-      resolveRuntimeClose();
-      await Promise.resolve();
       await expect(port.close({ reason: "idempotent terminal close" }))
         .resolves.toBeUndefined();
-      expect(runtime.close).toHaveBeenCalledOnce();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
+      expect(runtime.close).toHaveBeenLastCalledWith({
+        handle: HANDLE,
+        reason: "idempotent terminal close",
+        discardPersistentState: false,
+      });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("surfaces a retained protocol failure after provider termination", async () => {
+  it("allows a fresh close after a retained attempt rejects late", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
@@ -190,7 +191,9 @@ describe("Codex ACPX runtime adapter", () => {
       const runtimeClose = new Promise<void>((_resolve, reject) => {
         rejectRuntimeClose = reject;
       });
-      vi.mocked(runtime.close).mockReturnValue(runtimeClose);
+      vi.mocked(runtime.close)
+        .mockReturnValueOnce(runtimeClose)
+        .mockResolvedValueOnce(undefined);
       const child = fakeChild();
       const command = fakeCommand();
       vi.mocked(command.spawn).mockReturnValue(child);
@@ -220,12 +223,9 @@ describe("Codex ACPX runtime adapter", () => {
       const protocolFailure = new Error("late protocol close failure");
       rejectRuntimeClose(protocolFailure);
       await Promise.resolve();
-      await expect(port.close({ reason: "observe retained failure" }))
-        .rejects.toMatchObject({
-          message: "ACPX runtime and provider cleanup failed",
-          errors: [protocolFailure],
-        });
-      expect(runtime.close).toHaveBeenCalledOnce();
+      await expect(port.close({ reason: "retry after retained failure" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

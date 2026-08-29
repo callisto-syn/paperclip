@@ -32,9 +32,10 @@ export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
   DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS +
   PROVIDER_TERM_EXIT_TIMEOUT_MS +
   PROVIDER_KILL_EXIT_TIMEOUT_MS;
-// A close may outlive its caller-facing wait bound. Keeping the exact promise
-// here prevents a timed-out protocol cleanup from being garbage-collected or
-// replaced by a fresh attempt whose success could hide the older outcome.
+// A close may outlive its caller-facing wait bound. Keep every exact attempt
+// owned until it settles even after the port releases it for a bounded retry.
+// This prevents abandoned protocol work from being garbage-collected without
+// letting one permanently pending attempt block all future recovery.
 const activeRuntimeCleanupOwners = new Set<Promise<unknown | null>>();
 
 class AcpxRuntimeCloseTimeoutError extends Error {
@@ -291,16 +292,17 @@ function runtimePort(
         children,
         runtimeCloseTimeoutMs,
       );
-      // The caller may stop waiting, but this close remains pending until the
-      // exact ACPX protocol cleanup settles. Provider termination proceeds at
-      // the deadline; later closes must still observe the retained protocol
-      // outcome so a late rejection cannot be mistaken for successful cleanup.
+      // The caller may stop waiting, but the exact ACPX protocol cleanup stays
+      // owned until it settles. Provider termination proceeds at the deadline;
+      // after this bounded observation finishes a later close may make a fresh
+      // protocol attempt instead of inheriting a permanently pending promise.
       const [closeError, processErrors] = await Promise.all([
         boundedCloseOutcome(observedAttempt, runtimeCloseTimeoutMs),
         processCleanup,
       ]);
-      const protocolTimedOut = closeError instanceof AcpxRuntimeCloseTimeoutError;
-      if (!protocolTimedOut) runtimeCloseAttempt = undefined;
+      if (runtimeCloseAttempt === observedAttempt) {
+        runtimeCloseAttempt = undefined;
+      }
       if (processErrors.length === 0 && closeError === null) {
         runtimeClosed = true;
       }
