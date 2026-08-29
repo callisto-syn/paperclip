@@ -377,14 +377,12 @@ impl CodexProvider {
                 return if let Some(exit) = exit {
                     Ok(Some(CodexProviderEvent::Exited {
                         exit_code: exit.exit_code,
-                        // A terminal notification is the durable authority for
-                        // the completed turn. Once no turn remains active, a
-                        // later process exit (including a nonzero one) cannot
-                        // retroactively contradict that outcome. A new turn
-                        // revokes this authority before provider work starts.
-                        success: (self.completed_turn_authoritative
-                            && self.active_provider_turn_id.is_none())
-                            || (exit.success && self.expected_shutdown),
+                        // Completion authority preserves the old turn result,
+                        // but it does not hide a later unhealthy process exit.
+                        // The durable backend records that independent session
+                        // lifecycle fact without refailing completed work.
+                        success: exit.success
+                            && (self.expected_shutdown || self.completed_turn_authoritative),
                         completed_turn_authoritative: self.completed_turn_authoritative
                             && self.active_provider_turn_id.is_none(),
                     }))

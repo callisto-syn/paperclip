@@ -435,12 +435,15 @@ fn nonzero_provider_exit_does_not_refail_an_authoritatively_completed_turn() {
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));
     assert!(!event_types.iter().any(|event| event == "session.failed"));
+    assert!(event_types
+        .iter()
+        .any(|event| event == "session.reconciled"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after nonzero exit"),
     )
     .expect("parse provider state after nonzero exit");
-    assert_eq!(persisted["lifecycle"], "session_open");
+    assert_eq!(persisted["lifecycle"], "provider_exited");
     assert_eq!(persisted["completedTurnAuthoritative"], true);
 
     let mut recovered = CodexCommandExecutor::new(&directory);

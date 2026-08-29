@@ -854,13 +854,18 @@ impl CodexCommandExecutor {
                             .as_mut()
                             .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
-                        // No authoritative terminal exists for this provider
-                        // exit. Completed turns are classified as success in
-                        // CodexProvider and never reach this contradictory
-                        // failure path; starting a new turn revokes that
-                        // authority first.
                         state.push_event(NormalizedProviderEvent {
-                            event_type: "session.failed".to_owned(),
+                            // A completed turn remains authoritative, while the
+                            // reusable provider session independently becomes
+                            // unavailable. Avoid emitting session.failed for
+                            // already successful work, but never leave the
+                            // durable lifecycle open after a nonzero exit.
+                            event_type: if completed_turn_authoritative {
+                                "session.reconciled"
+                            } else {
+                                "session.failed"
+                            }
+                            .to_owned(),
                             priority: EventPriority::P0,
                             payload: json!({
                                 "provider": "codex",
@@ -868,6 +873,7 @@ impl CodexCommandExecutor {
                                 "exitCode": exit_code,
                                 "expected": success,
                                 "previousTurnCompleted": completed_turn_authoritative,
+                                "activeProviderTurnId": Value::Null,
                             }),
                         })?;
                     }
