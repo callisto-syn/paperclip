@@ -291,6 +291,34 @@ test("every question adapter fixture satisfies its declared schema", async () =>
     /must contain at least 2 characters/,
     "select custom text validation",
   );
+
+  for (const invalid of [
+    {
+      label: "contradictory optional text lengths",
+      validation: { minLength: 3, maxLength: 2 },
+      pattern: /minLength greater than maxLength/,
+    },
+    {
+      label: "contradictory optional numeric bounds",
+      validation: { inputType: "number", minimum: 3, maximum: 2 },
+      pattern: /minimum greater than maximum/,
+    },
+  ]) {
+    const malformedQuestion = structuredClone(canonical);
+    malformedQuestion.canonicalQuestionSet.questions[0] = {
+      ...requiredQuestion,
+      required: false,
+      answerMode: "text",
+      options: [],
+      textValidation: invalid.validation,
+    };
+    malformedQuestion.canonicalResponse.answers = {};
+    assert.throws(
+      () => assertQuestionAdapterFixture(malformedQuestion),
+      invalid.pattern,
+      invalid.label,
+    );
+  }
 });
 
 test("the cross-language conformance input and output have one stable identity", async () => {

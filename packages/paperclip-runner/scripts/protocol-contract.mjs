@@ -204,6 +204,28 @@ export function assertQuestionAdapterFixture(fixture) {
       optionIds.add(option.id);
     }
     optionIdsByQuestion.set(question.id, optionIds);
+    const validation = question.textValidation;
+    if (
+      validation?.minLength !== undefined
+      && validation.maxLength !== undefined
+      && validation.minLength > validation.maxLength
+    ) {
+      throw contractError("invalid_question_adapter_fixture", `text validation for ${question.id} has minLength greater than maxLength`);
+    }
+    if (
+      validation?.minimum !== undefined
+      && validation.maximum !== undefined
+      && validation.minimum > validation.maximum
+    ) {
+      throw contractError("invalid_question_adapter_fixture", `text validation for ${question.id} has minimum greater than maximum`);
+    }
+    if (validation?.pattern !== undefined) {
+      try {
+        new RegExp(validation.pattern);
+      } catch {
+        throw contractError("invalid_question_adapter_fixture", `text validation pattern for ${question.id} is invalid`);
+      }
+    }
   }
   const answers = fixture.canonicalResponse.answers ?? {};
   for (const [answerId, answer] of Object.entries(answers)) {
