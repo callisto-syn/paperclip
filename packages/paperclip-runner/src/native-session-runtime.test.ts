@@ -1613,26 +1613,23 @@ describe("executeNativeSession recovery", () => {
     ]);
   });
 
-  it("replays an already checkpointed disposition terminal without restarting the session", async () => {
+  it("replays a durable disposition terminal that was appended before its checkpoint", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",
       sessionId: "driver-recovery",
       identity,
       providerSessionId: "provider-recovery",
-      cursor: "2",
+      cursor: "1",
       activeTurnId: null,
-      terminalTurns: [
-        { turnId: "turn-work", fingerprint: "work-terminal" },
-        { turnId: "turn-disposition", fingerprint: "disposition-terminal" },
-      ],
+      terminalTurns: [{ turnId: "turn-work", fingerprint: "work-terminal" }],
       dispositionOnlyRecoveryConsumed: true,
       pendingRuntimeRequests: [],
       lineage: [],
     };
     const terminalEvent: PrpEvent = {
       schema: "paperclip.prp.event.v1",
-      sourceEventId: "runner-recovery:run-native:2",
-      sourceSeq: 2,
+      sourceEventId: "runner-recovery:run-native:3",
+      sourceSeq: 3,
       sourceInstanceId: "runner-recovery",
       sourceKind: "provider",
       runId: identity.runId,
@@ -1646,10 +1643,16 @@ describe("executeNativeSession recovery", () => {
     };
     const resultProposalEvent: PrpEvent = {
       ...terminalEvent,
-      sourceEventId: "runner-recovery:run-native:1",
-      sourceSeq: 1,
+      sourceEventId: "runner-recovery:run-native:2",
+      sourceSeq: 2,
       eventType: "run.result.proposed",
       payload: result,
+    };
+    const originalTaskTerminal: PrpEvent = {
+      ...terminalEvent,
+      sourceEventId: "runner-recovery:run-native:1",
+      sourceSeq: 1,
+      turnId: "turn-work",
     };
     const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
     const session: NativeSession = {
@@ -1676,7 +1679,10 @@ describe("executeNativeSession recovery", () => {
       async recoverSession() { return { recovered: true, session }; },
     };
     const bySource = new Map<string, PrpEvent[]>([
-      ["runner-recovery", [structuredClone(terminalEvent)]],
+      ["runner-recovery", [
+        structuredClone(originalTaskTerminal),
+        structuredClone(terminalEvent),
+      ]],
     ]);
     const port: ControlPlanePort = {
       async openRun() {},
@@ -1717,6 +1723,7 @@ describe("executeNativeSession recovery", () => {
       "native_recovery_checkpointed_disposition_proposal_missing",
     );
     bySource.set("runner-recovery", [
+      structuredClone(originalTaskTerminal),
       structuredClone(resultProposalEvent),
       structuredClone(terminalEvent),
     ]);
@@ -1727,6 +1734,7 @@ describe("executeNativeSession recovery", () => {
     });
     expect(startTurn).not.toHaveBeenCalled();
     expect(bySource.get("runner-recovery")).toEqual([
+      originalTaskTerminal,
       resultProposalEvent,
       terminalEvent,
     ]);

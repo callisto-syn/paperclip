@@ -446,11 +446,10 @@ async function replayCheckpointedTurnTerminal(input: {
   controlPlane: ControlPlanePort;
   runId: string;
   sourceInstanceId: string;
-  turnId: string;
 }): Promise<{ terminal: PrpEvent; hasPriorResultProposal: boolean } | null> {
   let afterSourceSeq = 0;
-  let terminal: PrpEvent | null = null;
-  let latestResultProposalSequence = 0;
+  const terminals: PrpEvent[] = [];
+  const latestResultProposalByTurn = new Map<string, number>();
   while (true) {
     const replay = await input.controlPlane.replayEvents({
       runId: input.runId,
@@ -459,27 +458,33 @@ async function replayCheckpointedTurnTerminal(input: {
       limit: 1_000,
     });
     if (replay.events.length === 0) {
+      const orderedTerminals = [...terminals]
+        .sort((left, right) => right.sourceSeq - left.sourceSeq);
+      const terminal = orderedTerminals.find((candidate) => {
+        const proposalSequence = latestResultProposalByTurn.get(candidate.turnId ?? "") ?? 0;
+        return proposalSequence > 0 && proposalSequence < candidate.sourceSeq;
+      }) ?? orderedTerminals[0] ?? null;
+      const proposalSequence = latestResultProposalByTurn.get(terminal?.turnId ?? "") ?? 0;
       return terminal === null
         ? null
         : {
             terminal,
             hasPriorResultProposal:
-              latestResultProposalSequence > 0
-              && latestResultProposalSequence < terminal.sourceSeq,
+              proposalSequence > 0 && proposalSequence < terminal.sourceSeq,
           };
     }
     for (const event of replay.events) {
-      if (
-        event.turnId === input.turnId
-        && event.eventType === "run.result.proposed"
-      ) {
-        latestResultProposalSequence = Math.max(
-          latestResultProposalSequence,
-          event.sourceSeq,
+      if (event.turnId && event.eventType === "run.result.proposed") {
+        latestResultProposalByTurn.set(
+          event.turnId,
+          Math.max(
+            latestResultProposalByTurn.get(event.turnId) ?? 0,
+            event.sourceSeq,
+          ),
         );
       }
-      if (event.turnId === input.turnId && isTurnTerminal(event)) {
-        terminal = structuredClone(event);
+      if (event.turnId && isTurnTerminal(event)) {
+        terminals.push(structuredClone(event));
       }
     }
     const pageHighWater = replay.events.reduce(
@@ -709,25 +714,18 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         && (recoveredSnapshot.terminalTurns?.length ?? 0)
           > (persistedSession?.terminalTurns?.length ?? 0)
       );
-      const recoveredTerminal = recoveredSnapshot.terminalTurns?.at(-1);
-      const persistedTerminal = persistedSession?.terminalTurns?.at(-1);
       const checkpointedDispositionTerminal = Boolean(
         recovered
         && recoveredSnapshot.dispositionOnlyRecoveryConsumed
         && persistedSession?.dispositionOnlyRecoveryConsumed
         && !recoveredSnapshot.semanticResult
         && !recoveredActiveTurnId
-        && recoveredTerminal
-        && persistedTerminal
-        && recoveredTerminal.turnId === persistedTerminal.turnId
-        && recoveredTerminal.fingerprint === persistedTerminal.fingerprint
       );
       const replayedDisposition = checkpointedDispositionTerminal
         ? await replayCheckpointedTurnTerminal({
             controlPlane: options.controlPlane,
             runId: input.binding.runId,
             sourceInstanceId: options.runnerInstanceId,
-            turnId: recoveredTerminal!.turnId,
           })
         : null;
       if (checkpointedDispositionTerminal && replayedDisposition === null) {
