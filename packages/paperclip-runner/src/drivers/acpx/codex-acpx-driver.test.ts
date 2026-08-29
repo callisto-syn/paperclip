@@ -918,13 +918,27 @@ describe("Codex ACPX harness driver", () => {
     await createdEvent;
     const [request] = session.pendingRuntimeRequests!();
 
-    await expect(
-      session.handoffRuntimeRequest!({
-        requestId: request!.requestId,
-        turnId,
-        reason: "durable_handoff",
-      }),
-    ).resolves.toBe("handed_off");
+    const ownership = new AbortController();
+    ownership.abort();
+    const abortedHandoff = session.handoffRuntimeRequest!({
+      requestId: request!.requestId,
+      turnId,
+      reason: "durable_handoff",
+      signal: ownership.signal,
+    });
+    expect(abortedHandoff.result).toBe("already_settled");
+    await expect(abortedHandoff.cleanup).resolves.toBeUndefined();
+    expect(session.pendingRuntimeRequests!()).toHaveLength(1);
+    expect(fixture.host.interruptActiveTurn).not.toHaveBeenCalled();
+
+    const handoff = session.handoffRuntimeRequest!({
+      requestId: request!.requestId,
+      turnId,
+      reason: "durable_handoff",
+      signal: new AbortController().signal,
+    });
+    expect(handoff.result).toBe("handed_off");
+    await expect(handoff.cleanup).resolves.toBeUndefined();
     await expect(providerResponse).resolves.toEqual({ action: "cancel" });
     expect(fixture.host.interruptActiveTurn).toHaveBeenCalledWith(
       "Paperclip parked the ACPX input on a durable wait.",

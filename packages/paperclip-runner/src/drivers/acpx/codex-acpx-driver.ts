@@ -24,6 +24,7 @@ import {
   type HarnessSession,
   type HarnessSessionRecoveryResult,
   type HarnessRuntimeRequest,
+  type HarnessRuntimeRequestHandoff,
   type HarnessRuntimeRequestResolution,
   type HarnessTranscriptSnapshot,
   type OpenHarnessSessionInput,
@@ -708,11 +709,15 @@ class CodexAcpxSession implements HarnessSession {
     }
   }
 
-  async handoffRuntimeRequest(input: {
+  handoffRuntimeRequest(input: {
     requestId: string;
     turnId: string;
     reason: "durable_handoff";
-  }): Promise<"handed_off" | "already_settled"> {
+    signal: AbortSignal;
+  }): HarnessRuntimeRequestHandoff {
+    if (input.signal.aborted) {
+      return { result: "already_settled", cleanup: Promise.resolve() };
+    }
     this.#assertOpen();
     const pending = this.#pendingRuntimeRequests.get(input.requestId);
     if (
@@ -721,10 +726,10 @@ class CodexAcpxSession implements HarnessSession {
       this.#activeTurnId !== input.turnId ||
       pending.settling
     ) {
-      return "already_settled";
+      return { result: "already_settled", cleanup: Promise.resolve() };
     }
     if (!this.#pendingRuntimeRequests.delete(input.requestId)) {
-      return "already_settled";
+      return { result: "already_settled", cleanup: Promise.resolve() };
     }
     pending.cleanup();
     this.#emit(
@@ -733,19 +738,19 @@ class CodexAcpxSession implements HarnessSession {
       { turnId: input.turnId, itemId: pending.request.itemId },
     );
     pending.settle({ action: "cancel" });
-    try {
-      await this.#host.interruptActiveTurn(
+    const cleanup = Promise.resolve()
+      .then(() => this.#host.interruptActiveTurn(
         "Paperclip parked the ACPX input on a durable wait.",
-      );
-    } catch (error) {
-      if (
-        this.#activeTurnId === input.turnId &&
-        !this.#terminalTurns.has(input.turnId)
-      ) {
-        throw error;
-      }
-    }
-    return "handed_off";
+      ))
+      .catch((error: unknown) => {
+        if (
+          this.#activeTurnId === input.turnId &&
+          !this.#terminalTurns.has(input.turnId)
+        ) {
+          throw error;
+        }
+      });
+    return { result: "handed_off", cleanup };
   }
 
   async dispatchTool(call: RunnerToolCall): Promise<unknown> {
