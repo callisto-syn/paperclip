@@ -527,6 +527,7 @@ async function boundedCloseOutcome(
 class SpawnedChildSet {
   readonly #children = new Set<ChildProcess>();
   readonly #errors = new Set<unknown>();
+  readonly #terminations = new Map<ChildProcess, Promise<unknown[]>>();
   #terminating = false;
 
   add(child: ChildProcess): ChildProcess {
@@ -543,26 +544,41 @@ class SpawnedChildSet {
     child.on("error", onError);
     child.once("exit", forget);
     child.once("close", forgetAndDetach);
-    if (this.#terminating) {
-      void terminateChild(child).then(
-        (errors) => errors.forEach((error) => this.#errors.add(error)),
-        (error) => this.#errors.add(error),
-      );
-    }
+    if (this.#terminating) this.#startTermination(child);
     return child;
   }
 
   async terminate(): Promise<unknown[]> {
     this.#terminating = true;
-    const children = [...this.#children];
-    const errors = (await Promise.all(children.map(terminateChild))).flat();
+    for (const child of this.#children) this.#startTermination(child);
+    const errors: unknown[] = [];
+    // A provider can be spawned while another child is between TERM and KILL.
+    // Keep joining tracked attempts until the owned set reaches a stable empty
+    // point so failed admission and sidecar shutdown cannot lose that child.
+    while (this.#terminations.size > 0) {
+      for (const error of (await Promise.all([...this.#terminations.values()])).flat()) {
+        pushUnique(errors, error);
+      }
+    }
     // A failed spawn or signal can emit `error` and then `close` before this
     // method snapshots the live children. Keep those errors independently of
-    // child membership, report each object once, and drain them only after all
-    // in-flight termination attempts have had a chance to emit.
+    // child membership and report each object once after all owned attempts.
     for (const error of this.#errors) pushUnique(errors, error);
     this.#errors.clear();
     return errors;
+  }
+
+  #startTermination(child: ChildProcess): Promise<unknown[]> {
+    const existing = this.#terminations.get(child);
+    if (existing) return existing;
+    const termination = terminateChild(child).catch((error: unknown) => [error]);
+    this.#terminations.set(child, termination);
+    termination.then(() => {
+      if (this.#terminations.get(child) === termination) {
+        this.#terminations.delete(child);
+      }
+    });
+    return termination;
   }
 }
 
@@ -588,13 +604,13 @@ async function terminateChild(child: ChildProcess): Promise<unknown[]> {
     }
     if (!killOutcome.exited && running(child)) {
       errors.push(new Error("ACPX provider did not exit after SIGKILL"));
-      errors.push(...detachUnresponsiveChild(child));
+      errors.push(...closeUnresponsiveChildStreams(child));
     }
   }
   return errors;
 }
 
-function detachUnresponsiveChild(child: ChildProcess): unknown[] {
+function closeUnresponsiveChildStreams(child: ChildProcess): unknown[] {
   const errors: unknown[] = [];
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
     if (!stream) continue;
@@ -604,11 +620,9 @@ function detachUnresponsiveChild(child: ChildProcess): unknown[] {
       errors.push(error);
     }
   }
-  try {
-    child.unref();
-  } catch (error) {
-    errors.push(error);
-  }
+  // Do not unref a provider that ignored SIGKILL. Keeping the child-process
+  // handle referenced prevents the sidecar from exiting while it still owns a
+  // live provider and makes the failed cleanup externally observable.
   return errors;
 }
 

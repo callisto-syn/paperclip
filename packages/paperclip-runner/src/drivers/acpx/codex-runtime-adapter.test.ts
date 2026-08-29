@@ -288,7 +288,7 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
-  it("detaches a provider that survives both shutdown signals", async () => {
+  it("keeps ownership of a provider that survives both shutdown signals", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
@@ -327,7 +327,57 @@ describe("Codex ACPX runtime adapter", () => {
       expect(child.stdin?.destroy).toHaveBeenCalledOnce();
       expect(child.stdout?.destroy).toHaveBeenCalledOnce();
       expect(child.stderr?.destroy).toHaveBeenCalledOnce();
-      expect(child.unref).toHaveBeenCalledOnce();
+      expect(child.unref).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("joins a provider spawned while termination is already in progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      const firstChild = childThatExitsOnKill();
+      const lateChild = childThatExitsOnKill();
+      const command = fakeCommand();
+      vi.mocked(command.spawn)
+        .mockReturnValueOnce(firstChild)
+        .mockReturnValueOnce(lateChild);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      let settled = false;
+      const closing = port.close({ reason: "join late provider" }).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(firstChild.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(1_500);
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+      expect(lateChild.kill).toHaveBeenCalledWith("SIGTERM");
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(firstChild.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_500);
+      await closing;
+      expect(lateChild.kill).toHaveBeenCalledWith("SIGKILL");
     } finally {
       vi.useRealTimers();
     }
@@ -984,6 +1034,22 @@ function stubbornChild(): ChildProcess {
   });
   child.kill = vi.fn(() => true);
   child.unref = vi.fn(() => child);
+  return child;
+}
+
+function childThatExitsOnKill(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperties(child, {
+    exitCode: { value: null, writable: true },
+    signalCode: { value: null, writable: true },
+  });
+  child.kill = vi.fn((signal?: NodeJS.Signals | number) => {
+    if (signal === "SIGKILL") {
+      child.signalCode = "SIGKILL";
+      queueMicrotask(() => child.emit("exit", null, "SIGKILL"));
+    }
+    return true;
+  });
   return child;
 }
 
