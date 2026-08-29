@@ -126,6 +126,31 @@ fn poll_and_ack(
     Ok(events)
 }
 
+fn saturate_provider_tool_receipts(directory: &Path) {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(task_context_tool_set()).unwrap();
+    for index in 0..4_096 {
+        let call_id = format!("retained-call-{index}");
+        bridge
+            .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
+            .unwrap();
+        bridge
+            .apply_result(ToolResult {
+                call_id,
+                operation_id: "get_task_context".into(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .unwrap();
+    }
+    let state_path = directory.join("codex-provider-state.json");
+    let mut persisted: Value =
+        serde_json::from_slice(&fs::read(&state_path).expect("read provider state")).unwrap();
+    persisted["toolBridge"] = serde_json::to_value(bridge).unwrap();
+    fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .expect("write saturated provider state");
+}
+
 #[test]
 fn codex_transport_buffers_notifications_while_waiting_for_responses() {
     let directory = temporary_directory("buffering");
@@ -1377,28 +1402,7 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
         .expect("start held provider turn");
     drop(first);
 
-    let mut bridge = ProviderToolBridge::default();
-    bridge.prepare(task_context_tool_set()).unwrap();
-    for index in 0..4_096 {
-        let call_id = format!("retained-call-{index}");
-        bridge
-            .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
-            .unwrap();
-        bridge
-            .apply_result(ToolResult {
-                call_id,
-                operation_id: "get_task_context".into(),
-                result: json!({"ok": true}),
-                is_error: false,
-            })
-            .unwrap();
-    }
-    let state_path = directory.join("codex-provider-state.json");
-    let mut persisted: Value =
-        serde_json::from_slice(&fs::read(&state_path).expect("read provider state")).unwrap();
-    persisted["toolBridge"] = serde_json::to_value(bridge).unwrap();
-    fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
-        .expect("write saturated provider state");
+    saturate_provider_tool_receipts(&directory);
 
     let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
     let events = poll_and_ack(&mut recovered)
@@ -1432,6 +1436,85 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
     assert_eq!(call_count(&directory, "turn/interrupt"), 3);
 
     recovered.shutdown().expect("stop recovered provider");
+    fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
+    let directory = temporary_directory("receipt-limit-missing-terminal");
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-dynamic-tool",
+            "--hold-turn",
+            "--emit-tool-call-on-resume",
+            "--accept-interrupt-without-terminal",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut first = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    first
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+            }),
+        ))
+        .expect("prepare Codex provider");
+    first
+        .execute(&command("open", 2, "session.open", json!({})))
+        .expect("open Codex session");
+    first
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Bound a missing interrupt terminal."}),
+        ))
+        .expect("start held provider turn");
+    drop(first);
+    saturate_provider_tool_receipts(&directory);
+
+    let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    let mut emitted = Vec::new();
+    for _ in 0..8 {
+        emitted.extend(
+            poll_and_ack(&mut recovered)
+                .expect("receipt-limit fallback must remain durably pollable"),
+        );
+        if emitted
+            .iter()
+            .any(|event| event.event_type == "turn.failed")
+        {
+            break;
+        }
+    }
+    let failure = emitted
+        .iter()
+        .find(|event| event.event_type == "turn.failed")
+        .expect("the bounded retry path must fail the unconfirmed turn");
+    assert_eq!(
+        failure.payload["code"],
+        "semantic_tool_turn_receipt_limit_interrupt_unconfirmed"
+    );
+    assert_eq!(call_count(&directory, "turn/interrupt"), 3);
+
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(directory.join("codex-provider-state.json"))
+            .expect("read bounded receipt-limit state"),
+    )
+    .expect("parse bounded receipt-limit state");
+    assert_eq!(persisted["lifecycle"], "provider_exited");
+    assert!(persisted["activeProviderTurnId"].is_null());
+    assert_eq!(persisted["receiptLimitInterruptPending"], false);
+    assert_eq!(persisted["receiptLimitInterruptAttempts"], 0);
+
+    recovered
+        .shutdown()
+        .expect("bounded fallback stopped provider");
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }
 

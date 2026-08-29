@@ -156,6 +156,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let accept_interrupt_without_terminal_once = args
         .iter()
         .any(|value| value == "--accept-interrupt-without-terminal-once");
+    let accept_interrupt_without_terminal = args
+        .iter()
+        .any(|value| value == "--accept-interrupt-without-terminal");
     let exit_after_thread_read = args.iter().any(|value| value == "--exit-after-thread-read");
     let fail_after_turn_completion_delay_ms =
         argument(&args, "--fail-after-turn-completion-delay-ms")
@@ -384,8 +387,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 } else {
                     send(json!({"id": id, "result": {"accepted": true}}))?;
-                    if !(accept_interrupt_without_terminal_once
-                        && interrupt_count == if fail_first_interrupt { 2 } else { 1 })
+                    if !accept_interrupt_without_terminal
+                        && !(accept_interrupt_without_terminal_once
+                            && interrupt_count == if fail_first_interrupt { 2 } else { 1 })
                     {
                         finish_turn(&state_path, &mut state, "interrupted")?;
                     }
