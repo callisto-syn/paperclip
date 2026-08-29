@@ -150,6 +150,13 @@ export async function discoverPaperclipWorkspaceFileReferences(
       try {
         const openedInfo = await handle.stat();
         if (!openedInfo.isFile()) continue;
+        if (openedInfo.nlink !== 1) {
+          // A descriptor path proves where this link lives, not where every
+          // link to the same inode lives. Refuse bytes for multiply-linked
+          // files so an in-workspace hard link cannot disclose outside data.
+          verified.push(reference);
+          continue;
+        }
         const openedPath = await canonicalOpenedDescriptorPath(handle.fd);
         if (openedPath === null) {
           verified.push(reference);

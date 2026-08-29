@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -61,6 +61,33 @@ describe("workspace file references", () => {
         "[linked](linked.md)",
         "turn-1",
       )).resolves.toEqual([]);
+    } finally {
+      await Promise.all([
+        rm(root, { recursive: true, force: true }),
+        rm(outside, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it("does not expose bytes through an in-workspace hard link", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-file-reference-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "paperclip-file-reference-outside-"));
+    try {
+      const protectedPath = join(outside, "protected.md");
+      await writeFile(protectedPath, "must not be disclosed");
+      await link(protectedPath, join(root, "linked.md"));
+
+      await expect(discoverPaperclipWorkspaceFileReferences(
+        root,
+        "[linked](linked.md)",
+        "turn-1",
+      )).resolves.toEqual([
+        expect.objectContaining({
+          path: "linked.md",
+          preview: null,
+          contentDigest: null,
+        }),
+      ]);
     } finally {
       await Promise.all([
         rm(root, { recursive: true, force: true }),
