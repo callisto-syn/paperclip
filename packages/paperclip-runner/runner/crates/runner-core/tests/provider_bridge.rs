@@ -228,3 +228,44 @@ fn recovery_preserves_pending_calls_for_the_existing_run() {
         .begin_call("call-1".into(), "get_task_context".into(), json!({}))
         .is_ok());
 }
+
+#[test]
+fn settles_completed_receipts_before_the_next_turn() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+
+    for index in 0..4_096 {
+        let call_id = format!("call-{index}");
+        bridge
+            .begin_call(call_id.clone(), "get_task_context".into(), json!({}))
+            .unwrap();
+        bridge
+            .apply_result(ToolResult {
+                call_id,
+                operation_id: "get_task_context".into(),
+                result: json!({"ok": true}),
+                is_error: false,
+            })
+            .unwrap();
+    }
+
+    assert!(bridge
+        .begin_call("call-next".into(), "get_task_context".into(), json!({}))
+        .is_err());
+    bridge.settle_turn().unwrap();
+    assert!(bridge
+        .begin_call("call-next".into(), "get_task_context".into(), json!({}))
+        .is_ok());
+}
+
+#[test]
+fn refuses_to_settle_receipts_while_calls_are_pending() {
+    let mut bridge = ProviderToolBridge::default();
+    bridge.prepare(tools("computed")).unwrap();
+    bridge
+        .begin_call("call-1".into(), "get_task_context".into(), json!({}))
+        .unwrap();
+
+    assert!(bridge.settle_turn().is_err());
+    assert_eq!(bridge.pending_calls().count(), 1);
+}

@@ -250,9 +250,9 @@ impl ProviderToolBridge {
                 "provider reused a completed tool call id",
             ));
         }
-        if self.pending.len() >= MAX_RETAINED_CALLS {
+        if self.pending.len().saturating_add(self.completed.len()) >= MAX_RETAINED_CALLS {
             return Err(ProviderBridgeError::invalid(
-                "provider tool call limit reached",
+                "provider tool receipt limit reached for the active turn",
             ));
         }
         self.pending.insert(call_id, call.clone());
@@ -311,15 +311,23 @@ impl ProviderToolBridge {
                 }
             }
         }
-        if self.completed.len() >= MAX_RETAINED_CALLS {
-            return Err(ProviderBridgeError::invalid(
-                "completed provider tool result limit reached",
-            ));
-        }
         self.pending.remove(&result.call_id);
         self.completed
             .insert(result.call_id.clone(), result.clone());
         Ok(result.result)
+    }
+
+    pub fn settle_turn(&mut self) -> Result<(), ProviderBridgeError> {
+        if !self.pending.is_empty() {
+            return Err(ProviderBridgeError::invalid(
+                "cannot settle provider tool receipts while calls are pending",
+            ));
+        }
+        // Completed identities are needed only while their turn can be
+        // replayed. The provider session calls this durable turn boundary
+        // before admitting calls for the next turn.
+        self.completed.clear();
+        Ok(())
     }
 
     pub fn pending_calls(&self) -> impl Iterator<Item = &PendingToolCall> {
