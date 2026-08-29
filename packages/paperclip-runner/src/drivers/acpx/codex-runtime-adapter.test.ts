@@ -132,7 +132,7 @@ describe("Codex ACPX runtime adapter", () => {
     });
   });
 
-  it("reconciles a stalled close before releasing cleanup ownership", async () => {
+  it("autonomously reconciles a stalled close before releasing cleanup ownership", async () => {
     vi.useFakeTimers();
     try {
       const runtime = fakeRuntime();
@@ -177,31 +177,14 @@ describe("Codex ACPX runtime adapter", () => {
       await firstCloseRejection;
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 
-      const retry = port.close({ reason: "cleanup ownership retried" });
-      const retryRejection = expect(retry).rejects.toMatchObject({
-        errors: [
-          expect.objectContaining({
-            message: "ACPX runtime close exceeded its shutdown timeout",
-          }),
-        ],
-      });
-      await Promise.resolve();
-      expect(runtime.close).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(2_000);
-      await retryRejection;
-
-      // The fresh success cannot release the older outcome. Once that outcome
-      // arrives, autonomous/explicit retry observes its failure exactly once.
+      // Once the old outcome arrives, the retained owner starts a fresh close,
+      // observes the original failure, and terminates without another caller.
       rejectStalledClose?.(new Error("original close failed"));
       await Promise.resolve();
-      await expect(
-        port.close({ reason: "reconcile original close" }),
-      ).rejects.toMatchObject({
-        errors: [expect.objectContaining({ message: "original close failed" })],
-      });
-      await expect(
-        port.close({ reason: "cleanup ownership released" }),
-      ).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await Promise.resolve();
+      expect(runtime.close).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10_000);
       expect(runtime.close).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

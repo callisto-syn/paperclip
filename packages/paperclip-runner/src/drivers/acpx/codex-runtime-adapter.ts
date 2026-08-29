@@ -239,6 +239,7 @@ function runtimePort(
   let runtimeCloseSucceeded = false;
   let runtimeCloseAttempt: RuntimeCloseAttempt | undefined;
   const ownedRuntimeCloseAttempts = new Set<RuntimeCloseAttempt>();
+  let runtimeCleanupRecoveryPromise: Promise<void> | null = null;
 
   function startRuntimeCloseAttempt(reason: string): RuntimeCloseAttempt {
     const attempt = new RuntimeCloseAttempt(
@@ -261,7 +262,32 @@ function runtimePort(
     return errors;
   }
 
-  return {
+  function retainRuntimeCleanupOwnership(reason: string): void {
+    if (
+      runtimeCleanupRecoveryPromise !== null ||
+      (runtimeCloseSucceeded && ownedRuntimeCloseAttempts.size === 0)
+    ) return;
+    const recovery = (async () => {
+      while (!(runtimeCloseSucceeded && ownedRuntimeCloseAttempts.size === 0)) {
+        await retryRuntimeCleanupAfter(runtimeCloseTimeoutMs);
+        try {
+          await port.close({ reason: `Autonomous cleanup after: ${reason}` });
+        } catch {
+          // close() retains every unsettled attempt and reports every settled
+          // error. Keep retrying until shutdown and those outcomes are both
+          // reconciled; individual iterations remain time-bounded.
+        }
+      }
+    })();
+    runtimeCleanupRecoveryPromise = recovery;
+    void recovery.finally(() => {
+      if (runtimeCleanupRecoveryPromise === recovery) {
+        runtimeCleanupRecoveryPromise = null;
+      }
+    });
+  }
+
+  const port: AcpxRuntimePort = {
     async identity() {
       return structuredClone(identity);
     },
@@ -344,6 +370,7 @@ function runtimePort(
       }
       if (runtimeErrors.length > 0 || processErrors.length > 0) {
         const errors = [...runtimeErrors, ...processErrors];
+        retainRuntimeCleanupOwnership(input.reason);
         throw new AggregateError(
           errors,
           "ACPX runtime and provider cleanup failed",
@@ -353,6 +380,7 @@ function runtimePort(
       // outcome. A never-settling attempt remains bounded and retryable.
     },
   };
+  return port;
 }
 
 class RuntimeCloseAttempt {
@@ -368,6 +396,13 @@ class RuntimeCloseAttempt {
       return error;
     });
   }
+}
+
+async function retryRuntimeCleanupAfter(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    timer.unref?.();
+  });
 }
 
 async function boundedRuntimeClose(

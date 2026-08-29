@@ -297,12 +297,17 @@ describe("Codex ACPX harness driver", () => {
     });
   });
 
-  it("bounds autonomous cleanup after permanent host close failure", async () => {
+  it("retains autonomous cleanup ownership until a later host close succeeds", async () => {
     const fixture = driverFixture({}, {
       closeSettlementTimeoutMs: 1,
-      maxHostCleanupRecoveryAttempts: 2,
     });
-    fixture.host.close.mockRejectedValue(new Error("permanent cleanup failure"));
+    let cleanupCanSucceed = false;
+    let markRecovered = () => {};
+    const recovered = new Promise<void>((resolve) => { markRecovered = resolve; });
+    fixture.host.close.mockImplementation(async () => {
+      if (!cleanupCanSucceed) throw new Error("temporary cleanup failure");
+      markRecovered();
+    });
     const session = await fixture.driver.openSession({
       runId: "run-close-permanent-failure",
       normalizedSessionId: "session-1",
@@ -311,25 +316,20 @@ describe("Codex ACPX harness driver", () => {
     const diagnosticEvents = collectUntil(session.events(), "harness.diagnostic");
 
     await expect(
-      session.close({ reason: "runtime close permanently failed" }),
-    ).rejects.toThrow("permanent cleanup failure");
+      session.close({ reason: "runtime close temporarily failed" }),
+    ).rejects.toThrow("temporary cleanup failure");
     await expect(diagnosticEvents).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({
         eventType: "harness.diagnostic",
         payload: expect.objectContaining({ code: "acpx_host_cleanup_deferred" }),
       }),
     ]));
-    await vi.waitFor(() => expect(fixture.host.close).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(fixture.host.close.mock.calls.length).toBeGreaterThanOrEqual(4));
+    cleanupCanSucceed = true;
+    await recovered;
+    const recoveredAtAttempt = fixture.host.close.mock.calls.length;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    expect(fixture.host.close).toHaveBeenCalledTimes(3);
-
-    // Exhausting bounded autonomous recovery does not discard ownership. A
-    // later explicit close starts a new bounded attempt.
-    fixture.host.close.mockResolvedValueOnce(undefined);
-    await expect(
-      session.close({ reason: "operator retries retained cleanup" }),
-    ).resolves.toBeUndefined();
-    expect(fixture.host.close).toHaveBeenCalledTimes(4);
+    expect(fixture.host.close).toHaveBeenCalledTimes(recoveredAtAttempt);
   });
 
   it("bounds lagging streams without introducing source sequence gaps", async () => {
@@ -506,7 +506,6 @@ function driverFixture(
     runtimeEvents?: readonly AcpRuntimeEvent[];
     runtimeEventFailure?: Promise<never>;
     closeSettlementTimeoutMs?: number;
-    maxHostCleanupRecoveryAttempts?: number;
     maxBufferedEvents?: number;
   } = {},
 ): {
@@ -556,7 +555,6 @@ function driverFixture(
       return host;
     },
     closeSettlementTimeoutMs: fixtureOptions.closeSettlementTimeoutMs,
-    maxHostCleanupRecoveryAttempts: fixtureOptions.maxHostCleanupRecoveryAttempts,
     maxBufferedEvents: fixtureOptions.maxBufferedEvents,
   };
   const driver = new CodexAcpxDriver(
