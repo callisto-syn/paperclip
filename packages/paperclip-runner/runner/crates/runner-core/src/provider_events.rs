@@ -56,7 +56,7 @@ impl AcpxEventProjectionContext {
             (&self.item_id, "item"),
         ] {
             if value.trim().is_empty()
-                || value.chars().count() > 240
+                || value.chars().count() > 160
                 || value.chars().any(char::is_control)
             {
                 return Err(LocalRunnerError::invalid(format!(

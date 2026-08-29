@@ -193,4 +193,20 @@ fn rejects_invalid_durable_projection_identity() {
         .unwrap_err()
         .to_string()
         .contains("run identity"));
+
+    for field in ["run", "normalized session", "turn", "item"] {
+        let mut invalid = context();
+        let oversized = "x".repeat(161);
+        match field {
+            "run" => invalid.run_id = oversized,
+            "normalized session" => invalid.normalized_session_id = oversized,
+            "turn" => invalid.turn_id = oversized,
+            "item" => invalid.item_id = oversized,
+            _ => unreachable!(),
+        }
+        let error = project_acpx_state_event(&invalid, &event)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("{field} identity")), "{error}");
+    }
 }
