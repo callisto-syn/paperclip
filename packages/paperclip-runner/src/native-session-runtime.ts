@@ -13,10 +13,6 @@ const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
-// Admission may arrive while a scheduled recovery is still spending its
-// retry delay. Once that delay elapses, give the actual close attempt its own
-// bounded window instead of sharing the final 100 ms of the delay budget.
-const QUARANTINED_SESSION_ADMISSION_CLOSE_GRACE_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
 const QUARANTINED_SESSION_CLOSE_RETRY_MS = 60_000;
@@ -251,13 +247,14 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
     // The current recovery may still be in its bounded retry delay and not
     // have exposed cleanup.attempt yet. Observe that owner rather than
     // rejecting admission in the gap immediately before a successful close.
-    observations.push(
-      settlesWithin(
-        recovery,
-        FAILED_SESSION_CLOSE_RETRY_MS
-          + QUARANTINED_SESSION_ADMISSION_CLOSE_GRACE_MS,
-      ).catch(() => false),
-    );
+    // A quarantined session has already had its mutation authority revoked,
+    // and NativeSession.close is required to own and settle its cleanup. Do
+    // not abandon that live owner at an arbitrary wall-clock boundary: doing
+    // so can reject a new execution immediately before a successful release.
+    // Admission remains fail-closed by waiting for the exact recovery owner;
+    // a rejected finite batch leaves the entry quarantined and is rejected
+    // below, while a fulfilled batch has removed it from the set.
+    observations.push(recovery.catch(() => undefined));
   }
   await Promise.all(observations);
   if (quarantinedSessionCleanups.size > 0) {

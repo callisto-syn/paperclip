@@ -240,7 +240,7 @@ describe("executeNativeSession recovery", () => {
 
       close.mockImplementation(({ reason }: { reason: string }) =>
         reason === "native session scheduled quarantined cleanup recovery"
-          ? new Promise<void>((resolve) => setTimeout(resolve, 250))
+          ? new Promise<void>((resolve) => setTimeout(resolve, 1_250))
           : Promise.resolve()
       );
       // Enter the scheduled recovery's delay, then admit while recovery exists
@@ -253,8 +253,16 @@ describe("executeNativeSession recovery", () => {
       expect(close.mock.calls[7]?.[0]).toEqual({
         reason: "native session scheduled quarantined cleanup recovery",
       });
-      // The retry delay consumed the first second. A separate close budget
-      // keeps admission pending through a slightly slower successful close.
+      let admissionSettled = false;
+      void recoveredExecution.then(
+        () => { admissionSettled = true; },
+        () => { admissionSettled = true; },
+      );
+      // Cleanup owns admission until it actually settles. It is still active
+      // after the former one-second close grace and must not reject the run.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(admissionSettled).toBe(false);
+      expect(openSession).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(250);
       await expect(recoveredExecution).resolves.toMatchObject({ result });
       expect(close).toHaveBeenCalledTimes(9);
