@@ -1440,7 +1440,7 @@ fn receipt_limit_rejects_the_call_and_keeps_polling_when_interrupt_fails() {
 }
 
 #[test]
-fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
+fn receipt_limit_accepts_a_terminal_after_the_initial_interrupt_deadline() {
     let directory = temporary_directory("receipt-limit-delayed-terminal");
     let config = provider_config(
         &directory,
@@ -1449,7 +1449,7 @@ fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
             "--hold-turn",
             "--emit-tool-call-on-resume",
             "--interrupt-terminal-delay-ms",
-            "25",
+            "2100",
         ],
     );
     let runner_config = durable_config(&directory);
@@ -1481,7 +1481,7 @@ fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
 
     let mut recovered = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
     let mut emitted = Vec::new();
-    for _ in 0..64 {
+    for _ in 0..4_096 {
         emitted.extend(
             poll_and_ack(&mut recovered)
                 .expect("a delayed accepted interrupt must remain durably pollable"),
@@ -1497,8 +1497,12 @@ fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
         emitted
             .iter()
             .any(|event| event.event_type == "turn.interrupted"),
-        "the delayed provider terminal must remain authoritative"
+        "the delayed provider terminal must remain authoritative after two seconds"
     );
+    assert!(!emitted.iter().any(|event| {
+        event.event_type == "turn.interrupted"
+            && event.payload["code"] == "semantic_tool_turn_receipt_limit_interrupt_deadline"
+    }));
     assert!(
         !emitted.iter().any(|event| {
             event.event_type == "turn.failed"
@@ -1512,7 +1516,7 @@ fn receipt_limit_accepts_a_delayed_interrupt_terminal_before_the_deadline() {
 }
 
 #[test]
-fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
+fn receipt_limit_synthesizes_interrupted_after_an_accepted_terminal_deadline() {
     let directory = temporary_directory("receipt-limit-missing-terminal");
     let config = provider_config(
         &directory,
@@ -1585,19 +1589,24 @@ fn receipt_limit_fails_after_bounded_accepted_interrupts_without_terminal() {
         );
         if emitted
             .iter()
-            .any(|event| event.event_type == "turn.failed")
+            .any(|event| event.event_type == "turn.interrupted")
         {
             break;
         }
     }
-    let failure = emitted
+    let interrupted = emitted
         .iter()
-        .find(|event| event.event_type == "turn.failed")
-        .expect("the bounded retry path must fail the unconfirmed turn");
+        .find(|event| event.event_type == "turn.interrupted")
+        .expect("the bounded accepted path must synthesize an interrupted turn");
     assert_eq!(
-        failure.payload["code"],
-        "semantic_tool_turn_receipt_limit_interrupt_unconfirmed"
+        interrupted.payload["code"],
+        "semantic_tool_turn_receipt_limit_interrupt_deadline"
     );
+    assert_eq!(interrupted.payload["interruptAccepted"], true);
+    assert_eq!(interrupted.payload["providerTerminalObserved"], false);
+    assert!(!emitted
+        .iter()
+        .any(|event| event.event_type == "turn.failed"));
     assert_eq!(call_count(&directory, "turn/interrupt"), 3);
 
     let persisted: Value = serde_json::from_slice(
