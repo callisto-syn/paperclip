@@ -13,6 +13,10 @@ const OPTIONAL_SESSION_CANCELLATION_GRACE_MS = 100;
 const FAILED_OPERATION_SETTLEMENT_GRACE_MS = 100;
 const failedSessionCleanupOwners = new Set<Promise<void>>();
 const FAILED_SESSION_CLOSE_RETRY_MS = 1_000;
+// Admission may arrive while a scheduled recovery is still spending its
+// retry delay. Once that delay elapses, give the actual close attempt its own
+// bounded window instead of sharing the final 100 ms of the delay budget.
+const QUARANTINED_SESSION_ADMISSION_CLOSE_GRACE_MS = 1_000;
 const MAX_FAILED_SESSION_CLOSE_RETRIES = 3;
 const MAX_QUARANTINED_SESSION_CLOSE_RETRIES = 3;
 const QUARANTINED_SESSION_CLOSE_RETRY_MS = 60_000;
@@ -250,7 +254,8 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
     observations.push(
       settlesWithin(
         recovery,
-        FAILED_SESSION_CLOSE_RETRY_MS + FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+        FAILED_SESSION_CLOSE_RETRY_MS
+          + QUARANTINED_SESSION_ADMISSION_CLOSE_GRACE_MS,
       ).catch(() => false),
     );
   }
