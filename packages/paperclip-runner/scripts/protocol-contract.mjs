@@ -189,13 +189,13 @@ export function assertQuestionAdapterFixture(fixture) {
   if (!Array.isArray(questions) || questions.length === 0) {
     throw contractError("invalid_question_adapter_fixture", "questions must be non-empty");
   }
-  const questionIds = new Set();
+  const questionsById = new Map();
   const optionIdsByQuestion = new Map();
   for (const question of questions) {
-    if (typeof question.id !== "string" || question.id.length === 0 || questionIds.has(question.id)) {
+    if (typeof question.id !== "string" || question.id.length === 0 || questionsById.has(question.id)) {
       throw contractError("invalid_question_adapter_fixture", "question IDs must be unique");
     }
-    questionIds.add(question.id);
+    questionsById.set(question.id, question);
     const optionIds = new Set();
     for (const option of question.options ?? []) {
       if (typeof option.id !== "string" || option.id.length === 0 || optionIds.has(option.id)) {
@@ -205,14 +205,67 @@ export function assertQuestionAdapterFixture(fixture) {
     }
     optionIdsByQuestion.set(question.id, optionIds);
   }
-  for (const [answerId, answer] of Object.entries(fixture.canonicalResponse.answers ?? {})) {
-    if (!questionIds.has(answerId)) {
+  const answers = fixture.canonicalResponse.answers ?? {};
+  for (const [answerId, answer] of Object.entries(answers)) {
+    if (!questionsById.has(answerId)) {
       throw contractError("invalid_question_adapter_fixture", `answer has unknown question ID ${answerId}`);
     }
-    for (const optionId of answer.selectedOptionIds ?? []) {
+    if (answer === null || typeof answer !== "object" || Array.isArray(answer)) {
+      throw contractError("invalid_question_adapter_fixture", `answer for ${answerId} must be an object`);
+    }
+    const selectedOptionIds = answer.selectedOptionIds ?? [];
+    if (!Array.isArray(selectedOptionIds) || selectedOptionIds.some((id) => typeof id !== "string")) {
+      throw contractError("invalid_question_adapter_fixture", `answer for ${answerId} has invalid option IDs`);
+    }
+    if (new Set(selectedOptionIds).size !== selectedOptionIds.length) {
+      throw contractError("invalid_question_adapter_fixture", `answer for ${answerId} repeats an option ID`);
+    }
+    for (const optionId of selectedOptionIds) {
       if (!optionIdsByQuestion.get(answerId)?.has(optionId)) {
         throw contractError("invalid_question_adapter_fixture", `answer has unknown option ID ${optionId}`);
       }
+    }
+  }
+  for (const question of questions) {
+    const answer = answers[question.id];
+    if (answer === undefined) {
+      if (question.required) {
+        throw contractError("invalid_question_adapter_fixture", `answer for required question ${question.id} is missing`);
+      }
+      continue;
+    }
+    const selectedOptionIds = answer.selectedOptionIds ?? [];
+    const text = answer.text;
+    const customText = answer.customText;
+    if (question.answerMode === "text") {
+      if (selectedOptionIds.length > 0 || customText !== undefined) {
+        throw contractError("invalid_question_adapter_fixture", `text answer for ${question.id} carries select-only fields`);
+      }
+    } else {
+      if (text !== undefined) {
+        throw contractError("invalid_question_adapter_fixture", `select answer for ${question.id} carries text`);
+      }
+      if (question.answerMode === "single_select" && selectedOptionIds.length > 1) {
+        throw contractError("invalid_question_adapter_fixture", `single-select answer for ${question.id} chooses more than one option`);
+      }
+      if (customText !== undefined && question.customAnswer?.enabled !== true) {
+        throw contractError("invalid_question_adapter_fixture", `custom answer for ${question.id} is not enabled`);
+      }
+      if (
+        question.answerMode === "single_select"
+        && typeof customText === "string"
+        && customText.trim().length > 0
+        && selectedOptionIds.length > 0
+      ) {
+        throw contractError("invalid_question_adapter_fixture", `single-select answer for ${question.id} mixes option and custom values`);
+      }
+    }
+    const hasValue =
+      (typeof text === "string" && text.trim().length > 0)
+      || (typeof customText === "string" && customText.trim().length > 0)
+      || selectedOptionIds.length > 0;
+    if (question.required && !hasValue) {
+      throw contractError("invalid_question_adapter_fixture", `answer for required question ${question.id} is empty`);
     }
   }
   return fixture;

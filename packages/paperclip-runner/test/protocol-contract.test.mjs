@@ -158,6 +158,62 @@ test("every question adapter fixture satisfies its declared schema", async () =>
     () => assertQuestionAdapterFixture(unknownOption),
     /answer has unknown option ID unknown-option/,
   );
+
+  const canonical = await fixture("questions/acpx.json");
+  const [requiredQuestion] = canonical.canonicalQuestionSet.questions;
+  const requiredQuestionId = requiredQuestion.id;
+  const malformedAnswers = [
+    {
+      label: "missing required answer",
+      answer: undefined,
+      pattern: /required question .* is missing/,
+    },
+    {
+      label: "empty required answer",
+      answer: {},
+      pattern: /required question .* is empty/,
+    },
+    {
+      label: "multiple single-select values",
+      answer: { selectedOptionIds: requiredQuestion.options.map((option) => option.id) },
+      pattern: /single-select answer .* chooses more than one option/,
+    },
+    {
+      label: "text on a select question",
+      answer: { text: "staging" },
+      pattern: /select answer .* carries text/,
+    },
+    {
+      label: "disabled custom answer",
+      answer: { customText: "canary" },
+      pattern: /custom answer .* is not enabled/,
+    },
+  ];
+  for (const malformedAnswer of malformedAnswers) {
+    const malformedResponse = structuredClone(canonical);
+    malformedResponse.canonicalResponse.answers = malformedAnswer.answer === undefined
+      ? {}
+      : { [requiredQuestionId]: malformedAnswer.answer };
+    assert.throws(
+      () => assertQuestionAdapterFixture(malformedResponse),
+      malformedAnswer.pattern,
+      malformedAnswer.label,
+    );
+  }
+
+  const textModeMismatch = structuredClone(canonical);
+  textModeMismatch.canonicalQuestionSet.questions[0] = {
+    ...requiredQuestion,
+    answerMode: "text",
+    options: [],
+  };
+  textModeMismatch.canonicalResponse.answers[requiredQuestionId] = {
+    customText: "select-only custom value",
+  };
+  assert.throws(
+    () => assertQuestionAdapterFixture(textModeMismatch),
+    /text answer .* carries select-only fields/,
+  );
 });
 
 test("the cross-language conformance input and output have one stable identity", async () => {
