@@ -331,11 +331,12 @@ export class CodexAcpxDriver implements HarnessDriver {
           1,
           "quarantined cleanup admission recovery",
         );
-      observations.push(
-        settleWithin(recovery, this.#closeSettlementTimeoutMs).catch(
-          () => undefined,
-        ),
-      );
+      // Admission observes the exact cleanup owner. Applying the ordinary
+      // close timeout to both its retry delay and its active close can reject
+      // immediately before a successful release. A rejected finite recovery
+      // remains quarantined and is rejected below; a fulfilled one has removed
+      // itself from the set.
+      observations.push(recovery.catch(() => undefined));
     }
     await Promise.all(observations);
     if (this.#quarantinedHostCleanups.size > 0) {

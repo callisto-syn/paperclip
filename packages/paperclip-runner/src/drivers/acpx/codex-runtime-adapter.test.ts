@@ -169,15 +169,63 @@ describe("Codex ACPX runtime adapter", () => {
       await firstClose;
 
       // The provider is terminally bounded, but the exact protocol cleanup
-      // remains owned until it produces an authoritative outcome. A later
-      // close does not remain pinned behind that already terminated provider.
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(runtime.close).toHaveBeenCalledOnce();
-      await expect(port.close({ reason: "idempotent terminal close" }))
-        .resolves.toBeUndefined();
+      // remains authoritative. Once that retained attempt succeeds, a later
+      // close observes its outcome without starting a replacement attempt.
       expect(runtime.close).toHaveBeenCalledOnce();
       resolveRuntimeClose();
       await Promise.resolve();
+      await expect(port.close({ reason: "idempotent terminal close" }))
+        .resolves.toBeUndefined();
+      expect(runtime.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces a retained protocol failure after provider termination", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = fakeRuntime();
+      let rejectRuntimeClose!: (error: unknown) => void;
+      const runtimeClose = new Promise<void>((_resolve, reject) => {
+        rejectRuntimeClose = reject;
+      });
+      vi.mocked(runtime.close).mockReturnValue(runtimeClose);
+      const child = fakeChild();
+      const command = fakeCommand();
+      vi.mocked(command.spawn).mockReturnValue(child);
+      let runtimeOptions: AcpRuntimeOptions | undefined;
+      const port = await openCodexAcpxRuntime(openOptions(command), {
+        createRegistry: () => registry(),
+        createStore: () => store(),
+        createRuntime: (options) => {
+          runtimeOptions = options;
+          return runtime;
+        },
+      });
+      runtimeOptions?.spawnAgent?.({
+        command: "ignored",
+        args: ["--stdio"],
+        options: {},
+      });
+
+      const firstClose = expect(
+        port.close({ reason: "runtime close stalled" }),
+      ).rejects.toThrow("ACPX runtime and provider cleanup failed");
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await firstClose;
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+      const protocolFailure = new Error("late protocol close failure");
+      rejectRuntimeClose(protocolFailure);
+      await Promise.resolve();
+      await expect(port.close({ reason: "observe retained failure" }))
+        .rejects.toMatchObject({
+          message: "ACPX runtime and provider cleanup failed",
+          errors: [protocolFailure],
+        });
+      expect(runtime.close).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }

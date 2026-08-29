@@ -316,7 +316,7 @@ describe("Codex ACPX harness driver", () => {
     expect(fixture.host.close).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps quarantined cleanup scheduled at a bounded rate without later admission", async () => {
+  it("keeps quarantined cleanup scheduled and lets admission await its exact owner", async () => {
     vi.useFakeTimers();
     try {
       const fixture = driverFixture({}, { closeSettlementTimeoutMs: 1 });
@@ -337,18 +337,32 @@ describe("Codex ACPX harness driver", () => {
       await vi.advanceTimersByTimeAsync(59_000);
       expect(fixture.host.close).toHaveBeenCalledTimes(7);
 
-      fixture.host.close.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(2_000);
+      fixture.host.close.mockImplementation(({ reason }) =>
+        reason.includes("scheduled quarantined cleanup recovery")
+          ? new Promise<void>((resolve) => setTimeout(resolve, 5))
+          : Promise.resolve()
+      );
+      await vi.advanceTimersToNextTimerAsync();
+      let admissionSettled = false;
+      const admission = fixture.driver.openSession({
+        runId: "run-after-recovery",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+      void admission.then(
+        () => { admissionSettled = true; },
+        () => { admissionSettled = true; },
+      );
+      await vi.advanceTimersByTimeAsync(1);
       expect(fixture.host.close).toHaveBeenCalledTimes(8);
       expect(fixture.host.close).toHaveBeenLastCalledWith({
         reason:
           "runtime close persistently failed (scheduled quarantined cleanup recovery)",
       });
-      await expect(fixture.driver.openSession({
-        runId: "run-after-recovery",
-        normalizedSessionId: "session-1",
-        workingDirectory: "/workspace",
-      })).resolves.toBeDefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(admissionSettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4);
+      await expect(admission).resolves.toBeDefined();
       expect(fixture.host.close).toHaveBeenCalledTimes(8);
     } finally {
       vi.useRealTimers();
