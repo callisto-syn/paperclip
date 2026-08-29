@@ -50,9 +50,34 @@ export async function openCodexAcpxRuntime(
   const runtimeCloseTimeoutMs =
     dependencies.runtimeCloseTimeoutMs ?? DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS;
   const children = new SpawnedChildSet();
+  const baseStore = createStore({ stateDir: options.stateDirectory });
+  let failedHandshakeHandle: AcpRuntimeHandle | null = null;
+  const sessionStore: AcpSessionStore = {
+    load: (sessionId) => baseStore.load(sessionId),
+    async save(record) {
+      await baseStore.save(record);
+      if (
+        typeof record.acpxRecordId === "string" &&
+        record.acpxRecordId.length > 0 &&
+        record.cwd === options.cwd
+      ) {
+        failedHandshakeHandle = {
+          sessionKey: options.providerSessionKey,
+          backend: "acpx",
+          runtimeSessionName: options.providerSessionKey,
+          cwd: record.cwd,
+          acpxRecordId: record.acpxRecordId,
+          backendSessionId: record.acpSessionId,
+          ...(record.agentSessionId
+            ? { agentSessionId: record.agentSessionId }
+            : {}),
+        };
+      }
+    },
+  };
   const runtime = createRuntime({
     cwd: options.cwd,
-    sessionStore: createStore({ stateDir: options.stateDirectory }),
+    sessionStore,
     agentRegistry: createRegistry({
       overrides: { codex: [VERIFIED_COMMAND_SENTINEL] },
     }),
@@ -90,14 +115,16 @@ export async function openCodexAcpxRuntime(
       },
     });
   } catch (error) {
-    const runtimeCleanupError = await closeRuntimeWithin(runtime, {
-      input: {
-        handle: provisionalPersistentHandle(options),
-        reason: "ACPX session handshake failed",
-        discardPersistentState: false,
-      },
-      timeoutMs: runtimeCloseTimeoutMs,
-    });
+    const runtimeCleanupError = failedHandshakeHandle
+      ? await closeRuntimeWithin(runtime, {
+          input: {
+            handle: failedHandshakeHandle,
+            reason: "ACPX session handshake failed",
+            discardPersistentState: false,
+          },
+          timeoutMs: runtimeCloseTimeoutMs,
+        })
+      : undefined;
     const cleanupErrors = await children.terminate();
     if (runtimeCleanupError !== undefined || cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -145,18 +172,6 @@ export async function openCodexAcpxRuntime(
     }
     throw error;
   }
-}
-
-function provisionalPersistentHandle(
-  options: AcpxRuntimePortOpenOptions,
-): AcpRuntimeHandle {
-  return {
-    sessionKey: options.providerSessionKey,
-    backend: "acpx",
-    runtimeSessionName: options.providerSessionKey,
-    cwd: options.cwd,
-    acpxRecordId: options.providerSessionKey,
-  };
 }
 
 function runtimePort(

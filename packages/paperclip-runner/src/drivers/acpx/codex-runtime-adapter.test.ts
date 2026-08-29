@@ -171,17 +171,7 @@ describe("Codex ACPX runtime adapter", () => {
         },
       }),
     ).rejects.toBe(failure);
-    expect(runtime.close).toHaveBeenCalledWith({
-      handle: {
-        sessionKey: "provider-key",
-        backend: "acpx",
-        runtimeSessionName: "provider-key",
-        cwd: "/workspace",
-        acpxRecordId: "provider-key",
-      },
-      reason: "ACPX session handshake failed",
-      discardPersistentState: false,
-    });
+    expect(runtime.close).not.toHaveBeenCalled();
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
@@ -200,6 +190,12 @@ describe("Codex ACPX runtime adapter", () => {
         createStore: () => store(),
         createRuntime: (runtimeOptions) => {
           vi.mocked(runtime.ensureSession).mockImplementation(async () => {
+            await runtimeOptions.sessionStore.save({
+              acpxRecordId: "actual-record",
+              acpSessionId: "backend-session",
+              agentSessionId: "agent-session",
+              cwd: "/workspace",
+            } as never);
             runtimeOptions.spawnAgent?.({
               command: "ignored",
               args: ["--stdio"],
@@ -212,6 +208,19 @@ describe("Codex ACPX runtime adapter", () => {
         runtimeCloseTimeoutMs: 5,
       }),
     ).rejects.toThrow("ACPX session handshake and runtime cleanup failed");
+    expect(runtime.close).toHaveBeenCalledWith({
+      handle: {
+        sessionKey: "provider-key",
+        backend: "acpx",
+        runtimeSessionName: "provider-key",
+        cwd: "/workspace",
+        acpxRecordId: "actual-record",
+        backendSessionId: "backend-session",
+        agentSessionId: "agent-session",
+      },
+      reason: "ACPX session handshake failed",
+      discardPersistentState: false,
+    });
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
