@@ -1269,6 +1269,11 @@ function validateRecoverySnapshot(snapshot: PersistedHarnessSession): void {
         "persisted Codex ACPX semantic result has no completed terminal turn",
       );
     }
+    if (terminalTurns.at(-1)?.turnId !== semantic.turnId) {
+      throw new Error(
+        "persisted Codex ACPX semantic result is not the latest terminal settlement",
+      );
+    }
     if (
       snapshot.activeTurnId !== undefined &&
       snapshot.activeTurnId !== null

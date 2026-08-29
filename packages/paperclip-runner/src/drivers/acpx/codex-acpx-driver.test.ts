@@ -721,6 +721,9 @@ describe("Codex ACPX harness driver", () => {
     fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
     await terminalEvents;
     const snapshot = await session.snapshot();
+    expect(snapshot.terminalTurns?.at(-1)?.turnId).toBe(
+      snapshot.semanticResult?.turnId,
+    );
     await session.close({ reason: "simulate restart" });
 
     const recovery = await fixture.driver.recoverSession!(snapshot);
@@ -743,6 +746,71 @@ describe("Codex ACPX harness driver", () => {
     });
     await recovery.session!.close({ reason: "recovery verified" });
   });
+
+  it.each([
+    [
+      "failed",
+      "turn.failed",
+      {
+        status: "failed",
+        error: {
+          code: "provider_failure",
+          message: "The follow-up failed",
+          retryable: false,
+        },
+      },
+    ],
+    [
+      "cancelled",
+      "turn.interrupted",
+      { status: "cancelled", stopReason: "operator_cancelled" },
+    ],
+  ] as const)(
+    "rejects an earlier semantic settlement after a later %s turn",
+    async (_status, terminalType, terminalResult) => {
+      const fixture = driverFixture();
+      const session = await fixture.driver.openSession({
+        runId: "run-later-unsuccessful-turn",
+        normalizedSessionId: "session-1",
+        workingDirectory: "/workspace",
+      });
+
+      const semanticTerminal = collectUntil(session.events(), "turn.completed");
+      const semanticTurn = await session.startTurn({
+        message: { role: "user", text: "Complete the task." },
+      });
+      await fixture.hostOptions!.semanticTools!.handler({
+        tool: PRP_COMPLETION_TOOL_NAME,
+        callId: "finish-before-follow-up",
+        arguments: completedResult(),
+        signal: new AbortController().signal,
+      });
+      fixture.finishTurn({ status: "completed", stopReason: "end_turn" });
+      await semanticTerminal;
+
+      const laterTerminal = collectUntil(session.events(), terminalType);
+      const laterTurn = await session.startTurn({
+        message: { role: "user", text: "Attempt a follow-up." },
+      });
+      fixture.finishTurn(terminalResult);
+      await laterTerminal;
+
+      const snapshot = await session.snapshot();
+      expect(snapshot).toMatchObject({
+        activeTurnId: null,
+        semanticResult: { turnId: semanticTurn.turnId },
+      });
+      expect(snapshot.terminalTurns?.at(-1)?.turnId).toBe(laterTurn.turnId);
+      await session.close({ reason: "simulate unsuccessful follow-up recovery" });
+
+      await expect(fixture.driver.recoverSession!(snapshot)).resolves.toEqual({
+        recovered: false,
+        reason:
+          "persisted Codex ACPX semantic result is not the latest terminal settlement",
+      });
+      expect(fixture.readRecoveryWorkspace).not.toHaveBeenCalled();
+    },
+  );
 
   it("transfers an identical semantic retry from a failed turn to its successful turn", async () => {
     const fixture = driverFixture();
@@ -788,6 +856,7 @@ describe("Codex ACPX harness driver", () => {
       turnId: second.turnId,
     });
     expect(snapshot.semanticResult?.turnId).not.toBe(first.turnId);
+    expect(snapshot.terminalTurns?.at(-1)?.turnId).toBe(second.turnId);
     expect(snapshot.terminalTurns).toEqual(expect.arrayContaining([
       expect.objectContaining({ turnId: first.turnId }),
       expect.objectContaining({ turnId: second.turnId }),
