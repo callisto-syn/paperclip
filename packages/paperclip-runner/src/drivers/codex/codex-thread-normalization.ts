@@ -187,7 +187,7 @@ export function codexWorkspaceRelativePath(value: unknown): string | null {
     path.length > 1_024 ||
     path.startsWith("/") ||
     path.startsWith("//") ||
-    /^[A-Za-z]:\//u.test(path) ||
+    /^[A-Za-z]:/u.test(path) ||
     path.split("/").some((part) => part === ".." || part.length === 0)
   ) return null;
   return path;

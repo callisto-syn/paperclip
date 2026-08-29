@@ -114,6 +114,9 @@ describe("Codex thread normalization", () => {
     expect(codexWorkspaceRelativePath("../secret")).toBeNull();
     expect(codexWorkspaceRelativePath("/absolute/path")).toBeNull();
     expect(codexWorkspaceRelativePath("C:/host/path")).toBeNull();
+    expect(codexWorkspaceRelativePath("C:../secret")).toBeNull();
+    expect(codexWorkspaceRelativePath("c:..\\secret")).toBeNull();
+    expect(codexWorkspaceRelativePath("Z:relative\\host-path")).toBeNull();
     expect(boundedCodexWorkspaceStat(12)).toBe(12);
     expect(boundedCodexWorkspaceStat(-1)).toBeNull();
   });
