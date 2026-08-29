@@ -239,12 +239,17 @@ describe("executeNativeSession recovery", () => {
       expect(close).toHaveBeenCalledTimes(7);
 
       close.mockResolvedValue(undefined);
-      await vi.advanceTimersByTimeAsync(51_000);
-      expect(close).toHaveBeenCalledTimes(8);
-      expect(close).toHaveBeenLastCalledWith({
+      // Enter the scheduled recovery's delay, then admit while recovery exists
+      // but before it has assigned cleanup.attempt. Admission must observe the
+      // active owner and continue once its imminent close succeeds.
+      await vi.advanceTimersByTimeAsync(50_000);
+      const recoveredExecution = execute();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(close).toHaveBeenCalledTimes(9);
+      expect(close.mock.calls[7]?.[0]).toEqual({
         reason: "native session scheduled quarantined cleanup recovery",
       });
-      await expect(execute()).resolves.toMatchObject({ result });
+      await expect(recoveredExecution).resolves.toMatchObject({ result });
       expect(openSession).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

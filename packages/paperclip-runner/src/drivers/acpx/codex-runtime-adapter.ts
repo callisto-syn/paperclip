@@ -283,11 +283,18 @@ function runtimePort(
       );
       // The caller may stop waiting, but this close remains pending until the
       // exact ACPX protocol cleanup settles. Provider termination proceeds at
-      // the deadline without allowing a newer success to mask this outcome.
-      const closeError = await observedAttempt;
-      const processErrors = await processCleanup;
-      runtimeCloseAttempt = undefined;
-      if (closeError === null && processErrors.length === 0) {
+      // the deadline, and that successful hard boundary makes later closes
+      // idempotent even while the retained protocol promise is still pending.
+      const [closeError, processErrors] = await Promise.all([
+        boundedCloseOutcome(observedAttempt, runtimeCloseTimeoutMs),
+        processCleanup,
+      ]);
+      const protocolTimedOut = closeError instanceof AcpxRuntimeCloseTimeoutError;
+      if (!protocolTimedOut) runtimeCloseAttempt = undefined;
+      if (
+        processErrors.length === 0
+        && (closeError === null || protocolTimedOut)
+      ) {
         runtimeClosed = true;
       }
       if (closeError !== null || processErrors.length > 0) {

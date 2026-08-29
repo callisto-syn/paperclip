@@ -159,27 +159,25 @@ describe("Codex ACPX runtime adapter", () => {
         options: {},
       });
 
-      const firstClose = port.close({ reason: "runtime close stalled" });
-      let closeSettled = false;
-      void firstClose.finally(() => {
-        closeSettled = true;
-      });
+      const firstClose = expect(
+        port.close({ reason: "runtime close stalled" }),
+      ).rejects.toThrow("ACPX runtime and provider cleanup failed");
       await Promise.resolve();
       expect(runtime.close).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(2_000);
       expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      expect(closeSettled).toBe(false);
+      await firstClose;
 
       // The provider is terminally bounded, but the exact protocol cleanup
-      // remains owned until it produces an authoritative outcome.
+      // remains owned until it produces an authoritative outcome. A later
+      // close does not remain pinned behind that already terminated provider.
       await vi.advanceTimersByTimeAsync(10_000);
       expect(runtime.close).toHaveBeenCalledOnce();
-      expect(closeSettled).toBe(false);
-      resolveRuntimeClose();
-      await expect(firstClose).resolves.toBeUndefined();
       await expect(port.close({ reason: "idempotent terminal close" }))
         .resolves.toBeUndefined();
       expect(runtime.close).toHaveBeenCalledOnce();
+      resolveRuntimeClose();
+      await Promise.resolve();
     } finally {
       vi.useRealTimers();
     }

@@ -238,21 +238,21 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
       clearTimeout(cleanup.timer);
       cleanup.timer = null;
     }
-    if (!cleanup.recovery) {
-      startQuarantinedSessionCleanupRecovery(
+    const recovery = cleanup.recovery
+      ?? startQuarantinedSessionCleanupRecovery(
         cleanup,
         1,
         "native session quarantined admission recovery",
       );
-    }
-    if (cleanup.attempt) {
-      observations.push(
-        settlesWithin(
-          cleanup.attempt,
-          FAILED_OPERATION_SETTLEMENT_GRACE_MS,
-        ).catch(() => false),
-      );
-    }
+    // The current recovery may still be in its bounded retry delay and not
+    // have exposed cleanup.attempt yet. Observe that owner rather than
+    // rejecting admission in the gap immediately before a successful close.
+    observations.push(
+      settlesWithin(
+        recovery,
+        FAILED_SESSION_CLOSE_RETRY_MS + FAILED_OPERATION_SETTLEMENT_GRACE_MS,
+      ).catch(() => false),
+    );
   }
   await Promise.all(observations);
   if (quarantinedSessionCleanups.size > 0) {
