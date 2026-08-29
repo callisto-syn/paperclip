@@ -339,7 +339,7 @@ describe("Codex ACPX harness driver", () => {
 
       fixture.host.close.mockImplementation(({ reason }) =>
         reason.includes("scheduled quarantined cleanup recovery")
-          ? new Promise<void>((resolve) => setTimeout(resolve, 5))
+          ? new Promise<void>((resolve) => setTimeout(resolve, 2_500))
           : Promise.resolve()
       );
       await vi.advanceTimersToNextTimerAsync();
@@ -353,15 +353,14 @@ describe("Codex ACPX harness driver", () => {
         () => { admissionSettled = true; },
         () => { admissionSettled = true; },
       );
-      await vi.advanceTimersByTimeAsync(1);
       expect(fixture.host.close).toHaveBeenCalledTimes(8);
       expect(fixture.host.close).toHaveBeenLastCalledWith({
         reason:
           "runtime close persistently failed (scheduled quarantined cleanup recovery)",
       });
-      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(2_499);
       expect(admissionSettled).toBe(false);
-      await vi.advanceTimersByTimeAsync(4);
+      await vi.advanceTimersByTimeAsync(1);
       await expect(admission).resolves.toBeDefined();
       expect(fixture.host.close).toHaveBeenCalledTimes(8);
     } finally {

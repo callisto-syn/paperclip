@@ -181,7 +181,10 @@ function startQuarantinedSessionCleanupRecovery(
       attemptCount < maxAttempts && quarantinedSessionCleanups.has(cleanup);
       attemptCount += 1
     ) {
-      await waitForSessionCloseRetry();
+      // The first retry starts immediately so an admission-triggered recovery
+      // receives the complete close grace. Later attempts retain the bounded
+      // delay that prevents a hot retry loop.
+      if (attemptCount > 0) await waitForSessionCloseRetry();
       const attempt = Promise.resolve().then(() => cleanup.session.close({
         reason,
       }));
@@ -245,11 +248,9 @@ async function retryQuarantinedSessionCleanups(): Promise<void> {
         1,
         "native session quarantined admission recovery",
       );
-    // The current recovery may still be in its bounded retry delay and not
-    // have exposed cleanup.attempt yet. Observe that owner for one finite
-    // admission grace, but never let a broken close promise block every later
-    // execution indefinitely. The recovery remains observed in the global
-    // owner set after this caller fails closed.
+    // Observe the exact owner for one finite admission grace, but never let a
+    // broken close promise block every later execution indefinitely. The first
+    // recovery attempt starts without consuming that grace on a retry delay.
     observations.push(recovery.catch(() => undefined));
   }
   if (

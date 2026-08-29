@@ -269,9 +269,14 @@ export class CodexAcpxDriver implements HarnessDriver {
         attemptCount < maxAttempts && this.#quarantinedHostCleanups.has(cleanup);
         attemptCount += 1
       ) {
-        await waitForCleanupRetry(
-          Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
-        );
+        // Start the first retry immediately so admission's finite grace applies
+        // to provider cleanup rather than to this rate-limit delay. Only later
+        // attempts wait, preserving sequential bounded retry behavior.
+        if (attemptCount > 0) {
+          await waitForCleanupRetry(
+            Math.max(1, Math.min(1_000, this.#closeSettlementTimeoutMs)),
+          );
+        }
         const attempt = Promise.resolve().then(() => cleanup.host.close({
           reason: `${cleanup.reason} (${reason})`,
         }));
@@ -332,11 +337,9 @@ export class CodexAcpxDriver implements HarnessDriver {
           1,
           "quarantined cleanup admission recovery",
         );
-      // Admission observes the exact cleanup owner. Applying the ordinary
-      // close timeout to both its retry delay and its active close can reject
-      // immediately before a successful release. A rejected finite recovery
-      // remains quarantined and is rejected below; a fulfilled one has removed
-      // itself from the set.
+      // Admission observes the exact cleanup owner. Its first close begins
+      // immediately, so the finite admission grace is not consumed by the
+      // retry delay. A rejected recovery remains quarantined below.
       observations.push(recovery.catch(() => undefined));
     }
     if (
