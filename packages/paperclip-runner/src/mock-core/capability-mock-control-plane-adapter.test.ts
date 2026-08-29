@@ -846,7 +846,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "Active-task approval is in scope.",
       },
-    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
+    })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
       idempotencyKey: "terminal-requester-approval-decision",
@@ -856,7 +856,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "A terminal task cannot receive the requester continuation.",
       },
-    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
+    })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
       idempotencyKey: "owned-requester-approval-decision",
@@ -866,7 +866,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
         decision: "approved",
         note: "A task owned by another run cannot receive the continuation.",
       },
-    })).rejects.toMatchObject({ code: "approval_requester_continuation_missing" });
+    })).resolves.toMatchObject({ disposition: "applied" });
     await expect(adapter.applyCommand({
       runId: "run-1",
       idempotencyKey: "unlinked-approval-decision",
@@ -881,7 +881,7 @@ describe("CapabilityMockControlPlaneAdapter", () => {
       approvals: [
         {
           id: "approval-active-task",
-          status: "pending",
+          status: "approved",
         },
         {
           id: "approval-other-task",
@@ -889,8 +889,8 @@ describe("CapabilityMockControlPlaneAdapter", () => {
           comments: [{ body: "Scoped from the active task." }],
         },
         { id: "approval-unlinked", status: "pending" },
-        { id: "approval-terminal-requester", status: "pending" },
-        { id: "approval-owned-requester", status: "pending" },
+        { id: "approval-terminal-requester", status: "approved" },
+        { id: "approval-owned-requester", status: "approved" },
       ],
     });
     expect(adapter.snapshot().wakes).toEqual([

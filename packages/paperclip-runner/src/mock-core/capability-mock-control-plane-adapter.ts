@@ -848,18 +848,13 @@ export class CapabilityMockControlPlaneAdapter implements CapabilityMockControlP
             };
           }
         }
-        // An approval reply belongs to its requester, not to every assignee on
-        // every linked task. Refuse to publish a decision unless a nonterminal
-        // linked task gives that requester a continuation openRun can use.
-        if (approval.requestedByActorId !== null && requesterTarget === null) {
-          throw new CapabilityMockControlPlaneError(
-            "approval_requester_continuation_missing",
-            "fixture approval requester has no executable linked task",
-          );
-        }
         approval.status = command.decision;
         approval.decisionNote = requireText(command.note, "approval decision note");
         approval.decidedAt = this.#now();
+        // The decision is authoritative even when its requester cannot be
+        // resumed immediately. A continuation is best-effort and belongs only
+        // to that requester on an unowned executable task; never redirect it
+        // to another assignee or make wake availability block governance.
         if (requesterTarget !== null) {
           const wakeId = this.#scheduleWake(
             requesterTarget.actorId,
