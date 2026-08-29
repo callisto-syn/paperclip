@@ -1,3 +1,5 @@
+import { connect } from "node:net";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -255,6 +257,45 @@ describe("runner semantic MCP bridge", () => {
         ],
       },
     });
+  });
+
+  it("destroys oversized and stalled request bodies before dispatch", async () => {
+    const handler = vi.fn(async () => ({ ok: true }));
+    const bridge = await startRunnerToolBridge({
+      tools: [tool("documents.read")],
+      handler,
+      maxBodyBytes: 64,
+      requestBodyTimeoutMs: 20,
+    });
+    bridges.push(bridge);
+
+    await expect(rpc(bridge, {
+      id: "oversized",
+      method: "tools/call",
+      params: {
+        name: "documents.read",
+        arguments: { value: "x".repeat(128) },
+      },
+    })).rejects.toThrow();
+
+    const endpoint = new URL(bridge.url);
+    const socket = connect({
+      host: endpoint.hostname,
+      port: Number(endpoint.port),
+    });
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    socket.write([
+      "POST /mcp HTTP/1.1",
+      `Host: ${endpoint.host}`,
+      `Authorization: Bearer ${bridge.secret}`,
+      "Content-Type: application/json",
+      "Transfer-Encoding: chunked",
+      "",
+      "5",
+      "{",
+    ].join("\r\n"));
+    await expect(closed).resolves.toBeUndefined();
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it("prevents catalog ambiguity and reserved schema replacement", async () => {

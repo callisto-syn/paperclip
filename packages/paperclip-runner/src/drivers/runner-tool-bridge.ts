@@ -36,6 +36,8 @@ export interface RunnerToolBridgeOptions {
   timeoutMs?: number;
   privateToolTimeoutMs?: number;
   maxBodyBytes?: number;
+  /** Internal test seam; production bounds headers and body reads to 30 seconds. */
+  requestBodyTimeoutMs?: number;
   secret?: string;
 }
 
@@ -53,6 +55,7 @@ interface AdmittedCall {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PRIVATE_TOOL_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 30_000;
 const MAX_CALLS = 2_048;
 const MAX_RESULT_TEXT_BYTES = 64 * 1024;
 const RESERVED_TOOLS: readonly RunnerToolDefinition[] = [
@@ -128,6 +131,13 @@ export async function startRunnerToolBridge(
       16 * 1024 * 1024,
       "request size",
     ),
+    requestBodyTimeoutMs: positiveBoundedInteger(
+      options.requestBodyTimeoutMs,
+      DEFAULT_REQUEST_BODY_TIMEOUT_MS,
+      1,
+      5 * 60 * 1_000,
+      "request body timeout",
+    ),
   };
   const server = createServer((request, response) => {
     void handleRequest(request, response, context).catch(() => {
@@ -135,6 +145,8 @@ export async function startRunnerToolBridge(
       if (!response.writableEnded) response.end();
     });
   });
+  server.requestTimeout = context.requestBodyTimeoutMs;
+  server.headersTimeout = context.requestBodyTimeoutMs;
   server.on("clientError", (_error, socket) => socket.destroy());
   await listenLoopback(server);
   const address = server.address();
@@ -170,6 +182,7 @@ async function handleRequest(
     privateToolTimeoutMs: number;
     privateToolNames: ReadonlySet<string>;
     maxBodyBytes: number;
+    requestBodyTimeoutMs: number;
   },
 ): Promise<void> {
   setSecurityHeaders(response);
@@ -191,7 +204,11 @@ async function handleRequest(
   }
   let message: Record<string, unknown>;
   try {
-    message = parseMessage(await readBody(request, context.maxBodyBytes));
+    message = parseMessage(await readBody(
+      request,
+      context.maxBodyBytes,
+      context.requestBodyTimeoutMs,
+    ));
   } catch (error) {
     writeRpc(response, null, undefined, rpcError(-32700, safeError(error)));
     return;
@@ -364,32 +381,58 @@ function authorized(value: string | undefined, secret: string): boolean {
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
-function readBody(request: IncomingMessage, maxBytes: number): Promise<string> {
+function readBody(
+  request: IncomingMessage,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
-    request.on("data", (value: Buffer | string) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      request.off("aborted", onAborted);
+    };
+    const fail = (error: Error, destroy = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (destroy && !request.destroyed) request.destroy();
+      reject(error);
+    };
+    const onData = (value: Buffer | string) => {
       if (settled) return;
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      size += chunk.length;
-      if (size > maxBytes) {
-        settled = true;
-        reject(new Error("MCP request exceeded the retained payload limit"));
+      if (chunk.length > maxBytes - size) {
+        fail(
+          new Error("MCP request exceeded the retained payload limit"),
+          true,
+        );
         return;
       }
+      size += chunk.length;
       chunks.push(chunk);
-    });
-    request.on("end", () => {
+    };
+    const onEnd = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-    request.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
+    };
+    const onError = (error: Error) => fail(error);
+    const onAborted = () => fail(new Error("MCP request body was aborted"));
+    const timer = setTimeout(() => {
+      fail(new Error("MCP request body timed out"), true);
+    }, timeoutMs);
+    timer.unref?.();
+    request.on("data", onData);
+    request.on("end", onEnd);
+    request.on("error", onError);
+    request.on("aborted", onAborted);
   });
 }
 
