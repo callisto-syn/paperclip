@@ -121,11 +121,14 @@ export async function discoverPaperclipWorkspaceFileReferences(
 ): Promise<PaperclipWorkspaceFileReference[]> {
   let canonicalRoot: string;
   try { canonicalRoot = await realpath(workspace); } catch { return []; }
-  const references = paperclipWorkspaceFileReferencesFromText(workspace, assistantText, turnId, "runner_verified");
+  // Resolve references from the same canonical root used for the containment
+  // check. Do not consult a caller-controlled workspace symlink again after
+  // canonicalizing it above.
+  const references = paperclipWorkspaceFileReferencesFromText(canonicalRoot, assistantText, turnId, "runner_verified");
   const verified: PaperclipWorkspaceFileReference[] = [];
   for (const reference of references) {
     let canonicalPath: string;
-    try { canonicalPath = await realpath(resolve(workspace, reference.path)); } catch { continue; }
+    try { canonicalPath = await realpath(resolve(canonicalRoot, reference.path)); } catch { continue; }
     if (workspaceRelativePath(canonicalRoot, canonicalPath) === null) continue;
     // POSIX exposes an inode's current links, not where its bytes originated.
     // Once an outside hard link is removed, an in-workspace link is

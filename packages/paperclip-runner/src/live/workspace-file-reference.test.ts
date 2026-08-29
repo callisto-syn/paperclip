@@ -1,4 +1,4 @@
-import { link, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,9 +14,10 @@ describe("workspace file references", () => {
     const root = await mkdtemp(join(tmpdir(), "paperclip-file-reference-"));
     try {
       await writeFile(join(root, "guide.md"), "# Guide\n\nSafe content.\n");
+      const canonicalRoot = await realpath(root);
       const references = await discoverPaperclipWorkspaceFileReferences(
         root,
-        `Read [the guide](${join(root, "guide.md")}:2).`,
+        `Read [the guide](${join(canonicalRoot, "guide.md")}:2).`,
         "turn-1",
       );
       expect(references).toHaveLength(1);
@@ -62,6 +63,31 @@ describe("workspace file references", () => {
         rm(root, { recursive: true, force: true }),
         rm(outside, { recursive: true, force: true }),
       ]);
+    }
+  });
+
+  it("anchors parsing and verification to a canonical workspace root", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "paperclip-file-reference-parent-"));
+    const root = join(parent, "workspace");
+    const alias = join(parent, "workspace-alias");
+    try {
+      await mkdir(root);
+      await writeFile(join(root, "guide.md"), "# Guide\n");
+      await symlink(root, alias);
+      const canonicalRoot = await realpath(root);
+
+      await expect(discoverPaperclipWorkspaceFileReferences(
+        alias,
+        `[guide](${join(canonicalRoot, "guide.md")})`,
+        "turn-1",
+      )).resolves.toEqual([
+        expect.objectContaining({
+          path: "guide.md",
+          source: "runner_verified",
+        }),
+      ]);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
     }
   });
 
