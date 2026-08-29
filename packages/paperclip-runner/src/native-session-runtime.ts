@@ -446,10 +446,12 @@ async function replayCheckpointedTurnTerminal(input: {
   controlPlane: ControlPlanePort;
   runId: string;
   sourceInstanceId: string;
+  priorTerminalTurnIds: readonly string[];
 }): Promise<{ terminal: PrpEvent; hasPriorResultProposal: boolean } | null> {
   let afterSourceSeq = 0;
   const terminals: PrpEvent[] = [];
   const latestResultProposalByTurn = new Map<string, number>();
+  const priorTerminalTurnIds = new Set(input.priorTerminalTurnIds);
   while (true) {
     const replay = await input.controlPlane.replayEvents({
       runId: input.runId,
@@ -482,7 +484,11 @@ async function replayCheckpointedTurnTerminal(input: {
           ),
         );
       }
-      if (event.turnId && isTurnTerminal(event)) {
+      if (
+        event.turnId &&
+        isTurnTerminal(event) &&
+        !priorTerminalTurnIds.has(event.turnId)
+      ) {
         terminals.push(structuredClone(event));
       }
     }
@@ -713,23 +719,27 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
         && (recoveredSnapshot.terminalTurns?.length ?? 0)
           > (persistedSession?.terminalTurns?.length ?? 0)
       );
-      const checkpointedDispositionTerminal = Boolean(
+      const dispositionRecoveryAlreadySubmitted = Boolean(
         recovered
         && recoveredSnapshot.dispositionOnlyRecoveryConsumed
         && persistedSession?.dispositionOnlyRecoveryConsumed
         && !recoveredSnapshot.semanticResult
         && !recoveredActiveTurnId
       );
-      const replayedDisposition = checkpointedDispositionTerminal
+      const replayedDisposition = dispositionRecoveryAlreadySubmitted
         ? await replayCheckpointedTurnTerminal({
             controlPlane: options.controlPlane,
             runId: input.binding.runId,
             sourceInstanceId: options.runnerInstanceId,
+            priorTerminalTurnIds: (persistedSession?.terminalTurns ?? [])
+              .map((terminal) => terminal.turnId),
           })
         : null;
-      if (checkpointedDispositionTerminal && replayedDisposition === null) {
-        throw new Error("native_recovery_checkpointed_terminal_missing");
-      }
+      // The consumed marker proves only that the recovery turn was submitted,
+      // not that its terminal was durably appended. If replay cannot find a
+      // terminal newer than the prior task, keep consuming the recovered
+      // provider session without submitting a duplicate turn.
+      const checkpointedDispositionTerminal = replayedDisposition !== null;
       const replayedTerminal = replayedDisposition?.terminal ?? null;
       const consumptionAbort = new AbortController();
       const consuming = replayedTerminal === null
@@ -762,6 +772,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             !recoveredActiveTurnId
             && !adoptedDispositionTerminal
             && !checkpointedDispositionTerminal
+            && !dispositionRecoveryAlreadySubmitted
           )
         ) {
           const modelEnvelope = buildNativeModelEnvelope(input);

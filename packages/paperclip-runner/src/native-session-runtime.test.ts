@@ -1666,7 +1666,7 @@ describe("executeNativeSession recovery", () => {
       async capabilities() {
         return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
       },
-      async *events() { throw new Error("checkpointed terminal must not reopen event consumption"); },
+      async *events() { yield structuredClone(terminalEvent); },
       startTurn,
       async result() { return null; },
       async snapshot() { return structuredClone(checkpoint); },
@@ -1688,7 +1688,6 @@ describe("executeNativeSession recovery", () => {
       ["runner-recovery", [
         structuredClone(originalTaskProposal),
         structuredClone(originalTaskTerminal),
-        structuredClone(terminalEvent),
       ]],
     ]);
     const port: ControlPlanePort = {
