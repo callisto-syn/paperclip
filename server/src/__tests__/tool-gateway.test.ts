@@ -464,7 +464,7 @@ function createGatewayRouteApp(
     withActorMiddleware?: boolean;
   },
 ) {
-  const options = actorOrOptions && "withActorMiddleware" in actorOrOptions
+  const options = actorOrOptions && ("actor" in actorOrOptions || "withActorMiddleware" in actorOrOptions)
     ? actorOrOptions
     : { actor: actorOrOptions };
   if (options.actor && options.withActorMiddleware) {
@@ -473,9 +473,10 @@ function createGatewayRouteApp(
   const app = express();
   app.use(express.json());
   if (options.withActorMiddleware) app.use(actorMiddleware(db, { deploymentMode: "local_trusted" }));
-  if (options.actor) {
+  const actor = options.actor;
+  if (actor) {
     app.use((req, _res, next) => {
-      req.actor = options.actor!;
+      req.actor = actor;
       next();
     });
   }
