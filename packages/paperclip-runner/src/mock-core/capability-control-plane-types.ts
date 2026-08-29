@@ -266,8 +266,18 @@ export interface CapabilitySemanticToolRuntimeSnapshot {
         /** Optional only for legacy pending snapshots, which are immediately reclaimable. */
         ownerId?: string;
         leaseExpiresAtMs?: number;
-        /** `executing` is reclaimed only for explicitly replay-safe mock extensions. */
+        /** `executing` is recovered only from an exact prepared receipt. */
         phase?: "reserved" | "executing";
+        /**
+         * Package-local mock extensions prepare their deterministic result
+         * before crossing the executing boundary, so executor loss can publish
+         * this exact receipt without replaying the extension.
+         */
+        preparedExecution?: {
+          value: CapabilityJsonValue;
+          commandResult: CapabilityCommandResult | null;
+          entityRefs: string[];
+        };
       }
     | {
         key: string;

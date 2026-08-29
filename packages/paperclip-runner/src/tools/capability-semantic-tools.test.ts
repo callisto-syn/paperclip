@@ -1009,7 +1009,7 @@ describe("Capability exposure and authorization", () => {
     }
   });
 
-  it("does not replay an executing extension after repeated heartbeat failures", async () => {
+  it("recovers a prepared extension after repeated heartbeat failures", async () => {
     vi.useFakeTimers({ now: 0 });
     try {
       let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot | null = null;
@@ -1057,11 +1057,12 @@ describe("Capability exposure and authorization", () => {
         scenarioGrants: ["cases:write"],
         now: () => Date.now(),
       });
-      await expect(restored.invoke(invocation)).resolves.toMatchObject({
-        ok: false,
-        error: { reason: "idempotency_recovery_in_flight" },
-      });
-      await expect(inFlight).resolves.toMatchObject({ ok: true });
+      const recovered = await restored.invoke(invocation);
+      const original = await inFlight;
+      expect(recovered).toMatchObject({ ok: true });
+      expect(original).toMatchObject({ ok: true });
+      if (!recovered.ok || !original.ok) throw new Error("expected recovered execution");
+      expect(recovered.operationResultId).toBe(original.operationResultId);
     } finally {
       vi.useRealTimers();
     }
@@ -1163,6 +1164,68 @@ describe("Capability exposure and authorization", () => {
       phase: "executing",
     });
     expect(durableSnapshot.operationResults).toEqual({});
+  });
+
+  it("recovers an expired built-in extension from its prepared receipt", async () => {
+    const observedExport = {
+      schema: "paperclip.capability.mock-export.v1",
+      company: { id: "company-1", name: "Previously Exported Company" },
+      taskCount: 1,
+      actorCount: 1,
+    };
+    let durableSnapshot: CapabilitySemanticToolRuntimeSnapshot = {
+      schema: "paperclip.capability.semantic-tool-runtime.v1",
+      resultSequence: 0,
+      operationResults: {},
+      extensions: [{
+        key: `${OPEN.identity.runId}:export_company:prepared-export`,
+        input: "{}",
+        status: "pending",
+        ownerId: "terminated-exporter",
+        leaseExpiresAtMs: 1_000,
+        phase: "executing",
+        preparedExecution: {
+          value: observedExport,
+          commandResult: null,
+          entityRefs: [],
+        },
+      }],
+    };
+    const durableStore: CapabilitySemanticToolRuntimeStore = {
+      load: () => structuredClone(durableSnapshot),
+      save: (_runId, snapshot) => { durableSnapshot = structuredClone(snapshot); },
+      compareAndSwap: (_runId, expected, snapshot) => {
+        if (JSON.stringify(durableSnapshot) !== JSON.stringify(expected)) return false;
+        durableSnapshot = structuredClone(snapshot);
+        return true;
+      },
+    };
+    const base = await runtimeFor({ scenarioGrants: ["portability:export"] });
+    const restoredAdapter = CapabilityMockControlPlaneAdapter.restore(
+      base.adapter.serialize(),
+      { semanticToolRuntimeStore: durableStore },
+    );
+    const restored = new CapabilitySemanticToolRuntime({
+      adapter: restoredAdapter,
+      runId: OPEN.identity.runId,
+      scenarioGrants: ["portability:export"],
+      now: () => 1_001,
+    });
+
+    await expect(restored.invoke({
+      operationId: "export_company",
+      input: {},
+      idempotencyKey: "prepared-export",
+    })).resolves.toMatchObject({
+      ok: true,
+      operationResultId: "tool-result-1",
+      value: observedExport,
+    });
+    expect(durableSnapshot.extensions[0]).toMatchObject({
+      status: "completed",
+      resultId: "tool-result-1",
+      execution: { value: observedExport },
+    });
   });
 
   it("reconciles an expired mutable export without replaying its effect", async () => {

@@ -1861,6 +1861,26 @@ function isSemanticToolRuntimeSnapshot(
       ) {
         return false;
       }
+      if (extension.preparedExecution !== undefined) {
+        if (
+          extension.phase !== "executing" ||
+          typeof extension.preparedExecution !== "object" ||
+          extension.preparedExecution === null ||
+          Array.isArray(extension.preparedExecution)
+        ) {
+          return false;
+        }
+        const prepared = extension.preparedExecution as Record<string, unknown>;
+        if (
+          !isCapabilityJsonValue(prepared.value) ||
+          (prepared.commandResult !== null &&
+            !isCapabilityCommandResult(prepared.commandResult)) ||
+          !Array.isArray(prepared.entityRefs) ||
+          prepared.entityRefs.some((ref) => typeof ref !== "string")
+        ) {
+          return false;
+        }
+      }
       keys.add(extension.key);
       return true;
     }

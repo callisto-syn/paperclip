@@ -32,9 +32,10 @@ export interface CapabilitySemanticToolRuntimeOptions {
   policy?: CapabilityScenarioToolPolicy;
   resolveSecretValue?: (name: string) => Promise<string | null> | string | null;
   /**
-   * Trusted backend boundary for an expired, non-replay-safe extension. The
-   * resolver must return the exact receipt observed from the original
-   * executor; returning null keeps the idempotency key fail-closed.
+   * Optional trusted backend receipt lookup for an expired extension. The
+   * package-local mock runtime falls back to the exact prepared receipt stored
+   * before execution; returning null therefore remains recoverable for those
+   * built-in extensions without replaying them.
    */
   resolveExpiredExtensionReceipt?: (input: {
     operationId: string;
@@ -622,19 +623,36 @@ export class CapabilitySemanticToolRuntime {
   async #resolveExpiredExtension(
     invocation: CapabilityToolInvocation,
   ): Promise<boolean> {
-    if (this.#resolveExpiredExtensionReceipt === undefined) return false;
     const idempotencyKey = invocation.idempotencyKey?.trim();
     if (!idempotencyKey) return false;
-    const observed = await this.#resolveExpiredExtensionReceipt({
+    const recoveryInput = {
       operationId: invocation.operationId,
       input: structuredClone(invocation.input) as Record<string, CapabilityJsonValue>,
       idempotencyKey,
-    });
+    };
+    let observed = this.#resolveExpiredExtensionReceipt === undefined
+      ? null
+      : await this.#resolveExpiredExtensionReceipt(recoveryInput);
+    if (observed === null) {
+      const key = `${this.#runId}:${invocation.operationId}:${idempotencyKey}`;
+      const extension = this.#adapter
+        .loadSemanticToolRuntime(this.#runId)
+        ?.extensions.find((candidate) => candidate.key === key);
+      if (
+        extension?.status === "pending" &&
+        extension.phase === "executing" &&
+        extension.input === canonicalJson(invocation.input) &&
+        extension.preparedExecution !== undefined
+      ) {
+        observed = {
+          value: structuredClone(extension.preparedExecution.value),
+          entityRefs: [...extension.preparedExecution.entityRefs],
+        };
+      }
+    }
     if (observed === null) return false;
     this.reconcileExpiredExtensionReceipt({
-      operationId: invocation.operationId,
-      input: structuredClone(invocation.input) as Record<string, CapabilityJsonValue>,
-      idempotencyKey,
+      ...recoveryInput,
       value: structuredClone(observed.value),
       ...(observed.entityRefs === undefined
         ? {}
@@ -704,9 +722,20 @@ export class CapabilitySemanticToolRuntime {
     record.cleanupRetry = null;
     record.ownerId = ownerId;
     record.leaseExpiresAtMs = leaseExpiresAtMs;
+    // Deterministic package-local mock extensions can persist their exact
+    // result before crossing the executing boundary. Async/custom effects do
+    // not guess a receipt and retain the external reconciliation boundary.
+    const preparedExecution = this.#prepareBuiltInExtensionExecution(
+      descriptor,
+      asObject(invocation.input),
+    );
     let executionStarted = false;
     try {
-      executionStarted = this.#markExtensionExecutionStarted(key, record);
+      executionStarted = this.#markExtensionExecutionStarted(
+        key,
+        record,
+        preparedExecution ?? undefined,
+      );
     } catch {
       executionStarted = false;
     }
@@ -714,7 +743,11 @@ export class CapabilitySemanticToolRuntime {
       this.#scheduleFailedExtensionCleanup(key, record);
       return false;
     }
-    const execution = this.#execute(descriptor, invocation).then((value) => ({
+    const execution = (
+      preparedExecution === null
+        ? this.#execute(descriptor, invocation)
+        : Promise.resolve(structuredClone(preparedExecution))
+    ).then((value) => ({
       resultId: value.commandResult?.commandId ?? this.#nextResultId(),
       value,
     }));
@@ -797,6 +830,7 @@ export class CapabilitySemanticToolRuntime {
   #markExtensionExecutionStarted(
     key: string,
     record: ExtensionIdempotencyRecord,
+    preparedExecution: ExtensionExecution | undefined,
   ): boolean {
     for (let attempt = 0; attempt < RUNTIME_PERSIST_CAS_ATTEMPTS; attempt += 1) {
       const durable = this.#adapter.loadSemanticToolRuntime(this.#runId);
@@ -813,7 +847,14 @@ export class CapabilitySemanticToolRuntime {
       const leaseExpiresAtMs = this.#now() + EXTENSION_EXECUTION_LEASE_MS;
       replacement.extensions = replacement.extensions.map((candidate) =>
         candidate.key === key
-          ? { ...candidate, phase: "executing" as const, leaseExpiresAtMs }
+          ? {
+              ...candidate,
+              phase: "executing" as const,
+              leaseExpiresAtMs,
+              ...(preparedExecution === undefined
+                ? {}
+                : { preparedExecution: structuredClone(preparedExecution) }),
+            }
           : candidate,
       );
       if (!this.#adapter.compareAndSwapSemanticToolRuntime(
@@ -870,11 +911,10 @@ export class CapabilitySemanticToolRuntime {
       if (durable === null || extension === undefined) return null;
       if (extension.status === "completed") {
         return extension.input === record.input &&
-          extension.resultId === completed.resultId &&
           JSON.stringify(extension.execution) === JSON.stringify(completed.value) &&
-          canonicalJson(durable.operationResults[completed.resultId]) ===
+          canonicalJson(durable.operationResults[extension.resultId]) ===
             canonicalJson(observableValue)
-          ? completed.resultId
+          ? extension.resultId
           : null;
       }
       if (extension.status !== "pending" || record.ownerId === null ||
@@ -1113,7 +1153,27 @@ export class CapabilitySemanticToolRuntime {
   async #executeExtension(
     descriptor: CapabilitySemanticToolDescriptor,
     input: Record<string, CapabilityJsonValue>,
-  ): Promise<{ value: CapabilityJsonValue; commandResult: null; entityRefs: string[] }> {
+  ): Promise<ExtensionExecution> {
+    const prepared = this.#prepareBuiltInExtensionExecution(descriptor, input);
+    if (prepared !== null) return prepared;
+    switch (descriptor.mockCommandMapping.kind === "mock_extension"
+      ? descriptor.mockCommandMapping.extension
+      : "") {
+      case "secrets.value": {
+        const name = requireString(input.name);
+        const value = await this.#resolveSecretValue?.(name);
+        if (value === null || value === undefined) throw new Error("secret is not available");
+        return { value: { name, value }, commandResult: null, entityRefs: [] };
+      }
+      default:
+        throw new Error("mock extension is not implemented");
+    }
+  }
+
+  #prepareBuiltInExtensionExecution(
+    descriptor: CapabilitySemanticToolDescriptor,
+    input: Record<string, CapabilityJsonValue>,
+  ): ExtensionExecution | null {
     switch (descriptor.mockCommandMapping.kind === "mock_extension"
       ? descriptor.mockCommandMapping.extension
       : "") {
@@ -1122,15 +1182,8 @@ export class CapabilitySemanticToolRuntime {
       case "cases.list":
       case "routines.list":
       case "company_skills.list":
-        return { value: [], commandResult: null, entityRefs: [] };
       case "secrets.metadata":
         return { value: [], commandResult: null, entityRefs: [] };
-      case "secrets.value": {
-        const name = requireString(input.name);
-        const value = await this.#resolveSecretValue?.(name);
-        if (value === null || value === undefined) throw new Error("secret is not available");
-        return { value: { name, value }, commandResult: null, entityRefs: [] };
-      }
       case "portability.export": {
         const snapshot = this.#adapter.snapshot();
         return {
@@ -1185,6 +1238,8 @@ export class CapabilitySemanticToolRuntime {
           commandResult: null,
           entityRefs: [],
         };
+      case "secrets.value":
+        return null;
       default:
         throw new Error("mock extension is not implemented");
     }
