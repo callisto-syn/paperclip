@@ -434,6 +434,36 @@ impl CodexProvider {
         Ok(())
     }
 
+    fn reject_post_terminal_request(
+        &mut self,
+        rpc_id: Value,
+        method: &str,
+    ) -> Result<Option<CodexProviderEvent>, LocalRunnerError> {
+        let message = format!(
+            "ignored delayed {} request after the Codex turn terminated",
+            bounded_method(method)
+        );
+        let response = if method == "item/tool/call" {
+            json!({
+                "id": rpc_id,
+                "result": codex_tool_failure("the Codex turn has already terminated"),
+            })
+        } else {
+            json!({
+                "id": rpc_id,
+                "error": {"code": -32000, "message": "the Codex turn has already terminated"},
+            })
+        };
+        // The terminal notification is already authoritative and may be
+        // waiting in the durable outbox. A courtesy rejection must not turn a
+        // provider that has closed stdin into a fatal polling error.
+        let _ = self.process.send(&response);
+        Ok(Some(CodexProviderEvent::Notification {
+            method: "warning".to_owned(),
+            params: json!({"message": message, "providerMethod": bounded_method(method)}),
+        }))
+    }
+
     pub fn poll(&mut self) -> Result<Option<CodexProviderEvent>, LocalRunnerError> {
         let message = if let Some(message) = self.pending_messages.pop_front() {
             message
@@ -498,6 +528,9 @@ impl CodexProvider {
                     return Err(LocalRunnerError::invalid(
                         "Codex tool call named another thread",
                     ));
+                }
+                if self.active_provider_turn_id.is_none() && self.completed_turn_authoritative {
+                    return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.as_deref().ok_or_else(|| {
                     LocalRunnerError::invalid("Codex tool call arrived outside an active turn")
@@ -592,6 +625,9 @@ impl CodexProvider {
                     return Err(LocalRunnerError::invalid(
                         "Codex runtime request named another thread",
                     ));
+                }
+                if self.active_provider_turn_id.is_none() && self.completed_turn_authoritative {
+                    return self.reject_post_terminal_request(rpc_id, method);
                 }
                 let active_turn_id = self.active_provider_turn_id.clone().ok_or_else(|| {
                     LocalRunnerError::invalid(

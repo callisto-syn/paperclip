@@ -663,13 +663,81 @@ fn codex_rejects_delayed_calls_after_every_terminal_notification() {
         .expect("observe failed terminal notification");
     assert_eq!(terminal, "turn/failed");
     assert_eq!(provider.active_provider_turn_id(), None);
-    let error = (0..16)
-        .find_map(|_| provider.poll().err())
+    let warning = (0..16)
+        .find_map(
+            |_| match provider.poll().expect("reject delayed call non-fatally") {
+                Some(CodexProviderEvent::Notification { method, params })
+                    if method == "warning" =>
+                {
+                    Some(params)
+                }
+                _ => None,
+            },
+        )
         .expect("a delayed call for the failed turn is rejected");
-    assert!(error.to_string().contains("outside an active turn"));
+    assert!(warning["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("after the Codex turn terminated")));
 
     let _ = provider.shutdown();
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
+}
+
+#[test]
+fn durable_backend_delivers_a_terminal_before_rejecting_a_delayed_tool_call() {
+    let directory = temporary_directory("durable-delayed-tool-after-terminal");
+    let config = provider_config(&directory, &["--delayed-tool-after-failed-turn"]);
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({
+                "provider": config,
+                "authorizedTools": task_context_tool_set(),
+                "completionContract": {
+                    "revision": "sha256:delayed-tool-contract",
+                    "criterionIds": ["criterion_delayed_tool"]
+                },
+            }),
+        ))
+        .unwrap();
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .unwrap();
+    executor
+        .execute(&command(
+            "turn",
+            3,
+            "turn.start",
+            json!({"text": "Fail before invoking a delayed tool."}),
+        ))
+        .unwrap();
+
+    let mut observed = Vec::new();
+    for _ in 0..32 {
+        observed.extend(poll_and_ack(&mut executor).expect("poll durable provider events"));
+        if observed
+            .iter()
+            .any(|event| event.event_type == "provider.notice.recorded")
+        {
+            break;
+        }
+    }
+    let terminal = observed
+        .iter()
+        .position(|event| event.event_type == "run.terminal")
+        .expect("the durable terminal is delivered");
+    let rejection = observed
+        .iter()
+        .position(|event| event.event_type == "provider.notice.recorded")
+        .expect("the delayed request is rejected non-fatally");
+    assert!(terminal < rejection);
+
+    executor.shutdown().unwrap();
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
