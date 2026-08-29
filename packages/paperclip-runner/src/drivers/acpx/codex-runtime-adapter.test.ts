@@ -3,6 +3,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import { EventEmitter, once } from "node:events";
+import { PassThrough } from "node:stream";
 
 import type {
   AcpAgentRegistry,
@@ -410,50 +411,41 @@ describe("Codex ACPX runtime adapter", () => {
     }
   });
 
-  it("releases an unresponsive Windows provider when no group reaper is available", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = fakeRuntime();
-      const child = stubbornChild();
-      const command = fakeCommand();
-      const reaperFailure = new Error(
-        "ACPX provider process-group reaping is unavailable on Windows",
-      );
-      const reapUnresponsiveChild = vi.fn().mockRejectedValue(reaperFailure);
-      vi.mocked(command.spawn).mockReturnValue(child);
-      let runtimeOptions: AcpRuntimeOptions | undefined;
-      const port = await openCodexAcpxRuntime(openOptions(command), {
-        createRegistry: () => registry(),
-        createStore: () => store(),
-        createRuntime: (options) => {
-          runtimeOptions = options;
-          return runtime;
-        },
-        reapUnresponsiveChild,
-        releaseUnresponsiveChildOnReaperFailure: true,
-      });
-      runtimeOptions?.spawnAgent?.({
-        command: "ignored",
-        args: ["--stdio"],
-        options: {},
-      });
+  it("hands an unresponsive Windows process tree to a detached taskkill reaper", async () => {
+    const child = stubbornChild();
+    Object.defineProperty(child, "pid", { value: 4_242 });
+    const output = new PassThrough();
+    const reaper = new EventEmitter() as ChildProcess;
+    Object.defineProperty(reaper, "stdout", { value: output });
+    reaper.kill = vi.fn(() => true);
+    reaper.unref = vi.fn(() => reaper);
+    const spawnProcess = vi.fn(() => reaper);
 
-      const closing = expect(
-        port.close({ reason: "provider handoff is unavailable" }),
-      ).rejects.toMatchObject({
-        errors: expect.arrayContaining([reaperFailure]),
-      });
-      await vi.advanceTimersByTimeAsync(4_000);
-      await closing;
+    const handoff = launchUnresponsiveProviderReaper(child, {
+      platform: "win32",
+      spawnProcess: spawnProcess as unknown as typeof spawnChildProcess,
+      windowsSystemRoot: String.raw`C:\Windows`,
+    });
+    output.write("owned\n");
+    await handoff;
 
-      expect(child.stdin?.destroy).toHaveBeenCalledOnce();
-      expect(child.stdout?.destroy).toHaveBeenCalledOnce();
-      expect(child.stderr?.destroy).toHaveBeenCalledOnce();
-      expect(reapUnresponsiveChild).toHaveBeenCalledWith(child);
-      expect(child.unref).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    const [command, args, options] = spawnProcess.mock.calls[0]!;
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual([
+      "--eval",
+      expect.stringContaining("taskkill"),
+      "4242",
+      String.raw`C:\Windows\System32\taskkill.exe`,
+    ]);
+    expect(options).toMatchObject({
+      detached: true,
+      env: {},
+      shell: false,
+      windowsHide: true,
+    });
+    expect(reaper.kill).not.toHaveBeenCalled();
+    expect(reaper.unref).toHaveBeenCalledOnce();
   });
 
   it("rejects and independently cleans providers spawned during termination", async () => {

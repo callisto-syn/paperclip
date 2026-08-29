@@ -2,6 +2,7 @@ import {
   spawn as spawnChildProcess,
   type ChildProcess,
 } from "node:child_process";
+import { win32 as win32Path } from "node:path";
 
 import {
   createAcpRuntime,
@@ -59,10 +60,53 @@ const reap = () => {
 };
 reap();
 `;
+const WINDOWS_UNRESPONSIVE_REAPER_SOURCE = `
+const { spawnSync } = require("node:child_process");
+const processId = Number.parseInt(process.argv[1] ?? "", 10);
+const taskkillPath = process.argv[2] ?? "";
+if (!Number.isSafeInteger(processId) || processId <= 0 || !taskkillPath) process.exit(2);
+let announced = false;
+const reap = () => {
+  const result = spawnSync(
+    taskkillPath,
+    ["/PID", String(processId), "/T", "/F"],
+    { windowsHide: true, stdio: "ignore" },
+  );
+  if (result.error) {
+    process.stdout.write(
+      "error:" + String(result.error.code || "taskkill") + "\\n",
+      () => process.exit(1),
+    );
+    return;
+  }
+  if (result.status !== 0) {
+    try {
+      process.kill(processId, 0);
+    } catch (error) {
+      if (error && error.code === "ESRCH") {
+        if (!announced) process.stdout.write("gone\\n", () => process.exit(0));
+        else process.exit(0);
+        return;
+      }
+    }
+    process.stdout.write(
+      "error:taskkill-status-" + String(result.status) + "\\n",
+      () => process.exit(1),
+    );
+    return;
+  }
+  if (!announced) {
+    announced = true;
+    process.stdout.write("owned\\n");
+  }
+  setTimeout(reap, 250);
+};
+reap();
+`;
 // Production shutdown waits for the protocol close bound before beginning the
-// sequential TERM/KILL verification windows and, for an unresponsive POSIX
-// process group, a bounded reaper ownership transfer. Keep this exported
-// package-local bound aligned with the complete implementation.
+// sequential TERM/KILL verification windows and a bounded external-reaper
+// ownership transfer. Keep this exported package-local bound aligned with the
+// complete implementation.
 export const DEFAULT_CODEX_ACPX_RUNTIME_SHUTDOWN_BOUND_MS =
   DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS +
   PROVIDER_TERM_EXIT_TIMEOUT_MS +
@@ -102,8 +146,6 @@ export interface CodexAcpxRuntimeDependencies {
   retainCleanup?: (cleanup: Promise<void>) => void;
   /** Internal test seam for transferring an unresponsive process group. */
   reapUnresponsiveChild?: (child: ChildProcess) => Promise<void>;
-  /** Internal test seam for Windows, where no detached group reaper exists. */
-  releaseUnresponsiveChildOnReaperFailure?: boolean;
 }
 
 /**
@@ -129,7 +171,6 @@ export async function openCodexAcpxRuntime(
   const children = new SpawnedChildSet(
     dependencies.retainCleanup,
     dependencies.reapUnresponsiveChild,
-    dependencies.releaseUnresponsiveChildOnReaperFailure,
   );
   const baseStore = createStore({ stateDir: options.stateDirectory });
   let failedHandshakeHandle: AcpRuntimeHandle | null = null;
@@ -577,8 +618,6 @@ class SpawnedChildSet {
     private readonly retainCleanup?: (cleanup: Promise<void>) => void,
     private readonly reapUnresponsiveChild: (child: ChildProcess) => Promise<void> =
       launchUnresponsiveProviderReaper,
-    private readonly releaseUnresponsiveChildOnReaperFailure =
-      process.platform === "win32",
   ) {}
 
   add(child: ChildProcess): ChildProcess {
@@ -643,16 +682,8 @@ class SpawnedChildSet {
     const existing = this.#terminations.get(child);
     if (existing) return existing;
     const termination = (immediateKill
-      ? terminatePostSealChild(
-          child,
-          this.reapUnresponsiveChild,
-          this.releaseUnresponsiveChildOnReaperFailure,
-        )
-      : terminateChild(
-          child,
-          this.reapUnresponsiveChild,
-          this.releaseUnresponsiveChildOnReaperFailure,
-        )
+      ? terminatePostSealChild(child, this.reapUnresponsiveChild)
+      : terminateChild(child, this.reapUnresponsiveChild)
     ).catch((error: unknown) => [error]);
     this.#terminations.set(child, termination);
     termination.then(() => {
@@ -667,7 +698,6 @@ class SpawnedChildSet {
 async function terminatePostSealChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
-  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
@@ -681,11 +711,7 @@ async function terminatePostSealChild(
   }
   if (!killOutcome.exited && running(child)) {
     errors.push(new Error("ACPX post-seal provider did not exit after SIGKILL"));
-    errors.push(...await handoffUnresponsiveChild(
-      child,
-      reapUnresponsiveChild,
-      releaseUnresponsiveChildOnReaperFailure,
-    ));
+    errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
   }
   return errors;
 }
@@ -693,7 +719,6 @@ async function terminatePostSealChild(
 async function terminateChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
-  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   if (!running(child)) return errors;
@@ -716,11 +741,7 @@ async function terminateChild(
     }
     if (!killOutcome.exited && running(child)) {
       errors.push(new Error("ACPX provider did not exit after SIGKILL"));
-      errors.push(...await handoffUnresponsiveChild(
-        child,
-        reapUnresponsiveChild,
-        releaseUnresponsiveChildOnReaperFailure,
-      ));
+      errors.push(...await handoffUnresponsiveChild(child, reapUnresponsiveChild));
     }
   }
   return errors;
@@ -729,7 +750,6 @@ async function terminateChild(
 async function handoffUnresponsiveChild(
   child: ChildProcess,
   reapUnresponsiveChild: (child: ChildProcess) => Promise<void>,
-  releaseUnresponsiveChildOnReaperFailure: boolean,
 ): Promise<unknown[]> {
   const errors: unknown[] = [];
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
@@ -748,27 +768,48 @@ async function handoffUnresponsiveChild(
     child.unref();
   } catch (error) {
     errors.push(error);
-    // Windows has no detached process-group reaper to accept ownership. After
-    // TerminateProcess and bounded exit verification have both failed, release
-    // the local handle so the sidecar itself can still complete shutdown.
-    if (releaseUnresponsiveChildOnReaperFailure) child.unref();
   }
   return errors;
 }
 
+interface UnresponsiveProviderReaperOptions {
+  platform?: NodeJS.Platform;
+  spawnProcess?: typeof spawnChildProcess;
+  windowsSystemRoot?: string;
+}
+
 export async function launchUnresponsiveProviderReaper(
   child: ChildProcess,
+  options: UnresponsiveProviderReaperOptions = {},
 ): Promise<void> {
-  if (process.platform === "win32") {
-    throw new Error("ACPX provider process-group reaping is unavailable on Windows");
-  }
   const processGroupId = child.pid;
   if (!Number.isSafeInteger(processGroupId) || (processGroupId ?? 0) <= 0) {
     throw new Error("ACPX provider omitted its process-group identity");
   }
-  const reaper = spawnChildProcess(
+  const platform = options.platform ?? process.platform;
+  const windowsSystemRoot = platform === "win32"
+    ? options.windowsSystemRoot ?? process.env.SystemRoot
+    : undefined;
+  if (
+    platform === "win32" &&
+    (!windowsSystemRoot || !win32Path.isAbsolute(windowsSystemRoot))
+  ) {
+    throw new Error("ACPX provider reaper could not resolve the Windows system directory");
+  }
+  const reaperSource = platform === "win32"
+    ? WINDOWS_UNRESPONSIVE_REAPER_SOURCE
+    : UNRESPONSIVE_REAPER_SOURCE;
+  const reaperArguments = [
+    "--eval",
+    reaperSource,
+    String(processGroupId),
+    ...(windowsSystemRoot
+      ? [win32Path.join(windowsSystemRoot, "System32", "taskkill.exe")]
+      : []),
+  ];
+  const reaper = (options.spawnProcess ?? spawnChildProcess)(
     process.execPath,
-    ["--eval", UNRESPONSIVE_REAPER_SOURCE, String(processGroupId)],
+    reaperArguments,
     {
       detached: true,
       env: {},
