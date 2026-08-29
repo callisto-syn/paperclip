@@ -52,6 +52,7 @@ function safeMaterializationTarget(root: string, runtimeName: string): string {
     || runtimeName.includes("\0")
     || segments.some((segment) => /[<>:"|?*\u0000-\u001f\u007f]/u.test(segment))
     || segments.some((segment) => !segment || segment === "." || segment === "..")
+    || segments.some((segment) => !segment.replace(/[ .]+$/u, ""))
     || segments.some(isWin32ReservedPathSegment)
   ) {
     throw new Error("runtime context skill name must be a safe relative path");

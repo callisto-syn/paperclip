@@ -351,6 +351,10 @@ describe("runtime context materialization", () => {
       "group>name",
       "group|name",
       "group\u0001name",
+      "...",
+      ". .",
+      "group/...",
+      "group/. . ",
     ]) {
       await expect(prepareIsolatedCodexHome({
         context: context(assigned, instructions, runtimeName),
