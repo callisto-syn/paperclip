@@ -459,15 +459,23 @@ function createTestToolGatewayService(db: Db, options: ToolGatewayServiceOptions
 function createGatewayRouteApp(
   db: Db,
   gateway = createTestToolGatewayService(db),
-  actor?: Express.Request["actor"],
-  withActorMiddleware = false,
+  actorOrOptions?: Express.Request["actor"] | {
+    actor?: Express.Request["actor"];
+    withActorMiddleware?: boolean;
+  },
 ) {
+  const options = actorOrOptions && "withActorMiddleware" in actorOrOptions
+    ? actorOrOptions
+    : { actor: actorOrOptions };
+  if (options.actor && options.withActorMiddleware) {
+    throw new Error("createGatewayRouteApp accepts either an explicit actor or actorMiddleware, not both");
+  }
   const app = express();
   app.use(express.json());
-  if (withActorMiddleware) app.use(actorMiddleware(db, { deploymentMode: "local_trusted" }));
-  if (actor) {
+  if (options.withActorMiddleware) app.use(actorMiddleware(db, { deploymentMode: "local_trusted" }));
+  if (options.actor) {
     app.use((req, _res, next) => {
-      req.actor = actor;
+      req.actor = options.actor!;
       next();
     });
   }
@@ -640,7 +648,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       expect(token.ownerNote).toBe("QA fixture token");
       expect(token.tokenPrefix).toMatch(/^pcgw_[a-f0-9]{8}$/);
 
-      const app = createGatewayRouteApp(db, gateway, undefined, true);
+      const app = createGatewayRouteApp(db, gateway, { withActorMiddleware: true });
       await request(app)
         .post(`/api/tool-gateway/gateways/${created.id}/mcp`)
         .set("authorization", `Bearer ${tamperToken(token.token)}`)
