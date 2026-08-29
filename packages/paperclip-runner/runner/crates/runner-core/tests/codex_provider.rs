@@ -379,7 +379,7 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
 }
 
 #[test]
-fn delayed_nonzero_provider_exit_does_not_refail_a_completed_turn() {
+fn delayed_nonzero_provider_exit_fails_the_session_without_refailing_the_completed_turn() {
     let directory = temporary_directory("completion-then-nonzero-exit");
     let config = provider_config(
         &directory,
@@ -422,13 +422,13 @@ fn delayed_nonzero_provider_exit_does_not_refail_a_completed_turn() {
     }
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));
-    assert!(!event_types.iter().any(|event| event == "session.failed"));
+    assert!(event_types.iter().any(|event| event == "session.failed"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after nonzero exit"),
     )
     .expect("parse provider state after nonzero exit");
-    assert_eq!(persisted["lifecycle"], "session_open");
+    assert_eq!(persisted["lifecycle"], "provider_exited");
     assert!(persisted.get("completedProviderTurn").is_none());
 
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
