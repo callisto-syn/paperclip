@@ -1610,7 +1610,7 @@ describe("Capability security policy", () => {
     expectTypeOf<CapabilityModelToolSuccess>().not.toMatchTypeOf<CapabilityToolSuccess>();
 
     const secret = "CAPABILITY_SECRET_SENTINEL_f42d4fbc";
-    const { runtime } = await runtimeFor({
+    const { adapter, runtime } = await runtimeFor({
       scenarioGrants: ["secrets:values:read"],
       policy: { allowSecretValueAccess: true },
       resolveSecretValue: (name) => name === "DEPLOY_TOKEN" ? secret : null,
@@ -1628,6 +1628,8 @@ describe("Capability security policy", () => {
     expect(result.authorization.redactions).toEqual([
       { path: "$.value", replacement: "[SECRET_VALUE]" },
     ]);
+    expect(adapter.loadSemanticToolRuntime(OPEN.identity.runId)?.extensions)
+      .toEqual([]);
 
     const inspected = await runtime.invoke({
       operationId: "inspect_operation_result",

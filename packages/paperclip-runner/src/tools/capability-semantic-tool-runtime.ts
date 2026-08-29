@@ -734,7 +734,7 @@ export class CapabilitySemanticToolRuntime {
       executionStarted = this.#markExtensionExecutionStarted(
         key,
         record,
-        preparedExecution ?? undefined,
+        preparedExecution,
       );
     } catch {
       executionStarted = false;
@@ -743,11 +743,7 @@ export class CapabilitySemanticToolRuntime {
       this.#scheduleFailedExtensionCleanup(key, record);
       return false;
     }
-    const execution = (
-      preparedExecution === null
-        ? this.#execute(descriptor, invocation)
-        : Promise.resolve(structuredClone(preparedExecution))
-    ).then((value) => ({
+    const execution = Promise.resolve(structuredClone(preparedExecution)).then((value) => ({
       resultId: value.commandResult?.commandId ?? this.#nextResultId(),
       value,
     }));
@@ -1154,26 +1150,24 @@ export class CapabilitySemanticToolRuntime {
     descriptor: CapabilitySemanticToolDescriptor,
     input: Record<string, CapabilityJsonValue>,
   ): Promise<ExtensionExecution> {
-    const prepared = this.#prepareBuiltInExtensionExecution(descriptor, input);
-    if (prepared !== null) return prepared;
-    switch (descriptor.mockCommandMapping.kind === "mock_extension"
+    const extension = descriptor.mockCommandMapping.kind === "mock_extension"
       ? descriptor.mockCommandMapping.extension
-      : "") {
-      case "secrets.value": {
-        const name = requireString(input.name);
-        const value = await this.#resolveSecretValue?.(name);
-        if (value === null || value === undefined) throw new Error("secret is not available");
-        return { value: { name, value }, commandResult: null, entityRefs: [] };
-      }
-      default:
-        throw new Error("mock extension is not implemented");
+      : "";
+    if (extension === "secrets.value") {
+      // Secret reads are explicitly non-idempotent and never enter the durable
+      // extension lease path, which also keeps secret values out of receipts.
+      const name = requireString(input.name);
+      const value = await this.#resolveSecretValue?.(name);
+      if (value === null || value === undefined) throw new Error("secret is not available");
+      return { value: { name, value }, commandResult: null, entityRefs: [] };
     }
+    return this.#prepareBuiltInExtensionExecution(descriptor, input);
   }
 
   #prepareBuiltInExtensionExecution(
     descriptor: CapabilitySemanticToolDescriptor,
     input: Record<string, CapabilityJsonValue>,
-  ): ExtensionExecution | null {
+  ): ExtensionExecution {
     switch (descriptor.mockCommandMapping.kind === "mock_extension"
       ? descriptor.mockCommandMapping.extension
       : "") {
@@ -1239,7 +1233,7 @@ export class CapabilitySemanticToolRuntime {
           entityRefs: [],
         };
       case "secrets.value":
-        return null;
+        throw new Error("non-idempotent secret reads cannot enter durable extension execution");
       default:
         throw new Error("mock extension is not implemented");
     }
