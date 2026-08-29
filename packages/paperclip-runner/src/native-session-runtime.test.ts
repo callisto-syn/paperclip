@@ -536,11 +536,9 @@ describe("executeNativeSession recovery", () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it("retains an abort-ignoring governed-wait resolver before closing", async () => {
+  it("closes after revoking a governed-wait resolver that never settles", async () => {
     let markResolverStarted = () => {};
     const resolverStarted = new Promise<void>((resolve) => { markResolverStarted = resolve; });
-    let releaseResolver = () => {};
-    const resolverReleased = new Promise<void>((resolve) => { releaseResolver = resolve; });
     let resolverSignal: AbortSignal | undefined;
     const lifecycle: string[] = [];
     const close = vi.fn(async () => { lifecycle.push("closed"); });
@@ -599,31 +597,23 @@ describe("executeNativeSession recovery", () => {
       resolveGovernedWait: ({ signal }) => {
         resolverSignal = signal;
         markResolverStarted();
-        return resolverReleased.then(() => {
-          lifecycle.push("resolver-settled");
-          return null;
-        });
+        return new Promise<never>(() => undefined);
       },
     });
     await resolverStarted;
     await expect(execution).rejects.toThrow("native session timed out");
     expect(resolverSignal?.aborted).toBe(true);
-    expect(close).not.toHaveBeenCalled();
-    releaseResolver();
-    await vi.waitFor(() => expect(close).toHaveBeenCalled());
     expect(close).toHaveBeenCalled();
-    expect(lifecycle).toEqual(["resolver-settled", "closed"]);
+    expect(lifecycle).toEqual(["closed"]);
   });
 
-  it("retains an abort-ignoring governed-wait cancellation before closing", async () => {
+  it("closes after revoking a governed-wait cancellation that never settles", async () => {
     let markCancelStarted = () => {};
     const cancelStarted = new Promise<void>((resolve) => { markCancelStarted = resolve; });
-    let releaseCancel = () => {};
-    const cancelReleased = new Promise<void>((resolve) => { releaseCancel = resolve; });
     const lifecycle: string[] = [];
     const cancel = vi.fn(() => {
       markCancelStarted();
-      return cancelReleased.then(() => { lifecycle.push("cancel-settled"); });
+      return new Promise<never>(() => undefined);
     });
     const close = vi.fn(async () => { lifecycle.push("closed"); });
     const session: NativeSession = {
@@ -684,12 +674,9 @@ describe("executeNativeSession recovery", () => {
     await cancelStarted;
     await expect(execution).rejects.toThrow("native session timed out");
     expect(cancel).toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
-    releaseCancel();
-    await vi.waitFor(() => expect(close).toHaveBeenCalled());
     expect(close).toHaveBeenCalled();
-    expect(lifecycle).toEqual(["cancel-settled", "closed"]);
+    expect(lifecycle).toEqual(["closed"]);
   });
 
   it("rejects a mismatched checkpoint before it mutates control-plane state", async () => {

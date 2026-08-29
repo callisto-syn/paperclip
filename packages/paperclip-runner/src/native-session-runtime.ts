@@ -111,10 +111,9 @@ async function settleBeforeAbort<T>(
   inFlight: Set<Promise<unknown>>,
 ): Promise<T> {
   if (signal.aborted) throw signal.reason ?? new Error("native event consumption aborted");
-  // Promise work cannot be forcibly cancelled in JavaScript. Keep ownership
-  // of the operation after abort and join it before session.close(); the signal
-  // provides prompt cooperative cancellation, while joining prevents an
-  // abort-ignoring callback from publishing stale state after teardown.
+  // Promise work cannot be forcibly cancelled in JavaScript. Keep it observed
+  // after abort; the signal is the hard revocation boundary for any mutation
+  // authority held by the embedding callback.
   const pending = operation();
   inFlight.add(pending);
   try {
@@ -130,7 +129,7 @@ async function consumeTurn(
   timeoutMs: number,
   runtimeInputLiveWindowMs: number,
   closeFailedSession: () => Promise<void>,
-  retainFailedCleanup: (cleanup: Promise<void>, ownsSessionClose: boolean) => void,
+  retainFailedCleanup: (cleanup: Promise<void>) => void,
   resolveGovernedWait?: ExecuteNativeSessionOptions["resolveGovernedWait"],
   externalSignal?: AbortSignal,
 ) {
@@ -267,9 +266,9 @@ async function consumeTurn(
     stopConsumer = true;
     appendAbort.abort(error);
     // Governed callbacks carry control-plane mutation authority. Give them a
-    // bounded cooperative-cancellation window. If an embedder ignores abort,
-    // transfer ownership to an observed cleanup chain instead of either
-    // defeating the execution timeout or closing underneath a live mutation.
+    // bounded cooperative-cancellation window. Once it expires, the aborted
+    // signal is authoritative: retain observation of the broken callback, but
+    // do not let it keep a provider session allocated indefinitely.
     if (governedOperations.size > 0) {
       const governedSettlement = Promise.allSettled([...governedOperations]);
       if (!(await settlesWithin(governedSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
@@ -297,16 +296,15 @@ async function consumeTurn(
       consumer,
     ]);
     if (appendAbort.signal.aborted) {
+      await closeFailedSession();
       if (deferredGovernedSettlement !== null) {
-        retainFailedCleanup((async () => {
-          await deferredGovernedSettlement;
-          await closeFailedSession();
-          await teardownSettlement;
-        })(), true);
+        retainFailedCleanup(Promise.allSettled([
+          deferredGovernedSettlement,
+          teardownSettlement,
+        ]).then(() => undefined));
       } else {
-        await closeFailedSession();
         if (!(await settlesWithin(teardownSettlement, FAILED_OPERATION_SETTLEMENT_GRACE_MS))) {
-          retainFailedCleanup(teardownSettlement.then(() => undefined), false);
+          retainFailedCleanup(teardownSettlement.then(() => undefined));
         }
       }
     } else {
@@ -478,9 +476,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     return sessionClosePromise;
   };
   let executionSucceeded = false;
-  let failedCleanupOwnsSessionClose = false;
-  const retainFailedCleanup = (cleanup: Promise<void>, ownsSessionClose: boolean) => {
-    failedCleanupOwnsSessionClose ||= ownsSessionClose;
+  const retainFailedCleanup = (cleanup: Promise<void>) => {
     // Retain and observe cleanup after the caller-facing execution settles.
     // The chain itself owns ordering; observing it prevents a late rejection
     // from becoming process-fatal without granting it mutation authority.
@@ -709,7 +705,7 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
     executionSucceeded = true;
     return executionResult;
   } finally {
-    if ((!options.keepSessionOpen || !executionSucceeded) && !failedCleanupOwnsSessionClose) {
+    if (!options.keepSessionOpen || !executionSucceeded) {
       await closeSession();
     }
   }
