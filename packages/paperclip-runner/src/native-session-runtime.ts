@@ -447,6 +447,7 @@ async function replayCheckpointedTurnTerminal(input: {
   runId: string;
   sourceInstanceId: string;
   priorTerminalTurnIds: readonly string[];
+  expectedTurnId?: string | null;
 }): Promise<{ terminal: PrpEvent; hasPriorResultProposal: boolean } | null> {
   let afterSourceSeq = 0;
   const terminals: PrpEvent[] = [];
@@ -487,7 +488,11 @@ async function replayCheckpointedTurnTerminal(input: {
       if (
         event.turnId &&
         isTurnTerminal(event) &&
-        !priorTerminalTurnIds.has(event.turnId)
+        (
+          input.expectedTurnId !== undefined && input.expectedTurnId !== null
+            ? event.turnId === input.expectedTurnId
+            : !priorTerminalTurnIds.has(event.turnId)
+        )
       ) {
         terminals.push(structuredClone(event));
       }
@@ -744,6 +749,10 @@ export async function executeNativeSession(options: ExecuteNativeSessionOptions)
             sourceInstanceId: options.runnerInstanceId,
             priorTerminalTurnIds: (persistedSession?.terminalTurns ?? [])
               .map((terminal) => terminal.turnId),
+            expectedTurnId:
+              persistedSession?.dispositionOnlyRecoveryTurnId
+              ?? recoveredSnapshot.dispositionOnlyRecoveryTurnId
+              ?? null,
           })
         : null;
       // The consumed marker proves only that the recovery turn was submitted,

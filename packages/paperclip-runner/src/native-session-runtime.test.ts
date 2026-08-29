@@ -1774,6 +1774,107 @@ describe("executeNativeSession recovery", () => {
     ]);
   });
 
+  it("replays the bound disposition terminal after its fingerprint was checkpointed", async () => {
+    const workProposal: PrpEvent = {
+      ...runnerEvent(1, "run.result.proposed", result),
+      turnId: "turn-work",
+    };
+    const workTerminal: PrpEvent = {
+      ...runnerEvent(2, "turn.completed"),
+      turnId: "turn-work",
+    };
+    const dispositionTerminal: PrpEvent = {
+      ...runnerEvent(3, "turn.completed"),
+      turnId: "turn-disposition",
+    };
+    const checkpoint: PersistedNativeSession = {
+      backendKind: "mock",
+      sessionId: "driver-recovery",
+      identity,
+      providerSessionId: "provider-recovery",
+      cursor: "3",
+      activeTurnId: null,
+      terminalTurns: [
+        { turnId: "turn-work", fingerprint: "work-terminal" },
+        { turnId: "turn-disposition", fingerprint: "disposition-terminal" },
+      ],
+      dispositionOnlyRecoveryConsumed: true,
+      dispositionOnlyRecoveryTurnId: "turn-disposition",
+      pendingRuntimeRequests: [],
+      lineage: [],
+    };
+    const startTurn = vi.fn(async () => ({ turnId: "unexpected-turn" }));
+    const session: NativeSession = {
+      identity: () => identity,
+      async capabilities() {
+        return { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true };
+      },
+      async *events() {
+        throw new Error("a checkpointed terminal must not consume the closed provider stream");
+      },
+      startTurn,
+      async result() { return null; },
+      async snapshot() { return structuredClone(checkpoint); },
+      async close() {},
+    };
+    const backend: NativeSessionBackend = {
+      async descriptor() {
+        return {
+          kind: "mock",
+          name: "recovery-backend",
+          version: "1",
+          capabilities: { resume: true, typedEvents: true, steering: false, interruption: true, structuredResult: true },
+        };
+      },
+      async openSession() { throw new Error("must recover the provider session"); },
+      async recoverSession() { return { recovered: true, session }; },
+    };
+    const bySource = new Map<string, PrpEvent[]>([
+      ["runner-recovery", [workProposal, workTerminal, dispositionTerminal]],
+    ]);
+    const completeRun = vi.fn(async () => undefined);
+    const port: ControlPlanePort = {
+      async openRun() {},
+      async loadSessionCheckpoint() { return structuredClone(checkpoint); },
+      async checkpointSession() {},
+      async appendEvent(event) {
+        const list = bySource.get(event.sourceInstanceId) ?? [];
+        list.push(structuredClone(event));
+        bySource.set(event.sourceInstanceId, list);
+        return {
+          cursor: list.length,
+          highestContiguousSourceSeq: highestContiguous(list),
+          disposition: "committed",
+        };
+      },
+      async replayEvents(replay) {
+        const list = bySource.get(replay.sourceInstanceId) ?? [];
+        return {
+          events: structuredClone(list.filter((event) => event.sourceSeq > replay.afterSourceSeq)),
+          highestContiguousSourceSeq: highestContiguous(list),
+        };
+      },
+      completeRun,
+    };
+
+    await expect(executeNativeSession({
+      input,
+      backend,
+      controlPlane: port,
+      runnerInstanceId: "runner-recovery",
+      controlPlaneInstanceId: "control-recovery",
+      resolveMissingResult: async ({ terminalEvent }) => {
+        expect(terminalEvent).toEqual(dispositionTerminal);
+        return result;
+      },
+    })).resolves.toMatchObject({
+      result,
+      turnId: "turn-disposition",
+    });
+    expect(startTurn).not.toHaveBeenCalled();
+    expect(completeRun).toHaveBeenCalledOnce();
+  });
+
   it("recovers a completed checkpoint and appends only a missing control terminal fact", async () => {
     const checkpoint: PersistedNativeSession = {
       backendKind: "mock",
