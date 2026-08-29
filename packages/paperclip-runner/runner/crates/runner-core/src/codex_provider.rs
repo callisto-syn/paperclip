@@ -268,6 +268,14 @@ impl CodexProvider {
         self.active_provider_turn_id.as_deref()
     }
 
+    pub fn restore_completed_turn_authority(&mut self, authoritative: bool) {
+        self.completed_turn_authoritative = authoritative;
+        // A freshly resumed, already-completed thread may shut down cleanly
+        // without emitting the old terminal again. This never blesses a
+        // nonzero exit, and start_turn revokes both flags.
+        self.expected_shutdown = authoritative;
+    }
+
     pub fn start_turn(&mut self, message: &str, cwd: &str) -> Result<Value, LocalRunnerError> {
         if self.active_provider_turn_id.is_some() {
             return Err(LocalRunnerError::invalid(
@@ -373,7 +381,8 @@ impl CodexProvider {
                         // for that turn, but it does not make a later nonzero
                         // process exit healthy. Preserve the completed turn and
                         // independently fail the reusable provider session.
-                        success: exit.success && self.expected_shutdown,
+                        success: exit.success
+                            && (self.expected_shutdown || self.completed_turn_authoritative),
                         completed_turn_authoritative: self.completed_turn_authoritative
                             && self.active_provider_turn_id.is_none(),
                     }))

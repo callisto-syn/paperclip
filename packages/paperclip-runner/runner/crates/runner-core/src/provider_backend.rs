@@ -372,10 +372,14 @@ impl CodexCommandExecutor {
             DurableRunnerError::invalid("recoverable Codex state omitted its thread id")
         })?;
         let previous_active_turn_id = state.active_provider_turn_id.clone();
-        let provider = CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
-            DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
-        })?;
+        let mut provider =
+            CodexProvider::start(&state.config, Some(&thread_id)).map_err(|error| {
+                DurableRunnerError::invalid(format!("failed to resume Codex provider: {error}"))
+            })?;
         let recovered_active_turn_id = provider.active_provider_turn_id().map(str::to_owned);
+        provider.restore_completed_turn_authority(
+            state.completed_turn_authoritative && recovered_active_turn_id.is_none(),
+        );
         self.provider = Some(provider);
         if provider_had_exited || recovered_active_turn_id != previous_active_turn_id {
             let state = self
@@ -503,10 +507,13 @@ impl CodexCommandExecutor {
                     "Codex provider session is closed",
                 ));
             }
-            let provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
+            let mut provider = CodexProvider::start(&state.config, state.thread_id.as_deref())
                 .map_err(|error| {
                     DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
                 })?;
+            provider.restore_completed_turn_authority(
+                state.completed_turn_authoritative && provider.active_provider_turn_id().is_none(),
+            );
             self.provider = Some(provider);
         }
         self.provider
@@ -847,34 +854,21 @@ impl CodexCommandExecutor {
                             .as_mut()
                             .expect("Codex state remains available while polling");
                         state.lifecycle = "provider_exited".to_owned();
-                        // The dead process cannot be reused, but a provider
-                        // exit that follows an acknowledged turn terminal must
-                        // not rewrite that authoritative turn as a session
-                        // failure. A later start still fails closed through the
-                        // provider_exited lifecycle.
-                        if !completed_turn_authoritative {
-                            state.push_event(NormalizedProviderEvent {
-                                event_type: "session.failed".to_owned(),
-                                priority: EventPriority::P0,
-                                payload: json!({
-                                    "provider": "codex",
-                                    "code": "provider_exited",
-                                    "exitCode": exit_code,
-                                    "expected": success,
-                                }),
-                            })?;
-                        } else {
-                            state.push_event(NormalizedProviderEvent {
-                                event_type: "harness.diagnostic".to_owned(),
-                                priority: EventPriority::P0,
-                                payload: json!({
-                                    "code": "provider_exited_after_terminal",
-                                    "provider": "codex",
-                                    "exitCode": exit_code,
-                                    "message": "Codex exited after an authoritative turn terminal; the session cannot be reused.",
-                                }),
-                            })?;
-                        }
+                        // Preserve an already-recorded turn terminal, but fail
+                        // the reusable session for every unexpected or nonzero
+                        // process exit. Completion authority only classifies a
+                        // clean exit from a freshly resumed completed thread.
+                        state.push_event(NormalizedProviderEvent {
+                            event_type: "session.failed".to_owned(),
+                            priority: EventPriority::P0,
+                            payload: json!({
+                                "provider": "codex",
+                                "code": "provider_exited",
+                                "exitCode": exit_code,
+                                "expected": success,
+                                "previousTurnCompleted": completed_turn_authoritative,
+                            }),
+                        })?;
                     }
                     self.save_state()?;
                     break;

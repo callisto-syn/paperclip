@@ -322,7 +322,10 @@ fn codex_completion_survives_failed_pending_request_cancellation() {
 #[test]
 fn clean_provider_exit_does_not_refail_a_completed_turn() {
     let directory = temporary_directory("completion-then-clean-exit");
-    let config = provider_config(&directory, &["--exit-after-turn-completion"]);
+    let config = provider_config(
+        &directory,
+        &["--exit-after-turn-completion", "--exit-after-thread-read"],
+    );
     let mut executor = CodexCommandExecutor::new(&directory);
     executor
         .execute(&command(
@@ -375,6 +378,14 @@ fn clean_provider_exit_does_not_refail_a_completed_turn() {
     assert_eq!(persisted["lifecycle"], "session_open");
     assert!(persisted["activeProviderTurnId"].is_null());
 
+    drop(executor);
+    let mut recovered = CodexCommandExecutor::new(&directory);
+    let recovered_events = poll_and_ack(&mut recovered)
+        .expect("poll clean exit from a freshly resumed completed thread");
+    assert!(!recovered_events
+        .iter()
+        .any(|event| event.event_type == "session.failed"));
+
     fs::remove_dir_all(directory).expect("remove Codex integration-test directory");
 }
 
@@ -423,7 +434,7 @@ fn idle_resumed_provider_crash_fails_the_new_session_without_refailing_the_old_t
     }
 
     assert!(event_types.iter().any(|event| event == "turn.completed"));
-    assert!(!event_types.iter().any(|event| event == "session.failed"));
+    assert!(event_types.iter().any(|event| event == "session.failed"));
     let persisted: Value = serde_json::from_slice(
         &fs::read(directory.join("codex-provider-state.json"))
             .expect("read provider state after nonzero exit"),
